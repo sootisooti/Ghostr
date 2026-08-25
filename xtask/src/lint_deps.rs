@@ -67,6 +67,11 @@ const RULES: &[Rule] = &[
             "sha2",
             "ciborium",
             "hex",
+            // Dev-only, and named here rather than exempting dev-dependencies
+            // as a category. `cargo tree -p ghostr-core` includes them, which
+            // is the stated test for this rule — a blanket exemption would let
+            // `reqwest` in through the same door.
+            "proptest",
         ]),
         forbidden: IO_CRATES,
         reason: "ARCHITECTURE 3.1: core is a leaf with no I/O",
