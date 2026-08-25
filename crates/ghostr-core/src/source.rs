@@ -73,12 +73,18 @@ pub enum SourceKind {
         /// Glob selecting files within the root.
         glob: String,
     },
-    /// Entries typed directly into Ghostr.
+    /// Entries typed directly into Ghostr, or imported into its journal.
+    ///
+    /// Carries no location because it has none: journal entries live in the
+    /// encrypted store from the moment they are made. Ghostr never writes a
+    /// plaintext journal file (I1).
     Journal,
     /// A structured log: places, people, habits, health.
     StructuredLog {
         /// Which log schema the rows conform to.
         schema: LogSchema,
+        /// The JSONL file, or a directory of them.
+        path: String,
     },
 }
 

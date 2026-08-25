@@ -223,6 +223,84 @@ pub const fn kind() -> SourceKindTag {
     SourceKindTag::MarkdownVault
 }
 
+/// The markdown vault source, as an [`IngestAdapter`].
+///
+/// Holds the clock and the entropy source rather than reaching for them: nothing
+/// outside the composition root calls `SystemTime::now` or `OsRng`, which is what
+/// makes an ingest run reproducible under a fake clock (ARCHITECTURE §4.7).
+pub struct MarkdownAdapter {
+    clock: std::sync::Arc<dyn Clock>,
+    rng: std::sync::Arc<dyn Rng>,
+}
+
+impl core::fmt::Debug for MarkdownAdapter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("MarkdownAdapter")
+    }
+}
+
+impl MarkdownAdapter {
+    /// Builds the adapter over an injected clock and entropy source.
+    #[must_use]
+    pub fn new(clock: std::sync::Arc<dyn Clock>, rng: std::sync::Arc<dyn Rng>) -> Self {
+        Self { clock, rng }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::adapter::IngestAdapter for MarkdownAdapter {
+    fn kind(&self) -> SourceKindTag {
+        SourceKindTag::MarkdownVault
+    }
+
+    async fn pull(
+        &self,
+        source: &ghostr_core::source::Source,
+        cursor: ghostr_core::source::SyncCursor,
+    ) -> crate::Result<crate::adapter::IngestBatch> {
+        let ghostr_core::source::SourceKind::MarkdownVault { root, .. } = &source.kind else {
+            return Err(crate::Error::InvalidCursor { id: source.id });
+        };
+        let notes = scan_vault(Path::new(root), source.id)?;
+        let memories = notes
+            .iter()
+            .map(|n| to_memory(n, source.id, self.clock.as_ref(), self.rng.as_ref()))
+            .collect();
+        Ok(crate::adapter::IngestBatch {
+            memories,
+            // A vault is scanned whole: there is no position to resume from, and
+            // re-ingest is a no-op because an unchanged note keeps its digest.
+            cursor,
+            has_more: false,
+            duplicates_skipped: 0,
+            unparseable_skipped: 0,
+        })
+    }
+
+    fn default_trust(&self) -> TrustLevel {
+        default_trust()
+    }
+
+    fn default_sensitivity(&self) -> Sensitivity {
+        Sensitivity::Private
+    }
+
+    fn touches_network(&self) -> bool {
+        false
+    }
+
+    async fn validate(&self, source: &ghostr_core::source::Source) -> crate::Result<()> {
+        let ghostr_core::source::SourceKind::MarkdownVault { root, .. } = &source.kind else {
+            return Err(crate::Error::InvalidCursor { id: source.id });
+        };
+        if Path::new(root).is_dir() {
+            Ok(())
+        } else {
+            Err(crate::Error::Unreachable { id: source.id })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

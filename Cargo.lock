@@ -666,8 +666,10 @@ dependencies = [
  "ghostr-store",
  "pulldown-cmark",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "walkdir",
 ]
 

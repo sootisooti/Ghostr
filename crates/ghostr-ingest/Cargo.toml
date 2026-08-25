@@ -15,6 +15,9 @@ serde = { workspace = true }
 chrono = { workspace = true }
 walkdir = { workspace = true }
 pulldown-cmark = { workspace = true }
+# Structured-log exports are JSON in practice. Already in the tree via
+# ghostr-llm, so this adds no new supply-chain surface (THREAT_MODEL §T8).
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
@@ -22,13 +25,13 @@ async-trait = { workspace = true }
 # shed their dependencies with them. The default set is the offline path: a
 # stock build ingests local files and nothing else.
 [features]
-default = ["markdown", "journal"]
+default = ["markdown", "journal", "structlog"]
 ## A directory of markdown notes.
 markdown = []
 ## Entries typed directly into Ghostr.
 journal = []
 ## Structured logs: places, people, habits, health.
-structlog = []
+structlog = ["dep:serde_json"]
 ## A nostr feed. THIRD-PARTY CONTENT — see THREAT_MODEL §T7.
 nostr = []
 ## RSS and Atom. THIRD-PARTY CONTENT.
@@ -39,6 +42,7 @@ archive = []
 [dev-dependencies]
 tempfile = { workspace = true }
 chrono-tz = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

@@ -181,7 +181,7 @@ pub enum SourceKind {
     SocialArchive { format: ArchiveFormat, path: PathBuf },   // Twitter/X, Mastodon, Reddit GDPR exports
     MarkdownVault { root: PathBuf, glob: String },
     Journal,                                                   // typed directly into Ghostr
-    StructuredLog { schema: LogSchema },                       // places, people, habits, health
+    StructuredLog { schema: LogSchema, path: PathBuf },        // places, people, habits, health
 }
 
 pub enum TrustLevel {
