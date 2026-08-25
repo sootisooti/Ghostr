@@ -1,0 +1,245 @@
+# Ghostr — Roadmap
+
+**Status:** Draft v0.1 · M0 not started
+
+Five milestones. The rule for all of them: **each one ships something a person
+would actually use, on its own, with no promise of the next.** If a milestone's
+only value is that it unblocks the following one, it's a task list, not a
+milestone, and it gets merged into its neighbour.
+
+No dates. Ordering and exit criteria only.
+
+| | Milestone | Ships | LLM? | Network? |
+| --- | --- | --- | --- | --- |
+| **M0** | Vault & Chain | Encrypted journal with Bitcoin-anchored, verifiable history | No | OTS only |
+| **M1** | Memoria | Daily structured recap from your own notes | Yes (local) | OTS only |
+| **M2** | Ghost & Quests | The loop: persona, quests, fidelity score | Yes | OTS only |
+| **M3** | Nostr Surface | Publishing, sync, feed ingest, public attestation | Yes | Relays |
+| **M4** | Fidelity & Federation | Multi-device, third-party verification, richer sources, UI | Yes | Relays |
+
+---
+
+## M0 — Vault & Chain
+
+> **Ships:** an encrypted, local-first journal whose history cannot be silently
+> altered, with a Bitcoin timestamp proving each day existed.
+
+Genuinely useful with zero AI: anyone who needs a tamper-evident personal log —
+a researcher's lab notebook, a founder's decision journal, someone documenting
+harassment — can use this and stop here.
+
+**Scope**
+- Workspace skeleton: `core`, `crypto`, `store`, `anchor`, `engine`, `cli`,
+  `testkit`. CI, `rustfmt`, `clippy`, `cargo-deny`, MSRV pin.
+- `ghostr-core`: `Memory`, `Footage`, `Sensitivity`, ids, canonical CBOR,
+  tagged hashing, Merkle tree.
+- `ghostr-crypto`: NIP-06 derivation, NIP-19 encoding, Argon2id KEK, keystore
+  (file + OS keychain), `Signer` for the local key.
+- `ghostr-store`: encrypted SQLite, per-row AAD, append-only memory table,
+  blob store, migrations.
+- `ghostr-anchor`: the commitment chain (pure), OTS client, upgrade queue,
+  `.ots` persistence, verification against a block header source.
+- CLI: `init`, `unlock`, `note`, `import <markdown>`, `seal`, `log`, `verify`,
+  `export`.
+- **Footage at M0 is mechanical** — window, memory ids, commitment, `sealed_at`.
+  No highlights, no mood, no threads. Those need a model and arrive in M1. The
+  chain is complete and correct from day one, which is the point: getting the
+  hashing scheme wrong later means a migration nobody can perform.
+
+**Exit criteria**
+- [ ] `gst verify --from genesis` passes on a 30-day synthetic chain and names the
+      exact `seq` on any tampering.
+- [ ] Golden hash vectors committed; changing serialization fails a test loudly.
+- [ ] A test asserts no plaintext memory content appears in the raw DB bytes.
+- [ ] A day sealed today is OTS-confirmed within 24h on mainnet.
+- [ ] Missed cutoff (machine asleep) seals on wake; the chain stays gapless.
+- [ ] Crypto-shred a memory; the chain still verifies (SPEC Q6).
+- [ ] NIP-06/19 test vectors from the NIPs repo pass verbatim.
+
+**Explicitly not in M0:** any LLM, any relay, persona, quests, entities.
+
+---
+
+## M1 — Memoria
+
+> **Ships:** a daily structured recap compiled from your own notes, by a model
+> running on your machine, that never phones anywhere.
+
+Stands alone as a private daily-review tool. Still no ghost.
+
+**Scope**
+- `ghostr-llm`: `LanguageModel` + `Embedder` traits, `ModelDescriptor` with
+  locality, prompt assembly, structured output with schema validation.
+- **The egress gate lands here, before any remote provider exists.** Policy,
+  `EgressLog`, redaction, pseudonymization, `gst egress log`. Building the gate
+  after the first provider is how gates get bypassed.
+- One local provider (Ollama-compatible) and one remote (opt-in, off by default),
+  so the trait is proven against two shapes.
+- `ghostr-ingest` with `markdown`, `journal`, `structlog` adapters.
+- `ghostr-memoria`: the six-stage pipeline (SPEC §6) — highlights, `PersonBeat`s,
+  `MoodReading`, threads with stable `ThreadId`s, `unresolved`, amendments.
+- Local entity resolution + `sqlite-vec` index. Local embeddings only.
+- CLI: `source add/list/sync`, `recap [date]`, `thread list`, `egress log`.
+
+**Exit criteria**
+- [ ] Full pipeline runs offline with an ~8B-class local model, no network except
+      OTS.
+- [ ] Every highlight cites ≥ 1 `memory_id`; validation drops those that don't.
+- [ ] A thread opened on day 3 and resolved on day 9 shows as a closed loop.
+- [ ] `Sensitivity::Secret` is denied to every remote provider under every policy
+      configuration — table test, all branches.
+- [ ] `gst egress log` shows a complete record after a remote run; a
+      `--dry-run --remote` prints exactly what *would* leave, before it leaves.
+- [ ] Late-arriving memories become amendments, never retro-edits (SPEC I2).
+- [ ] Snapshot tests on prompts; a prompt change shows as a reviewable diff.
+
+**Not in M1:** persona, quests, relays.
+
+---
+
+## M2 — Ghost & Quests
+
+> **Ships:** the actual product. A ghost that models you, asks you to check it,
+> and reports a score you can't fake.
+
+**Scope**
+- `ghostr-persona`: distillation from footage, all six facets, versioning,
+  `PersonaDiff`, retrieval with a token budget.
+- `ghostr-quests`: generation across all six `QuestKind`s, priority selection
+  (SPEC §4.2), answer commitments (I6), holdout marking, decoys, verdict intake,
+  `PersonaDelta` queue.
+- `Scorer`: per-quest scoring, Wilson intervals, Brier + ECE calibration,
+  `IntegritySignals`, convergence evaluation.
+- Quest UI in the CLI — a fast keyboard loop, because a daily ritual that takes
+  90 seconds gets done and one that takes 5 minutes does not.
+- CLI: `quest`, `fidelity [--facet]`, `persona show/diff/history`, `ask` (talk to
+  the ghost).
+
+**Exit criteria**
+- [ ] 30-day run on a synthetic corpus produces a rising fidelity score with a
+      correctly narrowing CI.
+- [ ] Held-out corrections provably never reach distillation — an integration
+      test asserts it, including via verdict-derived memories (SPEC Q18).
+- [ ] Answer commitments verify on every verdict; a mismatch rejects the verdict.
+- [ ] Decoys are detected and `decoy_confirm_rate` is surfaced beside the score.
+- [ ] Local-model quality benchmarked per `QuestKind`; the floor is documented
+      and the pipeline degrades by kind rather than emitting bad quests (Q7).
+- [ ] `persona diff` between two versions is readable by someone who isn't a
+      developer.
+- [ ] Quest sets and verdicts are committed into the day's Merkle tree and
+      anchored.
+- [ ] Median time to answer 5 quests, measured on real users: under 2 minutes.
+
+**Not in M2:** relays, multi-device, publishing.
+
+---
+
+## M3 — Nostr Surface
+
+> **Ships:** your ghost on nostr — encrypted backup and sync across your devices,
+> your feed as a source, and an optional public attestation.
+
+**Scope**
+- `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with
+  the NIP-78 (30078) mirror, NIP-65 relay lists, NIP-59 gift wrap (opt-in),
+  NIP-46 remote signer.
+- Ghost keypair (account `1'`) + signed `GhostManifest`; revocation flow.
+- Encrypted sync/backup: footage, persona versions, quests to relays. Single
+  sealing device named in the manifest (SPEC Q10); others are read/ingest
+  replicas.
+- Nostr feed and RSS ingest adapters. **`TrustLevel::ThirdParty` enforcement is a
+  hard gate here** — this is the milestone where hostile text first enters the
+  corpus (THREAT_MODEL §T7).
+- Optional `FidelityAttestation` publishing (31786), signed and chain-bound.
+- Optional ghost publishing (kind 1) with mandatory disclosure tags (SPEC §9.3),
+  off by default, explicit per-scope opt-in.
+- Padding, jitter, and a Tor/SOCKS5 option for relay and calendar traffic.
+- CLI: `relay add/list`, `sync`, `ghost create/revoke`, `publish attestation`,
+  `restore`.
+
+**Exit criteria**
+- [ ] Full restore from relays on a clean machine, seed only.
+- [ ] Two devices, one sealer: the replica cannot advance `seq`; a forced attempt
+      is rejected by the store's uniqueness constraint.
+- [ ] No plaintext identity data on any relay — asserted by a test that inspects
+      published event bodies (SPEC I9).
+- [ ] Every ghost-authored event carries disclosure tags; a test proves an event
+      without them cannot be constructed.
+- [ ] Injected instructions in an ingested nostr note do not alter footage or
+      produce a persona claim — adversarial corpus fixture in CI.
+- [ ] Ciphertext lengths are bucketed; publish times jittered.
+- [ ] Anchor receipts default to local-only; publishing requires an explicit flag
+      and uses the anchor key (SPEC Q5).
+- [ ] The kind block is checked against the live registry; NIP submitted.
+
+**Not in M3:** GUI, third-party verifier tooling.
+
+---
+
+## M4 — Fidelity & Federation
+
+> **Ships:** a ghost anyone can independently verify, fed by everything you've
+> ever posted, with a UI your non-technical friend can use.
+
+**Scope**
+- **Standalone verifier** — a small binary/library that validates an exported
+  bundle (chain, inclusion proofs, OTS, manifest signature, recomputed score)
+  with no Ghostr install and no trust in our client. Until this exists,
+  "provably his ghost" rests on trusting our binary; this is the milestone that
+  removes that.
+- Social archive adapters: X/Twitter, Mastodon, Reddit exports, generic
+  GDPR-dump ingest with dated backfill.
+- Richer structured logs: places, health, media, habits.
+- Calibration work: convergence thresholds re-derived from real cohort data
+  (SPEC Q9), per-facet convergence reporting, long-horizon `Prediction` scoring.
+- "Ghost speaks" mode with guardrails: `Boundary` facet enforcement, refusal on
+  low-confidence topics, always-on disclosure.
+- Tauri desktop shell over the same local API the CLI uses.
+- Direct OP_RETURN anchoring as an opt-in alternative to OTS (SPEC Q4).
+- Adapter authoring guide + `ghostr-testkit` conformance suite, so third-party
+  sources are contributable without touching the core.
+
+**Exit criteria**
+- [ ] A third party verifies a published attestation end to end using only the
+      standalone verifier and a Bitcoin header source.
+- [ ] A 5-year X archive backfills into a coherent chain of dated footage.
+- [ ] Convergence thresholds updated from real data, with the analysis published.
+- [ ] "Ghost speaks" refuses out-of-distribution and boundary-violating prompts
+      more often than it confabulates — measured, not asserted.
+- [ ] A contributor ships an ingest adapter without modifying any existing crate.
+- [ ] Desktop shell reaches feature parity with the CLI for the daily loop.
+
+---
+
+## Cross-cutting, every milestone
+
+Not optional, not deferred to "polish":
+
+- **THREAT_MODEL.md updated in the same PR** as any change to its subject matter.
+  A stale threat model on a privacy product is a lie with a timestamp.
+- **SPEC.md updated in the same PR** as any behaviour change. Docs are the source
+  of truth here, not a description of it.
+- **No network calls in tests.** Real relay/OTS interaction is `#[ignore]`d and
+  run nightly.
+- **Open Questions get resolved as they're settled** — the answer moves into the
+  body of the spec and the question is struck, with a note saying what was
+  decided and why.
+- **Migrations are written before the schema change that needs them**, and a test
+  migrates a fixture DB from every prior version.
+
+---
+
+## Deliberately unscheduled
+
+Not "later" as a soft no — genuinely undecided, and listed so nobody assumes
+they're coming.
+
+- **Death, succession, inheritance** (SPEC Q12). The obvious endgame for a
+  digital ghost, and it needs its own spec and its own threat model, largely
+  about the consent of people in the corpus who are still alive.
+- **Fine-tuning / LoRA on the corpus.** Would break diffability, auditability,
+  and deletability — the three properties the persona model exists to have.
+- **Mobile.** The store and engine are portable; the daily loop wants a phone.
+  No plan yet.
+- **Multi-user or shared ghosts.** Different product.
+- **Voice / video cloning.** Different consent problem entirely.
