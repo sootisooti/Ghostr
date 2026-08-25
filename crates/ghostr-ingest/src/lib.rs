@@ -45,6 +45,7 @@
 
 pub mod adapter;
 pub mod error;
+pub mod markdown;
 pub mod registry;
 
 pub use adapter::{IngestAdapter, IngestBatch};

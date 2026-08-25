@@ -49,6 +49,8 @@ pub mod cutoff;
 pub mod error;
 pub mod extract;
 pub mod pipeline;
+pub mod summarize;
 
 pub use error::{Error, Result};
 pub use pipeline::{DraftFootage, MemoriaPipeline};
+pub use summarize::{NaiveSummarizer, Summarizer};

@@ -12,6 +12,9 @@ authors.workspace = true
 ghostr-core = { workspace = true }
 ghostr-store = { workspace = true }
 serde = { workspace = true }
+chrono = { workspace = true }
+walkdir = { workspace = true }
+pulldown-cmark = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
@@ -32,6 +35,10 @@ nostr = []
 rss = []
 ## Exported social archives.
 archive = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+chrono-tz = { workspace = true }
 
 [lints]
 workspace = true
