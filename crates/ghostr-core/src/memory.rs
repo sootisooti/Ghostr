@@ -54,7 +54,14 @@ impl core::fmt::Debug for Memory {
     /// and log line that ever formats a `Memory`, which is exactly the leak the
     /// invariant exists to prevent.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print id, kind, sensitivity, entity count and body length — never the body")
+        f.debug_struct("Memory")
+            .field("id", &self.id)
+            .field("source_id", &self.source_id)
+            .field("kind", &self.kind)
+            .field("sensitivity", &self.sensitivity)
+            .field("entities", &self.entities.len())
+            .field("body", &self.body)
+            .finish_non_exhaustive()
     }
 }
 
@@ -98,7 +105,11 @@ pub struct MemoryBody {
 impl core::fmt::Debug for MemoryBody {
     /// Prints lengths only (SPEC I8).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print text length and redaction count — never the text")
+        f.debug_struct("MemoryBody")
+            .field("text_len", &self.text.len())
+            .field("structured", &self.structured)
+            .field("redactions", &self.redactions.len())
+            .finish()
     }
 }
 
@@ -123,7 +134,8 @@ impl StructuredPayload {
     /// not canonical, so a non-canonical payload cannot enter the corpus and be
     /// discovered later at seal time.
     pub fn new(cbor: Vec<u8>) -> crate::Result<Self> {
-        todo!("verify the bytes are canonical CBOR before wrapping")
+        crate::canonical::verify_canonical(&cbor)?;
+        Ok(Self(cbor))
     }
 
     /// The raw canonical CBOR.
@@ -139,14 +151,14 @@ impl StructuredPayload {
     /// Returns [`Error::Canonical`](crate::Error::Canonical) if the payload does
     /// not decode into `T`.
     pub fn decode<T: serde::de::DeserializeOwned>(&self) -> crate::Result<T> {
-        todo!("decode via crate::canonical::from_canonical_cbor")
+        crate::canonical::from_canonical_cbor(&self.0)
     }
 }
 
 impl core::fmt::Debug for StructuredPayload {
     /// Prints the byte length only (SPEC I8).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print the payload length — never the payload")
+        write!(f, "StructuredPayload({} bytes)", self.0.len())
     }
 }
 
@@ -184,4 +196,92 @@ pub struct Provenance {
     /// Lets a re-ingest detect that an upstream record changed under us, which
     /// is a fact worth recording rather than silently absorbing.
     pub raw_hash: crate::hash::Hash32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::{Tag, tagged_hash};
+    use crate::sensitivity::Sensitivity;
+    use crate::time::Timestamp;
+
+    fn memory(text: &str) -> Memory {
+        let source = SourceId::new(1, [0u8; 10]);
+        Memory {
+            id: MemoryId::new(1, [1u8; 10]),
+            source_id: source,
+            occurred_at: Some(Timestamp::new(0, 0)),
+            ingested_at: Timestamp::new(0, 0),
+            kind: MemoryKind::Utterance,
+            body: MemoryBody {
+                text: text.to_owned(),
+                structured: None,
+                redactions: Vec::new(),
+            },
+            entities: Vec::new(),
+            salience: 0.5,
+            sensitivity: Sensitivity::Private,
+            provenance: Provenance {
+                source_id: source,
+                external_id: None,
+                url: None,
+                raw_hash: tagged_hash(Tag::MemoryLeaf, b""),
+            },
+            salt: [0u8; 32],
+            supersedes: None,
+            embedding: None,
+        }
+    }
+
+    /// I8. The reason `Debug` is hand-written here rather than derived.
+    #[test]
+    fn debug_never_prints_the_body() {
+        let secret = "the passphrase is hunter2 and I met Nan at the clinic";
+        let rendered = format!("{:?}", memory(secret));
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("Nan"));
+        assert!(rendered.contains("text_len"));
+    }
+
+    /// Provenance and identifiers are exactly what a log line needs.
+    #[test]
+    fn debug_prints_the_identifiers_it_promises() {
+        let rendered = format!("{:?}", memory("anything"));
+        assert!(rendered.contains("Utterance"));
+        assert!(rendered.contains("Private"));
+        assert!(rendered.contains("entities"));
+    }
+
+    #[test]
+    fn a_structured_payload_round_trips_through_canonical_cbor() {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+        struct Place {
+            name: String,
+            visits: u32,
+        }
+        let value = Place {
+            name: "clinic".to_owned(),
+            visits: 2,
+        };
+        let bytes = crate::canonical::to_canonical_cbor(&value).unwrap();
+        let payload = StructuredPayload::new(bytes).unwrap();
+        assert_eq!(payload.decode::<Place>().unwrap(), value);
+    }
+
+    /// Non-canonical bytes are refused at the boundary, not at seal time.
+    #[test]
+    fn a_non_canonical_payload_is_refused() {
+        // A map with keys out of canonical order.
+        let bytes = vec![0xa2, 0x61, b'b', 0x01, 0x61, b'a', 0x02];
+        assert!(StructuredPayload::new(bytes).is_err());
+    }
+
+    /// I8 again: the payload is content, so its `Debug` shows a length.
+    #[test]
+    fn a_structured_payload_debug_shows_only_a_length() {
+        let bytes = crate::canonical::to_canonical_cbor(&"clinic").unwrap();
+        let rendered = format!("{:?}", StructuredPayload::new(bytes).unwrap());
+        assert!(!rendered.contains("clinic"));
+        assert!(rendered.contains("bytes"));
+    }
 }

@@ -65,7 +65,15 @@ pub struct Quest {
 impl core::fmt::Debug for Quest {
     /// Prints identifiers and flags, never claim text (SPEC I8).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print id, facet, holdout, decoy and status — never the claim")
+        f.debug_struct("Quest")
+            .field("id", &self.id)
+            .field("facet", &self.facet)
+            .field("kind", &self.kind)
+            .field("holdout", &self.holdout)
+            .field("decoy", &self.decoy)
+            .field("status", &self.status)
+            .field("answered", &self.verdict.is_some())
+            .finish_non_exhaustive()
     }
 }
 
@@ -133,7 +141,10 @@ impl core::fmt::Debug for QuestKind {
     /// would leak it into any log line that formats a `Quest`, which would defeat
     /// the pre-commitment in [`Quest::answer_commitment`] entirely.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print the variant name only")
+        // The name alone. `Preference` and `Cloze` carry the ghost's committed
+        // answer, and a `Debug` that printed it would defeat the
+        // pre-commitment in `Quest::answer_commitment` (I6).
+        f.write_str(self.variant_name())
     }
 }
 
@@ -146,6 +157,22 @@ impl QuestKind {
     #[must_use]
     pub fn reveals_answer_upfront(&self) -> bool {
         matches!(self, Self::VoiceProbe { .. } | Self::Counterfactual { .. })
+    }
+
+    /// The variant's name, with no payload.
+    ///
+    /// The only thing safe to print: several variants carry the ghost's
+    /// committed answer (I6, I8).
+    #[must_use]
+    pub const fn variant_name(&self) -> &'static str {
+        match self {
+            Self::VoiceProbe { .. } => "VoiceProbe",
+            Self::FactRecall { .. } => "FactRecall",
+            Self::Prediction { .. } => "Prediction",
+            Self::Preference { .. } => "Preference",
+            Self::Cloze { .. } => "Cloze",
+            Self::Counterfactual { .. } => "Counterfactual",
+        }
     }
 }
 
@@ -226,7 +253,16 @@ pub enum Verdict {
 impl core::fmt::Debug for Verdict {
     /// Prints the variant, never the correction text (SPEC I8).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print the variant name and severity only")
+        match self {
+            Self::Confirm => f.write_str("Confirm"),
+            Self::Correct { severity, .. } => f
+                .debug_struct("Correct")
+                .field("severity", severity)
+                .finish_non_exhaustive(),
+            Self::Reject { .. } => f.write_str("Reject"),
+            Self::Unknown => f.write_str("Unknown"),
+            Self::Void { .. } => f.write_str("Void"),
+        }
     }
 }
 
@@ -238,4 +274,54 @@ pub enum Severity {
     Minor,
     /// Recognisably aimed at the right thing, but substantially wrong.
     Major,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// I6 and I8. A `Debug` that printed the committed answer would defeat the
+    /// pre-commitment it exists to protect.
+    #[test]
+    fn quest_kind_debug_never_prints_the_committed_answer() {
+        let kind = QuestKind::Preference {
+            a: "coffee".to_owned(),
+            b: "tea".to_owned(),
+            ghost_choice: Choice::A,
+        };
+        let rendered = format!("{kind:?}");
+        assert_eq!(rendered, "Preference");
+        assert!(!rendered.contains("coffee"));
+    }
+
+    #[test]
+    fn cloze_debug_hides_the_completion() {
+        let kind = QuestKind::Cloze {
+            context: "I always order ___ after a long day".to_owned(),
+            redacted: crate::memory::Span { start: 15, end: 18 },
+            ghost_completion: "a flat white".to_owned(),
+        };
+        assert_eq!(format!("{kind:?}"), "Cloze");
+    }
+
+    /// A correction is the user's own words about themselves. The severity is
+    /// the only part safe to log.
+    #[test]
+    fn verdict_debug_keeps_severity_and_drops_the_correction() {
+        let verdict = Verdict::Correct {
+            correction: "I'd never say that about my sister".to_owned(),
+            severity: Severity::Major,
+        };
+        let rendered = format!("{verdict:?}");
+        assert!(rendered.contains("Major"));
+        assert!(!rendered.contains("sister"));
+    }
+
+    #[test]
+    fn a_void_reason_is_not_printed_either() {
+        let verdict = Verdict::Void {
+            reason: "the question named my therapist".to_owned(),
+        };
+        assert_eq!(format!("{verdict:?}"), "Void");
+    }
 }
