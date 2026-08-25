@@ -4,6 +4,7 @@ resolver = "3"
 members = [
     "crates/ghostr-core",
     "crates/ghostr-crypto",
+    "crates/ghostr-store",
 ]
 
 
