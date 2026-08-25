@@ -1405,6 +1405,199 @@ mod tests {
         assert_eq!(got.len(), 2);
     }
 
+    // --- entities (M1) ---------------------------------------------------
+
+    fn entity_id(n: u8) -> ghostr_core::ids::EntityId {
+        ghostr_core::ids::EntityId::new(u64::from(n), [n; 10])
+    }
+
+    #[test]
+    fn resolving_the_same_name_twice_returns_one_entity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let now = Timestamp::new(1_000, 0);
+
+        let a = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("first");
+        // Different case and whitespace: the same person, and resolution that
+        // missed on that would be worse than none.
+        let b = s
+            .resolve_entity(
+                &d,
+                "  nan ",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(2),
+                [2u8; 24],
+            )
+            .expect("second");
+
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.pseudonym, b.pseudonym);
+        assert_eq!(s.all_entities(&d).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn pseudonyms_are_sequential_and_stable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let now = Timestamp::new(1_000, 0);
+
+        let a = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("a");
+        let b = s
+            .resolve_entity(
+                &d,
+                "Somchai",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(2),
+                [2u8; 24],
+            )
+            .expect("b");
+        assert_eq!(a.pseudonym, "Person A");
+        assert_eq!(b.pseudonym, "Person B");
+
+        // Stable across a re-resolve: a model must be able to follow "Person A"
+        // through a conversation.
+        let again = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(3),
+                [3u8; 24],
+            )
+            .expect("again");
+        assert_eq!(again.pseudonym, "Person A");
+    }
+
+    #[test]
+    fn kinds_get_separate_pseudonym_sequences() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let now = Timestamp::new(1_000, 0);
+        let p = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("person");
+        let pl = s
+            .resolve_entity(
+                &d,
+                "Bangkok",
+                crate::entity::EntityKind::Place,
+                now,
+                entity_id(2),
+                [2u8; 24],
+            )
+            .expect("place");
+        assert_eq!(p.pseudonym, "Person A");
+        assert_eq!(pl.pseudonym, "Place A");
+    }
+
+    /// The entity table is the highest-value target after the corpus itself: it
+    /// is what turns "Person A appears daily" into a name (THREAT_MODEL §T10).
+    #[test]
+    fn entity_names_are_not_readable_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let s = store(dir.path());
+            let d = dek();
+            for (n, name) in [(1u8, "Nan"), (2, "Somchai"), (3, "Ploy")] {
+                s.resolve_entity(
+                    &d,
+                    name,
+                    crate::entity::EntityKind::Person,
+                    Timestamp::new(1_000, 0),
+                    entity_id(n),
+                    [n; 24],
+                )
+                .expect("resolve");
+            }
+        }
+        let mut raw = Vec::new();
+        for entry in std::fs::read_dir(dir.path()).expect("read dir").flatten() {
+            raw.extend(std::fs::read(entry.path()).unwrap_or_default());
+        }
+        for name in ["Nan", "Somchai", "Ploy"] {
+            assert!(
+                !raw.windows(name.len()).any(|w| w == name.as_bytes()),
+                "entity name `{name}` is readable on disk"
+            );
+        }
+        // The pseudonym is not secret and is expected to be present.
+        assert!(raw.windows(8).any(|w| w == b"Person A"));
+    }
+
+    /// The lookup index must not be attackable with a dictionary of names.
+    #[test]
+    fn the_name_tag_is_keyed_to_the_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let mine = s.name_tag(&dek(), "Nan").expect("tag");
+        let theirs = s.name_tag(&derive_dek(&[99u8; 32]), "Nan").expect("tag");
+        assert_ne!(mine, theirs, "two vaults must not share a tag for one name");
+        // Deterministic within a vault, or resolution would create a new entity
+        // on every mention.
+        assert_eq!(mine, s.name_tag(&dek(), "Nan").expect("tag"));
+    }
+
+    #[test]
+    fn memories_link_to_entities_for_forget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let src = SourceId::new(1, [0u8; 10]);
+        let m = memory(src, 1, SECRET_TEXT);
+        s.put_memory(&d, &m, [1u8; 24]).expect("put");
+        let e = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                Timestamp::new(1, 0),
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("entity");
+        s.link_memory_entity(m.id, e.id).expect("link");
+        assert_eq!(s.memories_for_entity(e.id).expect("lookup"), vec![m.id]);
+    }
+
+    #[test]
+    fn spreadsheet_labels_roll_over_past_z() {
+        assert_eq!(spreadsheet_label(0), "A");
+        assert_eq!(spreadsheet_label(25), "Z");
+        assert_eq!(spreadsheet_label(26), "AA");
+        assert_eq!(spreadsheet_label(51), "AZ");
+    }
+
     #[test]
     fn a_newer_schema_is_refused_rather_than_guessed_at() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1417,5 +1610,363 @@ mod tests {
             SqliteStore::open(dir.path()),
             Err(crate::Error::SchemaTooNew { found: 999, .. })
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entities (M1)
+// ---------------------------------------------------------------------------
+
+/// A resolved entity, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEntity {
+    /// Stable identifier.
+    pub id: ghostr_core::ids::EntityId,
+    /// Canonical name. Encrypted at rest; never egresses.
+    pub name: String,
+    /// What sort of thing this is.
+    pub kind: crate::entity::EntityKind,
+    /// Stable pseudonym used at the egress boundary.
+    pub pseudonym: String,
+    /// When first seen.
+    pub first_seen: Timestamp,
+    /// When last referenced.
+    pub last_seen: Timestamp,
+}
+
+impl SqliteStore {
+    /// Resolves a name to an entity, creating one if it is unknown.
+    ///
+    /// Lookup is by a **keyed digest of the normalised name**, not by the
+    /// plaintext. The name column is ciphertext, so a plaintext lookup would
+    /// mean decrypting every row on every mention. The digest is keyed by the
+    /// DEK, so the index leaks nothing to someone holding the file: without the
+    /// key it is 32 random-looking bytes, and it cannot be dictionary-attacked
+    /// the way a bare `SHA256(name)` could.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn resolve_entity(
+        &self,
+        dek: &Dek,
+        name: &str,
+        kind: crate::entity::EntityKind,
+        now: Timestamp,
+        new_id: ghostr_core::ids::EntityId,
+        nonce: [u8; 24],
+    ) -> crate::Result<StoredEntity> {
+        let tag = self.name_tag(dek, name)?;
+
+        if let Some(existing) = self.entity_by_tag(dek, &tag)? {
+            self.conn
+                .execute(
+                    "UPDATE entity SET last_seen = ?2 WHERE id = ?1",
+                    params![existing.id.to_string(), now.utc_millis()],
+                )
+                .map_err(|_| crate::Error::Backend {
+                    operation: "touch entity",
+                })?;
+            return Ok(StoredEntity {
+                last_seen: now,
+                ..existing
+            });
+        }
+
+        let pseudonym = self.next_pseudonym(kind)?;
+        let aad = format!("entity:{new_id}");
+        let sealed = seal_row(dek, name.trim().as_bytes(), &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO entity
+                 (id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed, name_tag)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)",
+                params![
+                    new_id.to_string(),
+                    entity_kind_str(kind),
+                    pseudonym,
+                    now.utc_millis(),
+                    nonce.to_vec(),
+                    sealed,
+                    tag,
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "insert entity",
+            })?;
+
+        Ok(StoredEntity {
+            id: new_id,
+            name: name.trim().to_owned(),
+            kind,
+            pseudonym,
+            first_seen: now,
+            last_seen: now,
+        })
+    }
+
+    /// Reads one entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn get_entity(
+        &self,
+        dek: &Dek,
+        id: ghostr_core::ids::EntityId,
+    ) -> crate::Result<Option<StoredEntity>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed
+                 FROM entity WHERE id = ?1",
+                [id.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Vec<u8>>(5)?,
+                        r.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| crate::Error::Backend {
+                operation: "read entity",
+            })?;
+        row.map(|r| self.decrypt_entity(dek, r)).transpose()
+    }
+
+    /// Every entity, ordered by pseudonym so listings are stable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn all_entities(&self, dek: &Dek) -> crate::Result<Vec<StoredEntity>> {
+        let rows: Vec<_> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed
+                     FROM entity ORDER BY pseudonym",
+                )
+                .map_err(|_| crate::Error::Backend {
+                    operation: "prepare entity list",
+                })?;
+            let mapped = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Vec<u8>>(5)?,
+                        r.get::<_, Vec<u8>>(6)?,
+                    ))
+                })
+                .map_err(|_| crate::Error::Backend {
+                    operation: "list entities",
+                })?;
+            mapped
+                .collect::<Result<_, _>>()
+                .map_err(|_| crate::Error::Backend {
+                    operation: "collect entities",
+                })?
+        };
+        rows.into_iter()
+            .map(|r| self.decrypt_entity(dek, r))
+            .collect()
+    }
+
+    /// Links a memory to an entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn link_memory_entity(
+        &self,
+        memory: MemoryId,
+        entity: ghostr_core::ids::EntityId,
+    ) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?1, ?2)",
+                params![memory.to_string(), entity.to_string()],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "link memory to entity",
+            })?;
+        Ok(())
+    }
+
+    /// Every memory referencing an entity. Backs `ghostr forget <person>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn memories_for_entity(
+        &self,
+        entity: ghostr_core::ids::EntityId,
+    ) -> crate::Result<Vec<MemoryId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT memory_id FROM memory_entity WHERE entity_id = ?1 ORDER BY memory_id")
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare entity memories",
+            })?;
+        let rows = stmt
+            .query_map([entity.to_string()], |r| r.get::<_, String>(0))
+            .map_err(|_| crate::Error::Backend {
+                operation: "read entity memories",
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id = row.map_err(|_| crate::Error::Backend {
+                operation: "entity memory row",
+            })?;
+            out.push(MemoryId::parse(&id).map_err(|_| crate::Error::Backend {
+                operation: "parse entity memory id",
+            })?);
+        }
+        Ok(out)
+    }
+
+    /// The keyed lookup digest for a name.
+    ///
+    /// Keyed by the DEK via HMAC, so two vaults holding the same name produce
+    /// different tags and the index cannot be attacked with a name dictionary.
+    fn name_tag(&self, dek: &Dek, name: &str) -> crate::Result<String> {
+        // Normalise first: "  Nan " and "nan" are the same person, and entity
+        // resolution that misses on whitespace is worse than none.
+        let normalised = name.trim().to_lowercase();
+        // The DEK is not exposed as bytes, so the tag is derived by sealing a
+        // fixed nonce and hashing the result. Deterministic because the nonce
+        // and AAD are fixed, and unforgeable without the key.
+        let sealed = seal_row(dek, normalised.as_bytes(), &[0u8; 24], b"entity-name-tag")?;
+        Ok(ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::MetaLeaf, &sealed).to_hex())
+    }
+
+    fn entity_by_tag(&self, dek: &Dek, tag: &str) -> crate::Result<Option<StoredEntity>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed
+                 FROM entity WHERE name_tag = ?1",
+                [tag],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Vec<u8>>(5)?,
+                        r.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| crate::Error::Backend {
+                operation: "look up entity by tag",
+            })?;
+        row.map(|r| self.decrypt_entity(dek, r)).transpose()
+    }
+
+    /// Allocates the next pseudonym for a kind: `Person A`, `Person B`, …
+    ///
+    /// Sequential and stable. A remote model can follow "Person A" through a
+    /// conversation without ever learning who that is, and the same person keeps
+    /// the same pseudonym across sessions (SPEC §11.2).
+    fn next_pseudonym(&self, kind: crate::entity::EntityKind) -> crate::Result<String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity WHERE kind = ?1",
+                [entity_kind_str(kind)],
+                |r| r.get(0),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "count entities",
+            })?;
+        Ok(format!(
+            "{} {}",
+            entity_kind_label(kind),
+            spreadsheet_label(count.max(0).unsigned_abs())
+        ))
+    }
+
+    fn decrypt_entity(
+        &self,
+        dek: &Dek,
+        row: (String, String, String, i64, i64, Vec<u8>, Vec<u8>),
+    ) -> crate::Result<StoredEntity> {
+        let (id, kind, pseudonym, first_seen, last_seen, nonce, sealed) = row;
+        let id = ghostr_core::ids::EntityId::parse(&id).map_err(|_| crate::Error::Backend {
+            operation: "parse entity id",
+        })?;
+        let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+            operation: "entity nonce length",
+        })?;
+        let aad = format!("entity:{id}");
+        let name = open_row(dek, &sealed, &nonce, aad.as_bytes())
+            .map_err(|_| crate::Error::RowDecryptFailed { table: "entity" })?;
+        Ok(StoredEntity {
+            id,
+            name: String::from_utf8(name)
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "entity" })?,
+            kind: entity_kind_from_str(&kind),
+            pseudonym,
+            first_seen: Timestamp::new(first_seen, 0),
+            last_seen: Timestamp::new(last_seen, 0),
+        })
+    }
+}
+
+/// `0 -> A`, `25 -> Z`, `26 -> AA`, in the manner of spreadsheet columns.
+///
+/// Pseudonyms have to stay short and readable in a prompt, and a user with more
+/// than 26 people in their corpus is ordinary rather than exceptional.
+fn spreadsheet_label(mut n: u64) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b'A' + u8::try_from(n % 26).unwrap_or(0));
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_else(|_| "A".to_owned())
+}
+
+const fn entity_kind_str(kind: crate::entity::EntityKind) -> &'static str {
+    match kind {
+        crate::entity::EntityKind::Person => "person",
+        crate::entity::EntityKind::Place => "place",
+        crate::entity::EntityKind::Project => "project",
+        crate::entity::EntityKind::Organisation => "organisation",
+    }
+}
+
+const fn entity_kind_label(kind: crate::entity::EntityKind) -> &'static str {
+    match kind {
+        crate::entity::EntityKind::Person => "Person",
+        crate::entity::EntityKind::Place => "Place",
+        crate::entity::EntityKind::Project => "Project",
+        crate::entity::EntityKind::Organisation => "Org",
+    }
+}
+
+fn entity_kind_from_str(s: &str) -> crate::entity::EntityKind {
+    match s {
+        "place" => crate::entity::EntityKind::Place,
+        "project" => crate::entity::EntityKind::Project,
+        "organisation" => crate::entity::EntityKind::Organisation,
+        _ => crate::entity::EntityKind::Person,
     }
 }
