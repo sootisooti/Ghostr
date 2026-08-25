@@ -77,11 +77,21 @@ Memoria pipeline with threads and amendments, local embeddings over an encrypted
 vector index, and — before any remote provider existed — the egress gate, its
 policy, its pseudonymising redactor, and its append-only audit log.
 
-**No model is compiled into a default build.** `cargo tree -p ghostr-cli` has no
-model path in it at all, which makes "works offline" checkable rather than
-claimed; `--features llm-local` adds an Ollama-compatible runtime on loopback,
-and `--features llm-remote` adds providers that can only be reached through the
-gate. Either way the pipeline falls back to its deterministic path when a model
+**No model is compiled into a default build**, which makes "works offline"
+checkable in one command rather than claimed:
+
+```console
+$ cargo tree -p ghostr-cli | grep -c ghostr-llm
+0
+$ cargo tree -p ghostr-cli --features llm-local | grep -c ghostr-llm
+2
+```
+
+`--features llm-local` adds an Ollama-compatible runtime on loopback, and
+`--features llm-remote` adds providers that can only be reached through the
+gate. (The one network dependency a default build *does* carry is `ureq`, for
+OpenTimestamps — `ghostr anchor` is the single command that touches the
+network.) Either way the pipeline falls back to its deterministic path when a model
 is absent, so a runtime being down costs the recap its polish and never costs
 the day its seal.
 
