@@ -57,6 +57,9 @@ pub enum Error {
     /// Memoria failed.
     #[error(transparent)]
     Memoria(#[from] ghostr_memoria::Error),
+    /// Distillation or retrieval failed.
+    #[error(transparent)]
+    Persona(#[from] ghostr_persona::Error),
 
     /// A model call failed, or the gate refused it.
     ///

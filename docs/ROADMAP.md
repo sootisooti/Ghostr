@@ -146,6 +146,13 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
 - CLI: `quest`, `fidelity [--facet]`, `persona show/diff/history`, `ask` (talk to
   the ghost).
 
+**Progress**
+- [x] `ghostr-persona`: distillation, versioning, `PersonaDiff`, retrieval, and
+      `persona show/distill/adopt/diff/history`. Voice, relationships, and
+      routines are computed exactly; opinions, boundaries, and lore await the
+      model path.
+- [ ] `ghostr-quests`, the `Scorer`, and the quest UI.
+
 **Exit criteria**
 - [ ] 30-day run on a synthetic corpus produces a rising fidelity score with a
       correctly narrowing CI.

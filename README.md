@@ -95,11 +95,16 @@ network.) Either way the pipeline falls back to its deterministic path when a mo
 is absent, so a runtime being down costs the recap its polish and never costs
 the day its seal.
 
-Everything beyond M1 — the persona model, quests, the fidelity score, relays —
-is defined and documented with `todo!()` bodies, so the shape is reviewable
-before it is built. `ghostr-testkit` is implemented ahead of them: a synthetic
-corpus generator that hands back its own ground truth, a scripted model, a
-deterministic clock and RNG, and a permanent set of hostile fixtures.
+M2 is under way. The persona model distils, versions, and diffs: voice,
+relationships, and routines are computed from the corpus exactly — sentence
+lengths and punctuation rates are arithmetic, not estimates — while opinions,
+boundaries, and lore wait for a model rather than being guessed. `ghostr-testkit`
+landed ahead of it: a synthetic corpus generator that hands back its own ground
+truth, a scripted model, a deterministic clock and RNG, and a permanent set of
+hostile fixtures.
+
+Quests, the fidelity score, and relays are still defined with `todo!()` bodies,
+so the shape is reviewable before it is built.
 
 ```console
 $ cargo build --workspace        # 14 crates, compiles clean
@@ -140,6 +145,8 @@ $ ghostr memoria --date today              # compile and seal today's footage
 $ ghostr thread list                       # what is still open
 $ ghostr footage list                      # sealed days, with their chain links
 $ ghostr footage show 1                    # highlights, people, mood, open threads
+$ ghostr persona distill                   # propose a model of you; read the diff
+$ ghostr persona show                      # what the ghost thinks you are like
 $ ghostr egress log                        # everything that has left this device
 $ ghostr anchor                            # stamp the chain tip via OpenTimestamps
 $ ghostr verify                            # re-derive the chain from genesis

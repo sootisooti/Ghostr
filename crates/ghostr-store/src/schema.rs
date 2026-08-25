@@ -218,6 +218,45 @@ ALTER TABLE source ADD COLUMN config_tag TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX source_config_tag_idx ON source(kind, config_tag);
 ";
 
+/// Migration to schema version 5: persona versions.
+///
+/// The facets are sealed like any other content column — a persona is a
+/// detailed description of a person, and the most concentrated one in the vault
+/// (I1). The version identity is in the clear because it *is* an identifier:
+/// a quest records which version answered it, and that lookup must not need the
+/// DEK.
+///
+/// Append-only, enforced by triggers. Old versions are never deleted: a quest
+/// issued under v12 is scored against v12's claim, not v13's (SPEC §6.4).
+pub const SCHEMA_V5: &str = r"
+CREATE TABLE persona (
+    ordinal        INTEGER PRIMARY KEY,
+    content_hash   TEXT NOT NULL UNIQUE,
+    parent_ordinal INTEGER,
+    created_at     INTEGER NOT NULL,
+    is_head        INTEGER NOT NULL DEFAULT 0,
+    body_nonce     BLOB NOT NULL,
+    body_sealed    BLOB NOT NULL
+) STRICT;
+
+CREATE INDEX persona_head_idx ON persona(is_head);
+
+-- A persona version is a claim the ghost has already answered quests under.
+-- Editing one would rewrite what it said after the fact.
+CREATE TRIGGER persona_is_append_only
+BEFORE UPDATE OF ordinal, content_hash, parent_ordinal, created_at, body_nonce, body_sealed
+ON persona
+BEGIN
+    SELECT RAISE(ABORT, 'a sealed persona version is immutable');
+END;
+
+CREATE TRIGGER persona_is_permanent
+BEFORE DELETE ON persona
+BEGIN
+    SELECT RAISE(ABORT, 'persona versions are never deleted');
+END;
+";
+
 /// One migration step, for the release notes and the migration log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -266,6 +305,12 @@ pub const MIGRATIONS: &[Migration] = &[
         from: 3,
         to: 4,
         description: "sources keyed by a digest of their configuration",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 4,
+        to: 5,
+        description: "append-only persona versions",
         touches_commitments: false,
     },
 ];

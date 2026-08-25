@@ -19,6 +19,7 @@ clap = { workspace = true }
 chrono = { workspace = true }
 ghostr-core = { workspace = true }
 ghostr-crypto = { workspace = true }
+ghostr-persona = { workspace = true }
 ghostr-store = { workspace = true }
 ghostr-anchor = { workspace = true }
 ghostr-llm = { workspace = true, optional = true }

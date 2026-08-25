@@ -35,6 +35,14 @@ pub enum Error {
     #[error("persona claim has no supporting evidence")]
     UnsupportedClaim,
 
+    /// A facet value could not be encoded canonically.
+    ///
+    /// A bug rather than a user state: every ratio in a persona is clamped
+    /// where it is computed, so reaching here means one escaped its range and
+    /// the version hash cannot be formed.
+    #[error("persona facet is not canonically encodable")]
+    Canonical(#[from] ghostr_core::Error),
+
     /// The model failed or returned unusable output.
     #[error("model error")]
     Llm(#[from] ghostr_llm::Error),
