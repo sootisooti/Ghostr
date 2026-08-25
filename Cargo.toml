@@ -6,6 +6,7 @@ members = [
     "crates/ghostr-crypto",
     "crates/ghostr-store",
     "crates/ghostr-llm",
+    "crates/ghostr-anchor",
 ]
 
 

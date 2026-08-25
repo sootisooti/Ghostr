@@ -41,6 +41,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostr-anchor"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "ghostr-core",
+ "ghostr-crypto",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "ghostr-core"
 version = "0.0.0"
 dependencies = [
