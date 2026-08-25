@@ -66,6 +66,42 @@ chrono-tz = { version = "0.10", default-features = false, features = ["serde"] }
 async-trait = "0.1"
 zeroize = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# --- M0: cryptography -------------------------------------------------------
+# No primitive is implemented in this tree. These are the audited building
+# blocks; ghostr-crypto owns only their composition (THREAT_MODEL §5).
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+secp256k1 = { version = "0.31", features = ["std", "rand"] }
+bip39 = { version = "2", default-features = false, features = ["std"] }
+bech32 = "0.11"
+hex = "0.4"
+subtle = "2"
+
+# --- M0: storage, ingest, anchoring -----------------------------------------
+# `bundled` compiles SQLite from source: no system library to install, and the
+# version is pinned by our lockfile rather than by whatever the OS ships.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Deterministic CBOR is built on top of this (see ghostr-core::canonical).
+ciborium = "0.2"
+walkdir = "2"
+pulldown-cmark = { version = "0.12", default-features = false }
+# The OpenTimestamps project's own crate. Handles `.ots` serialisation — the
+# part not worth hand-rolling — and deliberately has no HTTP client, so
+# calendar submission is ours.
+opentimestamps = "0.2"
+# Blocking HTTP for OTS calendar submission. Chosen over reqwest to keep hyper
+# and a second async runtime out of the tree (THREAT_MODEL §T8).
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+# --- M0: dev-only -----------------------------------------------------------
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
 
 # Lints apply to `cargo build` as well as `cargo clippy`, so a violation cannot
 # survive to CI. Each crate opts in with `[lints] workspace = true`.

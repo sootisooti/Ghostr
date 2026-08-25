@@ -35,6 +35,10 @@
 // `cargo xtask scaffold-status` counts these markers so they cannot be quietly
 // forgotten.
 #![allow(unused_variables, dead_code, clippy::todo)]
+// CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
+// the exception: a failed assertion should panic loudly with a message, and
+// threading `Result` through test bodies buries what is actually being asserted.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod error;
 pub mod event;

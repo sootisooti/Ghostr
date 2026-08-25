@@ -17,6 +17,9 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+sha2 = { workspace = true }
+ciborium = { workspace = true }
+hex = { workspace = true }
 
 [lints]
 workspace = true

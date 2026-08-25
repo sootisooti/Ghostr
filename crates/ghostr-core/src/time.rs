@@ -9,7 +9,7 @@
 //! feature, so `Utc::now()` does not exist in this tree; and `clippy.toml` bans
 //! the remaining `now()` constructors outside the composition root.
 
-use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
@@ -50,15 +50,45 @@ impl Timestamp {
     }
 
     /// As a UTC datetime.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if `utc_millis` is outside chrono's representable range,
+    /// which spans roughly ±262,000 years and cannot be reached by any value
+    /// this system produces.
     #[must_use]
     pub fn to_utc(&self) -> DateTime<Utc> {
-        todo!("convert utc_millis to a DateTime<Utc>")
+        DateTime::from_timestamp_millis(self.utc_millis).unwrap_or_default()
     }
 
     /// As a datetime in the offset it was observed at.
     #[must_use]
     pub fn to_local(&self) -> DateTime<FixedOffset> {
-        todo!("apply offset_seconds to the UTC instant")
+        // An offset outside ±24h cannot come from a real zone, so fall back to
+        // UTC rather than failing: a nonsensical stored offset should not make a
+        // memory unreadable.
+        let offset = FixedOffset::east_opt(self.offset_seconds).unwrap_or_else(|| Utc.fix());
+        self.to_utc().with_timezone(&offset)
+    }
+
+    /// Adds seconds, saturating rather than wrapping.
+    #[must_use]
+    pub const fn plus_seconds(&self, seconds: i64) -> Self {
+        Self {
+            utc_millis: self
+                .utc_millis
+                .saturating_add(seconds.saturating_mul(1_000)),
+            offset_seconds: self.offset_seconds,
+        }
+    }
+
+    /// Builds a timestamp from a zoned datetime, retaining its offset.
+    #[must_use]
+    pub fn from_datetime<T: TimeZone>(dt: &DateTime<T>) -> Self {
+        Self {
+            utc_millis: dt.timestamp_millis(),
+            offset_seconds: dt.offset().fix().local_minus_utc(),
+        }
     }
 
     /// The calendar date this instant falls on in `tz`.
@@ -69,7 +99,7 @@ impl Timestamp {
     /// standing (SPEC Q11).
     #[must_use]
     pub fn date_in(&self, tz: &Tz) -> NaiveDate {
-        todo!("project this instant into `tz` and take its calendar date")
+        self.to_utc().with_timezone(tz).date_naive()
     }
 }
 
@@ -100,4 +130,42 @@ pub trait Rng: Send + Sync {
         self.fill(&mut out);
         out
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono_tz::Tz;
+
+    use super::*;
+
+    /// A window boundary must be decided on the absolute instant, not the local
+    /// wall clock: the same instant is two different calendar dates either side
+    /// of the date line, and picking the wrong one moves a memory between days
+    /// (SPEC Q11).
+    #[test]
+    fn calendar_date_depends_on_the_zone() {
+        // 2026-08-25T22:00:00Z
+        let t = Timestamp::new(1_787_090_400_000, 0);
+        let bangkok: Tz = "Asia/Bangkok".parse().expect("zone");
+        let new_york: Tz = "America/New_York".parse().expect("zone");
+        assert_ne!(t.date_in(&bangkok), t.date_in(&new_york));
+    }
+
+    #[test]
+    fn offset_is_retained_separately_from_the_instant() {
+        // Two timestamps for the same instant observed in different zones are
+        // the same moment but carry different local context.
+        let utc = Timestamp::new(1_787_090_400_000, 0);
+        let bangkok = Timestamp::new(1_787_090_400_000, 7 * 3600);
+        assert_eq!(utc.utc_millis(), bangkok.utc_millis());
+        assert_ne!(utc.to_local().hour(), bangkok.to_local().hour());
+    }
+
+    #[test]
+    fn plus_seconds_saturates_rather_than_wrapping() {
+        let t = Timestamp::new(i64::MAX - 10, 0);
+        assert_eq!(t.plus_seconds(i64::MAX).utc_millis(), i64::MAX);
+    }
+
+    use chrono::Timelike as _;
 }
