@@ -1,6 +1,6 @@
 # Ghostr — Roadmap
 
-**Status:** Draft v0.1 · M0 not started
+**Status:** Draft v0.2 · M0 shipped, M1 next
 
 Five milestones. The rule for all of them: **each one ships something a person
 would actually use, on its own, with no promise of the next.** If a milestone's
@@ -39,22 +39,27 @@ harassment — can use this and stop here.
   blob store, migrations.
 - `ghostr-anchor`: the commitment chain (pure), OTS client, upgrade queue,
   `.ots` persistence, verification against a block header source.
-- CLI: `init`, `unlock`, `note`, `import <markdown>`, `seal`, `log`, `verify`,
-  `export`.
+- CLI: `init`, `ingest`, `memoria`, `footage list|show`, `anchor`, `verify`,
+  `status`. (`note`, `unlock`, and `export` moved to M1 with the daemon; the
+  binary is `ghostr`, not `ghostr`.)
 - **Footage at M0 is mechanical** — window, memory ids, commitment, `sealed_at`.
   No highlights, no mood, no threads. Those need a model and arrive in M1. The
   chain is complete and correct from day one, which is the point: getting the
   hashing scheme wrong later means a migration nobody can perform.
 
 **Exit criteria**
-- [ ] `gst verify --from genesis` passes on a 30-day synthetic chain and names the
-      exact `seq` on any tampering.
-- [ ] Golden hash vectors committed; changing serialization fails a test loudly.
-- [ ] A test asserts no plaintext memory content appears in the raw DB bytes.
-- [ ] A day sealed today is OTS-confirmed within 24h on mainnet.
-- [ ] Missed cutoff (machine asleep) seals on wake; the chain stays gapless.
-- [ ] Crypto-shred a memory; the chain still verifies (SPEC Q6).
-- [ ] NIP-06/19 test vectors from the NIPs repo pass verbatim.
+- [x] `ghostr verify` passes from genesis and names the exact `seq` on tampering.
+- [x] Golden hash vectors committed; changing serialization fails a test loudly.
+- [x] A test asserts no plaintext memory content appears in the raw DB bytes.
+- [x] Crypto-shred a memory; the chain still verifies (SPEC Q6).
+- [x] NIP-06/19 test vectors from the NIPs repo pass verbatim.
+- [x] An empty day still seals and the chain stays gapless.
+- [ ] A day sealed today is OTS-**confirmed** within 24h on mainnet.
+      *Submission works and produces a valid `.ots`; upgrading a pending proof
+      to a Bitcoin attestation is the one M0 criterion carried into M1.*
+- [ ] Missed cutoff (machine asleep) seals on wake.
+      *Deferred with the job queue: M0 seals the day you name, so catching up
+      is `ghostr memoria --date` per missed day rather than automatic.*
 
 **Explicitly not in M0:** any LLM, any relay, persona, quests, entities.
 
@@ -71,7 +76,7 @@ Stands alone as a private daily-review tool. Still no ghost.
 - `ghostr-llm`: `LanguageModel` + `Embedder` traits, `ModelDescriptor` with
   locality, prompt assembly, structured output with schema validation.
 - **The egress gate lands here, before any remote provider exists.** Policy,
-  `EgressLog`, redaction, pseudonymization, `gst egress log`. Building the gate
+  `EgressLog`, redaction, pseudonymization, `ghostr egress log`. Building the gate
   after the first provider is how gates get bypassed.
 - One local provider (Ollama-compatible) and one remote (opt-in, off by default),
   so the trait is proven against two shapes.
@@ -88,7 +93,7 @@ Stands alone as a private daily-review tool. Still no ghost.
 - [ ] A thread opened on day 3 and resolved on day 9 shows as a closed loop.
 - [ ] `Sensitivity::Secret` is denied to every remote provider under every policy
       configuration — table test, all branches.
-- [ ] `gst egress log` shows a complete record after a remote run; a
+- [ ] `ghostr egress log` shows a complete record after a remote run; a
       `--dry-run --remote` prints exactly what *would* leave, before it leaves.
 - [ ] Late-arriving memories become amendments, never retro-edits (SPEC I2).
 - [ ] Snapshot tests on prompts; a prompt change shows as a reviewable diff.

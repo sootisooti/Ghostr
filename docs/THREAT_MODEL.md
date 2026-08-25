@@ -159,7 +159,7 @@ eventually reaches it.*
   private to `ghostr-llm` and only reachable through `GatedModel`
   (ARCHITECTURE §4.2).
 - Append-only `EgressLog` recording every decision with provider, task, byte
-  count, redaction plan, and a hash of the exact payload. `gst egress log` prints
+  count, redaction plan, and a hash of the exact payload. `ghostr egress log` prints
   it. Auditable by the user, not just promised to them.
 
 **Residual risk:**
@@ -227,7 +227,7 @@ Revoke via a signed manifest update, derive a new ghost key, republish. Recovery
 is minutes, not catastrophe — the account separation exists exactly for this.
 
 **Residual risk:** there is no recovery from seed compromise, only damage
-control. Documentation must say this in plain language at `gst init`, not in a
+control. Documentation must say this in plain language at `ghostr init`, not in a
 footnote.
 
 ---
@@ -241,7 +241,7 @@ docs usually skip.*
 If they know the user well, they may guess the passphrase.
 
 **Mitigations (planned):** idle auto-lock defaulting to minutes, not hours;
-re-authentication before export, `gst forget`, or enabling remote inference;
+re-authentication before export, `ghostr forget`, or enabling remote inference;
 passphrase strength floor distinct from the device login; no plaintext export
 without an explicit confirmation step.
 
@@ -335,7 +335,7 @@ Every `PersonBeat` is a claim about a person who never agreed to be modelled.
 A compromise of A2/A6 exposes them, not just the user.
 
 **Mitigations (planned):** pseudonymization at the egress boundary so real names
-never reach a provider (SPEC §11.2); `gst forget <person>` crypto-shredding every
+never reach a provider (SPEC §11.2); `ghostr forget <person>` crypto-shredding every
 memory naming them (Q6); `PersonBeat` data never published, even encrypted,
 without a separate explicit action; entity table encrypted with the rest.
 

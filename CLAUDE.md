@@ -5,9 +5,9 @@ Read this before touching anything. It is the short version of
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), plus the rules that aren't written
 down anywhere else.
 
-**Current state: the workspace is scaffolded.** Every type, trait, and signature
-is defined; every body is `todo!()`. The next thing to be built is M0
-([docs/ROADMAP.md](docs/ROADMAP.md)).
+**Current state: M0 is implemented; M1 onward is scaffolded.** The vault, ingest,
+Memoria, the hash chain, and `ghostr verify` all work offline with no LLM. The
+next thing to be built is M1 ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.
@@ -49,7 +49,7 @@ all ← engine ← cli
 | `ghostr-anchor` | Commitment chain (pure) + OpenTimestamps (network). |
 | `ghostr-nostr` | Relay client, event codec for kinds 31780–31789. |
 | `ghostr-engine` | Composition root: wiring, scheduling, job queue, local API. |
-| `ghostr-cli` | The `gst` binary. |
+| `ghostr-cli` | The `ghostr` binary. |
 | `ghostr-testkit` | Fixtures, fake clock/rng/model. **dev-dependency only.** |
 
 **Dependency rules (CI-enforced via `xtask lint-deps`):**
@@ -161,6 +161,13 @@ something true or the code is wrong.
 - `#![forbid(unsafe_code)]` at the top of every crate except `ghostr-crypto`.
 - **Errors:** `thiserror` enums per crate in libraries; `anyhow` only in
   `ghostr-cli` and `xtask`. Errors carry ids and context, never content.
+- **Two CBOR codecs, never conflated.** `ghostr_core::canonical` is for anything
+  that gets **hashed**: it sorts map keys by encoded bytes and rejects floats, so
+  one value has exactly one representation. Encrypted **row payloads** use plain
+  `ciborium` via `ghostr-store`'s `encode_row`, because storage needs no such
+  guarantee and the canonical encoder would reject the `f32` fields that scores
+  legitimately use. Hashing a row payload, or storing a canonical one, are both
+  bugs.
 - **Newtypes over primitives.** `MemoryId(Uuid)`, not `Uuid`. `Hash32([u8; 32])`,
   not `[u8; 32]`. This is what stops a quest leaf from being hashed as a memory
   leaf.

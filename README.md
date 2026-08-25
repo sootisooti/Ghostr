@@ -67,15 +67,20 @@ chained, anchored. Corrections are amendments, never rewrites.
 
 ## Status
 
-**Pre-alpha. The workspace is scaffolded; no behaviour is implemented.**
+**Pre-alpha. Milestone M0 is implemented; M1 onward is scaffolded.**
 
-Every type, trait, and signature is defined and documented. Every body is
-`todo!()`. That is deliberate: the shape is meant to be reviewable before
-anything is built, and the anchoring scheme and privacy boundary are far cheaper
-to get right on paper than in a migration.
+M0 works end to end: an encrypted local vault, markdown ingest, deterministic
+daily footage, a Bitcoin-anchored hash chain, and `ghostr verify`. No LLM is
+compiled into the binary at all — `cargo tree -p ghostr-cli` has no model path in
+it, which makes "works offline" checkable rather than claimed.
+
+Everything beyond M0 — the persona model, quests, the fidelity score, relays —
+is defined and documented with `todo!()` bodies, so the shape is reviewable
+before it is built.
 
 ```console
 $ cargo build --workspace        # 14 crates, compiles clean
+$ cargo test --workspace         # 100+ tests, none touching the network
 $ cargo xtask scaffold-status    # what is still unimplemented, per crate
 $ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
 ```
@@ -95,22 +100,38 @@ no LLM involved) is the next thing to be built. See the
 
 ## Quickstart
 
-> **Placeholder.** Nothing below works yet. It is here to pin down the shape of
-> the CLI before it exists, and it will be replaced with real instructions when
-> M0 lands.
+M0 is implemented and runs **entirely offline with no LLM**. `anchor` is the one
+command that touches the network, and it degrades to a recorded failure rather
+than blocking anything.
 
 ```console
-$ cargo install ghostr-cli          # not yet published
+$ cargo build --release                    # not yet published to crates.io
+$ alias ghostr=./target/release/ghostr
 
-$ gst init                          # generate or import a NIP-06 seed, create the keystore
-$ gst source add ~/notes            # point it at a markdown vault
-$ gst note "shipped the parser, still stuck on the tz bug"
-$ gst seal                          # compile today's footage, chain it, anchor it
-
-$ gst quest                         # answer today's quests
-$ gst fidelity                      # where the ghost is at
-$ gst verify --from genesis         # re-derive the chain, check the Bitcoin attestation
+$ ghostr init --tz Asia/Bangkok            # generate a nostr keypair, encrypt to disk
+$ ghostr ingest ./notes/                   # ingest a folder of markdown notes
+$ ghostr memoria --date today              # compile and seal today's footage
+$ ghostr footage list                      # sealed days, with their chain links
+$ ghostr footage show 1                    # highlights, people, mood, open threads
+$ ghostr anchor                            # stamp the chain tip via OpenTimestamps
+$ ghostr verify                            # re-derive the chain from genesis
 ```
+
+`ghostr verify` exits non-zero on a broken chain, so it composes:
+
+```console
+$ ghostr verify && echo "history intact"
+chain   OK  (2 day(s) from genesis)
+roots   OK
+
+anchors 0 confirmed, 1 pending, 1 unanchored
+history intact
+```
+
+**What M0 gives you, with no AI involved:** an encrypted local journal whose
+history cannot be silently altered, with a Bitcoin timestamp proving each day
+existed. The persona model, quests, and the fidelity score arrive in M2 — see the
+[roadmap](docs/ROADMAP.md).
 
 ## Platform constraints
 
