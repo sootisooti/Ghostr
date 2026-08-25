@@ -93,11 +93,40 @@ fn split_sentences(text: &str) -> Vec<&str> {
         })
         .filter(|line| !line.is_empty())
         .flat_map(|line| {
-            line.split_inclusive(['.', '!', '?'])
-                .map(str::trim)
+            split_terminators(line)
+                .into_iter()
                 .filter(|s| !s.is_empty())
         })
         .collect()
+}
+
+/// Splits one line at sentence terminators, leaving decimals intact.
+///
+/// A `.` between two digits is a decimal point, not a full stop. Splitting on it
+/// turned a logged measurement into "7. 5 h", which is the summary going into a
+/// footage — so it is worth the two-line check.
+fn split_terminators(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, b) in bytes.iter().enumerate() {
+        if !matches!(b, b'.' | b'!' | b'?') {
+            continue;
+        }
+        if *b == b'.'
+            && i > 0
+            && bytes[i - 1].is_ascii_digit()
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
+        {
+            continue;
+        }
+        out.push(line[start..=i].trim());
+        start = i + 1;
+    }
+    if start < line.len() {
+        out.push(line[start..].trim());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -154,5 +183,38 @@ mod tests {
     fn empty_input_yields_empty_output() {
         assert_eq!(NaiveSummarizer.summarize("", 80), "");
         assert_eq!(NaiveSummarizer.summarize("   \n\n  ", 80), "");
+    }
+}
+
+#[cfg(test)]
+mod decimal_tests {
+    use super::*;
+
+    /// A logged measurement is one sentence, not two. The summary goes into a
+    /// footage, so "7. 5 h" would be committed.
+    #[test]
+    fn a_decimal_point_is_not_a_full_stop() {
+        let s = NaiveSummarizer;
+        assert_eq!(
+            s.summarize("Health: sleep (7.5 h)", 120),
+            "Health: sleep (7.5 h)"
+        );
+    }
+
+    #[test]
+    fn a_full_stop_still_ends_a_sentence() {
+        let s = NaiveSummarizer;
+        let out = s.summarize("Ran 5.2 km today. Then rested.", 120);
+        assert!(out.contains("5.2 km"));
+        assert!(!out.contains("rested"));
+    }
+
+    /// A digit before a full stop is still a full stop when no digit follows.
+    #[test]
+    fn a_digit_before_a_full_stop_still_ends_the_sentence() {
+        let s = NaiveSummarizer;
+        let out = s.summarize("Finally reached level 3. Stopped there for the night.", 120);
+        assert!(out.starts_with("Finally reached level 3."));
+        assert!(!out.contains("Stopped"));
     }
 }

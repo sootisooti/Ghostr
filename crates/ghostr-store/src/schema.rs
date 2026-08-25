@@ -140,6 +140,136 @@ CREATE TABLE anchor (
 ) STRICT;
 ";
 
+/// Schema v2: the egress audit log.
+///
+/// A separate migration rather than an edit to [`SCHEMA_V1`], because M0 vaults
+/// already exist and a schema change that silently assumes a fresh database is
+/// how someone's journal stops opening (CLAUDE.md: migrations are written before
+/// the change that needs them).
+///
+/// The log is **append-only and unencrypted**. Unencrypted because its whole
+/// purpose is to be readable as evidence of what left the device — a log the
+/// user cannot read without unlocking the vault is a worse audit trail — and it
+/// deliberately holds no content: a provider name, a task, a decision, a byte
+/// count, and a *digest* of the payload. Storing the payload would recreate the
+/// corpus inside the audit log.
+pub const SCHEMA_V2: &str = r"
+CREATE TABLE egress_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    at             INTEGER NOT NULL,
+    provider       TEXT NOT NULL,
+    task           TEXT NOT NULL,
+    decision       TEXT NOT NULL,
+    deny_reason    TEXT,
+    policy_id      TEXT NOT NULL,
+    bytes_sent     INTEGER NOT NULL,
+    payload_digest TEXT,
+    entities       INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX egress_log_at_idx ON egress_log(at);
+
+-- An audit record that can be edited is not an audit record.
+CREATE TRIGGER egress_log_is_append_only
+BEFORE UPDATE ON egress_log
+BEGIN
+    SELECT RAISE(ABORT, 'the egress log is append-only');
+END;
+
+CREATE TRIGGER egress_log_is_permanent
+BEFORE DELETE ON egress_log
+BEGIN
+    SELECT RAISE(ABORT, 'the egress log cannot be deleted');
+END;
+";
+
+/// Migration to schema version 3: the encrypted vector index.
+///
+/// The vector is sealed like any other content column. An ANN extension would
+/// need it in the clear, and the most reconstructible representation of the
+/// corpus is the last thing that should be readable without the DEK (I1,
+/// SPEC Q13). `dims` stays in the clear because it is shape, and shape is
+/// already the documented leak (THREAT_MODEL §T1).
+pub const SCHEMA_V3: &str = r"
+CREATE TABLE vector (
+    memory_id TEXT PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE,
+    id        TEXT NOT NULL UNIQUE,
+    dims      INTEGER NOT NULL,
+    nonce     BLOB NOT NULL,
+    sealed    BLOB NOT NULL
+) STRICT;
+
+CREATE INDEX vector_dims_idx ON vector(dims);
+";
+
+/// Migration to schema version 4: sources are identified by their configuration.
+///
+/// Version 3 keyed `source` on `kind` alone, which quietly collapsed two
+/// markdown vaults at different paths into one row — and made `ghostr source
+/// add` unable to add a second source of the same kind at all. The key is now a
+/// keyed digest of the configuration, computed the same way entity name tags
+/// are: unforgeable without the DEK, and deterministic with it, so the
+/// configuration itself stays sealed.
+pub const SCHEMA_V4: &str = r"
+ALTER TABLE source ADD COLUMN config_tag TEXT NOT NULL DEFAULT '';
+
+-- Existing rows keep their empty tag, which is unique among them because
+-- version 3 allowed only one source per kind in the first place.
+CREATE UNIQUE INDEX source_config_tag_idx ON source(kind, config_tag);
+";
+
+/// One migration step, for the release notes and the migration log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Migration {
+    /// Version this migrates from.
+    pub from: u32,
+    /// Version this migrates to.
+    pub to: u32,
+    /// One-line description.
+    pub description: &'static str,
+    /// Whether this rewrites anything inside a commitment preimage.
+    ///
+    /// A migration that touches one needs a chain re-verification pass
+    /// afterwards, and needs flagging in the release notes as breaking even
+    /// though it compiles — it invalidates users' chains, which is
+    /// unrecoverable (CLAUDE.md §7).
+    pub touches_commitments: bool,
+}
+
+/// Every migration this build knows, in order.
+///
+/// The catalogue, next to the SQL it describes. The application itself lives in
+/// [`SqliteStore::open`](crate::sqlite::SqliteStore::open), which applies each
+/// pending step in one transaction and refuses a database newer than this build
+/// — a downgrade that writes with an older understanding of the schema can
+/// corrupt a chain beyond repair.
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 0,
+        to: 1,
+        description: "initial schema: meta, source, memory, footage, entity, anchor",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 1,
+        to: 2,
+        description: "append-only egress log",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 2,
+        to: 3,
+        description: "encrypted vector index",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 3,
+        to: 4,
+        description: "sources keyed by a digest of their configuration",
+        touches_commitments: false,
+    },
+];
+
 /// `meta` keys.
 pub mod meta_key {
     /// Schema version, as a decimal string.
@@ -150,8 +280,44 @@ pub mod meta_key {
     pub const IDENTITY_PUBKEY: &str = "identity_pubkey";
     /// The genesis link, hex.
     pub const GENESIS_LINK: &str = "genesis_link";
+    /// The embedding model the vector index was built with.
+    pub const VECTOR_MODEL: &str = "vector_model";
+    /// The vector index's dimensionality, as a decimal string.
+    pub const VECTOR_DIMENSIONS: &str = "vector_dimensions";
     /// The identity's home timezone.
     pub const HOME_TZ: &str = "home_tz";
     /// When the chain was created, as Unix milliseconds.
     pub const CREATED_AT: &str = "created_at";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The catalogue must describe exactly the migrations the store applies.
+    /// A step described but not applied — or applied but not described — is how
+    /// a release note comes to be wrong about whether a chain was touched.
+    #[test]
+    fn the_catalogue_covers_every_version_in_order() {
+        assert_eq!(
+            MIGRATIONS.len(),
+            crate::sqlite::SCHEMA_VERSION as usize,
+            "one step per version"
+        );
+        for (index, m) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(m.from, index as u32);
+            assert_eq!(m.to, m.from + 1);
+        }
+        assert_eq!(
+            MIGRATIONS.last().map(|m| m.to),
+            Some(crate::sqlite::SCHEMA_VERSION)
+        );
+    }
+
+    /// Nothing shipped so far rewrites a commitment preimage. When something
+    /// does, this test is where a reviewer finds out.
+    #[test]
+    fn no_migration_so_far_touches_a_commitment() {
+        assert!(MIGRATIONS.iter().all(|m| !m.touches_commitments));
+    }
 }

@@ -223,7 +223,9 @@ pub trait FootageStore: Send + Sync {
 pub trait QuestStore  { /* issue, list_open, record_verdict, holdout_set */ }
 pub trait PersonaStore{ /* put_version, get_version, head, diff */ }
 pub trait BlobStore   { /* put (content-addressed), get, gc */ }
-pub trait VectorIndex { /* upsert, knn, rebuild */ }
+pub trait VectorIndex { /* upsert, knn, remove, rebuild, unembedded */ }
+//   ^ synchronous, and takes a &Dek: the vectors are encrypted at rest, so a
+//     search decrypts as it scans. See SPEC Q13.
 ```
 
 `FootageStore::seal` rejecting a duplicate `seq` is the last line of defence
@@ -346,6 +348,13 @@ The only crate that knows which implementations are real. It owns:
 
 - **Wiring.** Reads config, unlocks the keystore, constructs the store, resolves
   the model (local or gated remote), builds the pipelines, hands out handles.
+  This is where the egress policy, the audit log, and the pseudonymising
+  redactor are attached to a provider — and, because the providers are private
+  to `ghostr-llm` and `gate::remote` is the only constructor that reaches them,
+  a remote model arriving at any caller has necessarily come through here.
+- **Sources.** `engine::sources` maps a configured `Source` to the adapter that
+  reads it. Dispatch lives here rather than in `ghostr-ingest` because the
+  engine is the only crate that knows which adapters this build compiled in.
 - **Scheduling.** Ingest polls, the Memoria cutoff, quest issuance, persona
   distillation, and the anchor-upgrade retry queue.
 - **The job queue.** Durable, resumable, at-least-once, persisted in the store.
@@ -378,8 +387,23 @@ logging any field typed as memory content; when in doubt, log the `MemoryId`.
 Telemetry is opt-in, off by default, and never includes content.
 
 **Feature flags.** Additive only, never mutually exclusive.
-`default = ["local-model", "markdown", "journal"]` — the offline path is the
-default build.
+
+The default build has **no model path at all**, not even a local one:
+
+```toml
+# ghostr-ingest
+default = ["markdown", "journal", "structlog"]   # local files only
+# ghostr-engine, ghostr-cli
+default = []
+llm-local  = [...]   # an Ollama-compatible runtime on loopback
+llm-remote = [...]   # providers reachable only through the egress gate
+```
+
+Stricter than the original plan, which had `local-model` on by default. The
+change is deliberate: with no model feature enabled, `cargo tree -p ghostr-cli`
+contains no inference path whatsoever, which turns "works offline" from a claim
+into something a reader can check in one command. A default that *includes* a
+local model is still offline, but it cannot be verified that cheaply.
 
 **MSRV.** Latest stable minus one. Pinned in `rust-toolchain.toml`, checked in CI.
 

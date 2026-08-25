@@ -36,7 +36,9 @@ authors = ["The Ghostr contributors"]
 ghostr-core = { path = "crates/ghostr-core", version = "0.0.0" }
 ghostr-crypto = { path = "crates/ghostr-crypto", version = "0.0.0" }
 ghostr-store = { path = "crates/ghostr-store", version = "0.0.0" }
-ghostr-llm = { path = "crates/ghostr-llm", version = "0.0.0" }
+# `default-features = false`: a consumer opts into a provider explicitly, so a
+# crate that merely wants the traits does not silently pull an HTTP client in.
+ghostr-llm = { path = "crates/ghostr-llm", version = "0.0.0", default-features = false }
 ghostr-ingest = { path = "crates/ghostr-ingest", version = "0.0.0" }
 ghostr-persona = { path = "crates/ghostr-persona", version = "0.0.0" }
 ghostr-memoria = { path = "crates/ghostr-memoria", version = "0.0.0" }
@@ -100,12 +102,19 @@ opentimestamps = "0.2"
 # bundled webpki roots. Without it, anyone behind a TLS-inspecting proxy — which
 # is most corporate networks — cannot anchor, and the failure looks like a
 # calendar outage rather than a trust-store problem.
-ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "json"] }
 
 # --- M0: dev-only -----------------------------------------------------------
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+# --- M1: dev-only -----------------------------------------------------------
+# CLAUDE.md §6 requires snapshot tests on prompts, because a prompt change is a
+# behaviour change to what ends up in a user's permanent, hash-chained memory and
+# should show up in review as a diff. `default-features = false` drops the yaml,
+# glob, and console machinery: the snapshots here are plain text.
+insta = { version = "1", default-features = false }
 
 # Lints apply to `cargo build` as well as `cargo clippy`, so a violation cannot
 # survive to CI. Each crate opts in with `[lints] workspace = true`.
@@ -125,3 +134,21 @@ todo = "deny"
 # Content must never reach a log, an error, or a Debug rendering (SPEC I8).
 print_stdout = "deny"
 print_stderr = "deny"
+
+# Argon2 is deliberately expensive, and in an unoptimised build it is expensive
+# enough to make the CLI unusable: ~10s per unlock in `cargo build` output
+# against ~0.2s optimised. Compiling the KDF and its primitives with
+# optimisations in the dev profile keeps *production* cost exactly where it is —
+# the parameters are unchanged — while making a debug binary and the integration
+# suite usable. Lowering the parameters instead would weaken the real thing to
+# speed up a test, which is the wrong trade every time.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.secp256k1]
+opt-level = 3

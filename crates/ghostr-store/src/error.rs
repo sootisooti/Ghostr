@@ -83,6 +83,19 @@ pub enum Error {
         supported: u32,
     },
 
+    /// A vector's width is not the index's.
+    ///
+    /// Almost always a model change: mixing two vector spaces produces
+    /// neighbours that are not neighbours, and doing it silently is the worst
+    /// way for that to happen. The fix is a rebuild, not a coercion.
+    #[error("vector has {found} dimensions, index expects {expected}")]
+    VectorDimensionMismatch {
+        /// The width offered.
+        found: u32,
+        /// The width the index was built with.
+        expected: u32,
+    },
+
     /// The underlying database failed.
     #[error("database error during {operation}")]
     Backend {

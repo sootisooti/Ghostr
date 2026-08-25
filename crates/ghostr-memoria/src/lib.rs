@@ -27,30 +27,24 @@
 //!
 //! # Status
 //!
-//! Scaffold. Types and signatures are defined; bodies are [`todo!`].
+//! Implemented. Stages 1–2 and 5–6 are deterministic; stages 3–4 use a model
+//! when the `llm` feature is on and fall back to the deterministic extractor
+//! when it is off or the runtime is unreachable.
 
 #![forbid(unsafe_code)]
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
 // the exception: a failed assertion should panic loudly with a message, and
 // threading `Result` through test bodies buries what is actually being asserted.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
-// only for the scaffold phase and are removed crate-by-crate as bodies land.
-// `unused_variables` and `dead_code` fire because a diverging body never reads
-// its arguments and never calls its helpers; parameters keep real names rather
-// than `_` prefixes so the signatures stay readable. `clippy::todo` is denied
-// workspace-wide by CLAUDE.md §5 and this is the documented exception.
-// `cargo xtask scaffold-status` counts these markers so they cannot be quietly
-// forgotten.
-#![allow(unused_variables, dead_code, clippy::todo)]
-
 pub mod compose;
 pub mod cutoff;
 pub mod error;
 pub mod extract;
+#[cfg(feature = "llm")]
+pub mod llm;
 pub mod pipeline;
 pub mod summarize;
 
 pub use error::{Error, Result};
-pub use pipeline::{DraftFootage, MemoriaPipeline};
+pub use pipeline::{DraftFootage, MemoriaPipeline, drop_unevidenced, validate_draft};
 pub use summarize::{NaiveSummarizer, Summarizer};

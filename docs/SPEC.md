@@ -181,7 +181,7 @@ pub enum SourceKind {
     SocialArchive { format: ArchiveFormat, path: PathBuf },   // Twitter/X, Mastodon, Reddit GDPR exports
     MarkdownVault { root: PathBuf, glob: String },
     Journal,                                                   // typed directly into Ghostr
-    StructuredLog { schema: LogSchema },                       // places, people, habits, health
+    StructuredLog { schema: LogSchema, path: PathBuf },        // places, people, habits, health
 }
 
 pub enum TrustLevel {
@@ -962,9 +962,22 @@ corpus — how much, how often, how many people — but not its content. See
 THREAT_MODEL §T1.
 
 Blobs (media, archives) are content-addressed and encrypted with per-blob keys
-wrapped by the DEK. Vector embeddings live in a local index (`sqlite-vec` or
-`usearch`, Q13) and are treated as sensitive: embeddings are invertible enough to
-count as content.
+wrapped by the DEK.
+
+Vector embeddings are treated as content, not as metadata: they are invertible
+enough to reconstruct much of the text they came from. They are therefore
+computed **locally only** — there is no remote embedding path and there is not
+going to be one, including for `Public` memories, because a rule with an
+exception is a rule with a failure mode — and they are **encrypted at rest like
+any other content column**.
+
+That rules out an ANN extension, which needs the vectors in the clear. The index
+is an encrypted table scanned exhaustively: each vector is stored normalised, so
+cosine similarity is a dot product, and a query decrypts each row and scores it.
+The vector's *width* is stored in the clear, because width is shape and shape is
+already the documented leak above. Changing embedding model is a resumable
+rebuild: vectors already at the new width are kept, and the rest are re-embedded
+from the work queue.
 
 ### 10.3 On the wire
 
@@ -1022,6 +1035,34 @@ Every decision — allow *and* deny — is written to an append-only `EgressLog`
 with the provider, task, byte count, redaction plan, and a hash of the exact
 payload sent. `ghostr egress log` prints it. If a user cannot audit what left their
 machine, the privacy claim is unverifiable, which makes it worthless.
+
+Append-only is enforced by triggers in the schema rather than by application
+code, so "this record was written and cannot be edited" is a database fact. The
+payload itself is never stored — that would make the audit log a second copy of
+the corpus — only its digest, which is enough to prove what was sent to anyone
+who kept the redacted copy.
+
+**Configuration.** Two settings, deliberately separate:
+
+```toml
+egress_enabled = false                     # the master switch
+egress_allow   = anthropic:summarization   # provider:task pairs
+```
+
+Per task, not per provider: enabling a provider for conversation must not
+silently enable it for bulk extraction over the whole corpus. With
+`egress_enabled = false` no allow entry does anything, so turning it all off
+never means editing a list. `embedding` cannot be named in `egress_allow` at
+all — there is no remote embedding path and configuration must not be able to
+invent one (Q13).
+
+**Seeing it before it happens.** `ghostr memoria --dry-run --remote` prints the
+exact bytes that would leave, after redaction, along with the decision for each.
+The payload and the decision come from the same code path a real call takes, so
+a dry run cannot drift from what actually happens — a preview showing something
+other than the truth would be worse than no preview. `Secret` content does not
+even reach the gate on that path: it is counted and dropped before a prompt is
+built, which is one fewer place for it to go wrong.
 
 ### 11.3 Prompt construction
 
@@ -1258,15 +1299,20 @@ brief doesn't address it.
 
 ---
 
-**Q13 — Which embedding model and vector store?**
+**~~Q13 — Which embedding model and vector store?~~ — resolved in M1.**
 
-Embeddings are invertible enough to be treated as content, which rules out a
-remote embedding API for anything but `Public` memories.
-
-> **Recommendation:** local embeddings only, no exceptions, even for `Public`
-> content (simpler rule, no failure mode). `sqlite-vec` for the index — it keeps
-> the store single-file and avoids a second persistence layer. Re-embedding on
-> model change must be a supported, resumable migration, because it will happen.
+*Local embeddings only, and an encrypted exhaustive index rather than
+`sqlite-vec`.* The local-only half of the recommendation stands as written and
+is now §10.2. The index half did not survive contact with I1: `sqlite-vec` — and
+every ANN library like it — searches a **plaintext** vector table, so adopting
+one would have meant writing the most reconstructible representation of the
+corpus to disk in the clear, which is the exact thing the invariant exists to
+prevent. Encrypting the vectors and scanning them costs a few hundred
+milliseconds on a corpus of 100 000 memories, next to a local model call
+measured in seconds. If a corpus ever outgrows that, the answer is an encrypted
+ANN structure, not a plaintext one. Re-embedding on a model change is resumable
+as recommended: `rebuild` keeps vectors already at the new width and the caller
+drains the remainder.
 
 ---
 

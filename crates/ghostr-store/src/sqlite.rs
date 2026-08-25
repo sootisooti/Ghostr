@@ -13,20 +13,20 @@ use ghostr_core::hash::Hash32;
 use ghostr_core::identity::PublicKey;
 use ghostr_core::ids::{ChainId, MemoryId, SourceId};
 use ghostr_core::memory::{Memory, MemoryBody, MemoryKind, Provenance};
-use ghostr_core::sensitivity::Sensitivity;
+use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
 use ghostr_core::time::Timestamp;
 use ghostr_crypto::kdf::{Dek, open_row, seal_row};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, meta_key};
+use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, meta_key};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -145,26 +145,41 @@ impl SqliteStore {
             .optional()
             .unwrap_or(None);
 
-        match existing.as_deref().map(str::parse::<u32>) {
+        // 0 means "no schema at all yet". Every pending migration is applied in
+        // order from whatever version is on disk, so a v1 vault created by M0
+        // upgrades rather than failing to open.
+        let current = match existing.as_deref().map(str::parse::<u32>) {
             Some(Ok(v)) if v > SCHEMA_VERSION => {
                 // Refuse rather than guess. A downgrade that writes with an older
                 // understanding of the schema can corrupt a chain beyond repair.
-                Err(crate::Error::SchemaTooNew {
+                return Err(crate::Error::SchemaTooNew {
                     found: v,
                     supported: SCHEMA_VERSION,
-                })
+                });
             }
-            Some(Ok(_)) => Ok(()),
-            _ => {
+            Some(Ok(v)) => v,
+            _ => 0,
+        };
+
+        // (applies_when_current_is_at_most, sql)
+        for (from, sql) in [
+            (0u32, SCHEMA_V1),
+            (1, SCHEMA_V2),
+            (2, SCHEMA_V3),
+            (3, SCHEMA_V4),
+        ] {
+            if current <= from {
                 self.conn
-                    .execute_batch(SCHEMA_V1)
+                    .execute_batch(sql)
                     .map_err(|_| crate::Error::Backend {
-                        operation: "apply schema",
+                        operation: "apply migration",
                     })?;
-                self.set_meta(meta_key::SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
-                Ok(())
             }
         }
+        if current != SCHEMA_VERSION {
+            self.set_meta(meta_key::SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
+        }
+        Ok(())
     }
 
     /// Writes a `meta` key.
@@ -264,11 +279,51 @@ impl SqliteStore {
         config: &str,
         nonce: [u8; 24],
     ) -> crate::Result<SourceId> {
+        self.upsert_source_with(
+            dek,
+            &NewSourceRow {
+                id,
+                kind_tag,
+                config,
+                trust: TrustLevel::FirstParty,
+                sensitivity: Sensitivity::Private,
+            },
+            nonce,
+        )
+    }
+
+    /// Inserts a source, or returns the id of the one already configured the
+    /// same way.
+    ///
+    /// Identity is `(kind, config)`, not `kind`: two markdown vaults at
+    /// different paths are two sources, and re-running `source add` on the same
+    /// path is not. The configuration stays sealed, so the match is on a keyed
+    /// digest of it — deterministic with the DEK, unforgeable without.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn upsert_source_with(
+        &self,
+        dek: &Dek,
+        new: &NewSourceRow<'_>,
+        nonce: [u8; 24],
+    ) -> crate::Result<SourceId> {
+        let NewSourceRow {
+            id,
+            kind_tag,
+            config,
+            trust,
+            sensitivity,
+        } = *new;
+        let tag = self.config_tag(dek, kind_tag, config)?;
         if let Some(existing) = self
             .conn
-            .query_row("SELECT id FROM source WHERE kind = ?1", [kind_tag], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT id FROM source WHERE kind = ?1 AND config_tag = ?2",
+                params![kind_tag, tag],
+                |r| r.get::<_, String>(0),
+            )
             .optional()
             .map_err(|_| crate::Error::Backend {
                 operation: "look up source",
@@ -284,14 +339,110 @@ impl SqliteStore {
             .execute(
                 "INSERT INTO source
                  (id, kind, trust, default_sensitivity, enabled, cursor_json,
-                  config_nonce, config_sealed)
-                 VALUES (?1, ?2, 'first_party', 'private', 1, '{}', ?3, ?4)",
-                params![id.to_string(), kind_tag, nonce.to_vec(), sealed],
+                  config_nonce, config_sealed, config_tag)
+                 VALUES (?1, ?2, ?3, ?4, 1, '{}', ?5, ?6, ?7)",
+                params![
+                    id.to_string(),
+                    kind_tag,
+                    trust_str(trust),
+                    sensitivity_str(sensitivity),
+                    nonce.to_vec(),
+                    sealed,
+                    tag
+                ],
             )
             .map_err(|_| crate::Error::Backend {
                 operation: "insert source",
             })?;
         Ok(id)
+    }
+
+    /// A keyed, deterministic digest of a source's configuration.
+    ///
+    /// Same construction as entity name tags: the DEK is not exposed as bytes,
+    /// so the tag is a hash of the configuration sealed under a fixed nonce.
+    fn config_tag(&self, dek: &Dek, kind_tag: &str, config: &str) -> crate::Result<String> {
+        let material = format!("{kind_tag}\u{0}{}", config.trim());
+        let sealed = seal_row(dek, material.as_bytes(), &[0u8; 24], b"source-config-tag")?;
+        Ok(ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::MetaLeaf, &sealed).to_hex())
+    }
+
+    /// Every configured source, ordered by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn all_sources(&self, dek: &Dek) -> crate::Result<Vec<StoredSource>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, kind, trust, default_sensitivity, enabled, cursor_json,
+                        config_nonce, config_sealed
+                 FROM source ORDER BY id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare source list",
+            })?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Vec<u8>>(6)?,
+                    r.get::<_, Vec<u8>>(7)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "list sources",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, kind, trust, sensitivity, enabled, cursor, nonce, sealed) =
+                row.map_err(|_| crate::Error::Backend {
+                    operation: "read source row",
+                })?;
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+                operation: "source nonce length",
+            })?;
+            let aad = format!("source:{id}");
+            let config = open_row(dek, &sealed, &nonce, aad.as_bytes())
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "source" })?;
+            out.push(StoredSource {
+                id: SourceId::parse(&id).map_err(|_| crate::Error::Backend {
+                    operation: "parse source id",
+                })?,
+                kind_tag: kind,
+                trust: trust_from_str(&trust),
+                default_sensitivity: sensitivity_from_str(&sensitivity),
+                enabled: enabled != 0,
+                cursor_json: cursor,
+                config: String::from_utf8(config)
+                    .map_err(|_| crate::Error::RowDecryptFailed { table: "source" })?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Records a source's resumable position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn set_source_cursor(&self, id: SourceId, cursor_json: &str) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "UPDATE source SET cursor_json = ?2 WHERE id = ?1",
+                params![id.to_string(), cursor_json],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "set source cursor",
+            })?;
+        Ok(())
     }
 
     /// Whether a raw-content digest has already been ingested from this source.
@@ -458,6 +609,89 @@ impl SqliteStore {
             out.push(raw.decrypt(dek)?);
         }
         Ok(out)
+    }
+
+    /// Memories that arrived after their day had already been sealed.
+    ///
+    /// A memory is *late* when its effective time falls before `sealed_through`
+    /// — the end of the most recently sealed window — but it was ingested at or
+    /// after `ingested_from`, which is the moment that seal happened. It missed
+    /// the day it belongs to, and that day is immutable (I2).
+    ///
+    /// Ordered by effective time so the amendments a caller builds from these
+    /// come out in a stable order; the footage carrying them is hashed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn late_arrivals(
+        &self,
+        dek: &Dek,
+        sealed_through: Timestamp,
+        ingested_from: Timestamp,
+    ) -> crate::Result<Vec<Memory>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, source_id, occurred_at, occurred_off, ingested_at, ingested_off,
+                        kind, sensitivity, salience, supersedes, raw_hash, salt,
+                        body_nonce, body_sealed, shredded_at
+                 FROM memory
+                 WHERE COALESCE(occurred_at, ingested_at) < ?1
+                   AND ingested_at >= ?2
+                   AND shredded_at IS NULL
+                 ORDER BY COALESCE(occurred_at, ingested_at), id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare late-arrival query",
+            })?;
+        let rows = stmt
+            .query_map(
+                params![sealed_through.utc_millis(), ingested_from.utc_millis()],
+                |r| Ok(RawMemory::from_row(r)),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "run late-arrival query",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let raw = row
+                .map_err(|_| crate::Error::Backend {
+                    operation: "read late-arrival row",
+                })?
+                .map_err(|_| crate::Error::Backend {
+                    operation: "decode late-arrival row",
+                })?;
+            out.push(raw.decrypt(dek)?);
+        }
+        Ok(out)
+    }
+
+    /// The sealed sequence whose window contains `at`, if any.
+    ///
+    /// Backs amendment targeting: a late memory has to name the day it should
+    /// have been in, and that day is found by its window, not by its date — the
+    /// two differ whenever a cutoff is not midnight.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn sealed_seq_covering(&self, at: Timestamp) -> crate::Result<Option<u64>> {
+        self.conn
+            .query_row(
+                "SELECT seq FROM footage
+                 WHERE window_start <= ?1 AND window_end > ?1
+                 ORDER BY seq
+                 LIMIT 1",
+                [at.utc_millis()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|o| o.map(|s| s.max(0).unsigned_abs()))
+            .map_err(|_| crate::Error::Backend {
+                operation: "find sealed window",
+            })
     }
 
     /// Every memory, ordered by id. Backs `verify` and `ingest` reporting.
@@ -1181,24 +1415,359 @@ fn sensitivity_from_str(s: &str) -> Sensitivity {
     }
 }
 
+/// The stored form of a trust level.
+const fn trust_str(t: TrustLevel) -> &'static str {
+    match t {
+        TrustLevel::FirstParty => "first_party",
+        TrustLevel::SelfReported => "self_reported",
+        TrustLevel::ThirdParty => "third_party",
+    }
+}
+
+/// Reads a stored trust level.
+///
+/// An unrecognised value reads as `ThirdParty`: the strictest level, so a row
+/// written by a newer build is treated as hostile input rather than as the
+/// user's own voice (THREAT_MODEL §T7).
+fn trust_from_str(s: &str) -> TrustLevel {
+    match s {
+        "first_party" => TrustLevel::FirstParty,
+        "self_reported" => TrustLevel::SelfReported,
+        _ => TrustLevel::ThirdParty,
+    }
+}
+
+/// A source about to be written.
+///
+/// Grouped rather than passed as seven arguments: the two policy fields are the
+/// ones that matter, and a positional call site made it easy to swap them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewSourceRow<'a> {
+    /// Its identifier, used only if no source is already configured this way.
+    pub id: SourceId,
+    /// The adapter kind tag.
+    pub kind_tag: &'a str,
+    /// Its configuration, which will be sealed.
+    pub config: &'a str,
+    /// How its content is trusted. A security control, not a quality score.
+    pub trust: TrustLevel,
+    /// The sensitivity floor its memories carry.
+    pub sensitivity: Sensitivity,
+}
+
+/// A configured source, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSource {
+    /// Its identifier.
+    pub id: SourceId,
+    /// The adapter kind tag it registers under.
+    pub kind_tag: String,
+    /// How its content is trusted.
+    pub trust: TrustLevel,
+    /// The sensitivity floor applied to its memories.
+    pub default_sensitivity: Sensitivity,
+    /// Whether it is pulled.
+    pub enabled: bool,
+    /// Its resumable position, as stored JSON.
+    pub cursor_json: String,
+    /// Its configuration, decrypted.
+    ///
+    /// A path or a URL, so it is content: it names where a user keeps their
+    /// notes. It is sealed at rest and only decrypted for a caller holding the
+    /// DEK (I1).
+    pub config: String,
+}
+
 /// Unused in M0; kept so the query type stays exercised by the compiler.
 #[allow(dead_code)]
 fn _assert_query_type(_q: &MemoryQuery) {}
 
+/// The encrypted vector index (SPEC Q13).
+///
+/// Brute-force cosine over sealed rows. See [`crate::vector`] for why an ANN
+/// extension is not an option here and what the scan costs.
+impl crate::vector::VectorIndex for SqliteStore {
+    fn upsert(
+        &self,
+        dek: &Dek,
+        memory: MemoryId,
+        embedding: &[f32],
+        id: ghostr_core::ids::VectorId,
+        nonce: [u8; 24],
+    ) -> crate::Result<ghostr_core::ids::VectorId> {
+        let expected = self.vector_dimensions()?;
+        let found = u32::try_from(embedding.len()).unwrap_or(u32::MAX);
+        if expected != 0 && found != expected {
+            return Err(crate::Error::VectorDimensionMismatch { found, expected });
+        }
+        let unit =
+            crate::vector::normalize(embedding).ok_or(crate::Error::VectorDimensionMismatch {
+                found: 0,
+                expected: found,
+            })?;
+
+        let mut plaintext = Vec::with_capacity(unit.len() * 4);
+        for value in &unit {
+            plaintext.extend_from_slice(&value.to_le_bytes());
+        }
+        let aad = format!("vector:{memory}");
+        let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO vector (memory_id, id, dims, nonce, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(memory_id) DO UPDATE SET
+                     id = excluded.id, dims = excluded.dims,
+                     nonce = excluded.nonce, sealed = excluded.sealed",
+                params![
+                    memory.to_string(),
+                    id.to_string(),
+                    i64::from(found),
+                    nonce.to_vec(),
+                    sealed
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "upsert vector",
+            })?;
+
+        // First vector in an empty index settles its width.
+        if expected == 0 {
+            self.set_meta(meta_key::VECTOR_DIMENSIONS, &found.to_string())?;
+        }
+        Ok(id)
+    }
+
+    fn knn(
+        &self,
+        dek: &Dek,
+        query: &[f32],
+        k: u32,
+        filter: &crate::vector::VectorFilter,
+    ) -> crate::Result<Vec<crate::vector::Neighbor>> {
+        let expected = self.vector_dimensions()?;
+        let found = u32::try_from(query.len()).unwrap_or(u32::MAX);
+        if expected == 0 {
+            return Ok(Vec::new());
+        }
+        if found != expected {
+            return Err(crate::Error::VectorDimensionMismatch { found, expected });
+        }
+        let Some(unit) = crate::vector::normalize(query) else {
+            return Ok(Vec::new());
+        };
+
+        let only: std::collections::BTreeSet<String> =
+            filter.only.iter().map(ToString::to_string).collect();
+        let exclude: std::collections::BTreeSet<String> =
+            filter.exclude.iter().map(ToString::to_string).collect();
+
+        let mut statement = self
+            .conn
+            .prepare("SELECT memory_id, nonce, sealed FROM vector WHERE dims = ?1")
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare knn scan",
+            })?;
+        let rows = statement
+            .query_map([i64::from(expected)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "scan vectors",
+            })?;
+
+        let mut scored: Vec<crate::vector::Neighbor> = Vec::new();
+        for row in rows {
+            let (memory_id, nonce, sealed) = row.map_err(|_| crate::Error::Backend {
+                operation: "read vector row",
+            })?;
+            if !only.is_empty() && !only.contains(&memory_id) {
+                continue;
+            }
+            if exclude.contains(&memory_id) {
+                continue;
+            }
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+                operation: "vector nonce length",
+            })?;
+            let aad = format!("vector:{memory_id}");
+            let plaintext = open_row(dek, &sealed, &nonce, aad.as_bytes())
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "vector" })?;
+            let vector = decode_vector(&plaintext)?;
+            let similarity = crate::vector::dot(&unit, &vector);
+            if filter
+                .min_similarity
+                .is_some_and(|floor| similarity < floor)
+            {
+                continue;
+            }
+            let memory = MemoryId::parse(&memory_id)
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "vector" })?;
+            scored.push(crate::vector::Neighbor { memory, similarity });
+        }
+
+        // Ties break on id so the ordering is total: a retrieval set that
+        // varied between two runs over the same corpus would make every
+        // downstream prompt non-reproducible.
+        scored.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then_with(|| a.memory.cmp(&b.memory))
+        });
+        scored.truncate(k as usize);
+        Ok(scored)
+    }
+
+    fn remove(&self, memory: MemoryId) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM vector WHERE memory_id = ?1",
+                [memory.to_string()],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "remove vector",
+            })?;
+        Ok(())
+    }
+
+    fn rebuild(
+        &self,
+        model: &str,
+        dimensions: u32,
+    ) -> crate::Result<crate::vector::RebuildProgress> {
+        self.set_meta(meta_key::VECTOR_MODEL, model)?;
+        self.set_meta(meta_key::VECTOR_DIMENSIONS, &dimensions.to_string())?;
+        // Vectors already at the new width are kept. That is what makes a
+        // rebuild resumable: a lid closing halfway through loses the work still
+        // to do, not the work already done.
+        self.conn
+            .execute(
+                "DELETE FROM vector WHERE dims != ?1",
+                [i64::from(dimensions)],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "drop stale vectors",
+            })?;
+        self.rebuild_progress()
+    }
+
+    fn unembedded(&self, limit: u32) -> crate::Result<Vec<MemoryId>> {
+        let dimensions = self.vector_dimensions()?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT m.id FROM memory m
+                 LEFT JOIN vector v ON v.memory_id = m.id AND v.dims = ?1
+                 WHERE v.memory_id IS NULL AND m.shredded_at IS NULL
+                 ORDER BY m.id
+                 LIMIT ?2",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare unembedded query",
+            })?;
+        let rows = statement
+            .query_map(params![i64::from(dimensions), i64::from(limit)], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "query unembedded",
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id = row.map_err(|_| crate::Error::Backend {
+                operation: "read unembedded row",
+            })?;
+            if let Ok(parsed) = MemoryId::parse(&id) {
+                out.push(parsed);
+            }
+        }
+        Ok(out)
+    }
+
+    fn descriptor(&self) -> crate::Result<crate::vector::IndexDescriptor> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vector", [], |r| r.get(0))
+            .map_err(|_| crate::Error::Backend {
+                operation: "count vectors",
+            })?;
+        Ok(crate::vector::IndexDescriptor {
+            model: self.meta(meta_key::VECTOR_MODEL)?.unwrap_or_default(),
+            dimensions: self.vector_dimensions()?,
+            count: count.unsigned_abs(),
+        })
+    }
+}
+
+impl SqliteStore {
+    /// The index's declared width, or `0` if nothing has set one yet.
+    fn vector_dimensions(&self) -> crate::Result<u32> {
+        Ok(self
+            .meta(meta_key::VECTOR_DIMENSIONS)?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0))
+    }
+
+    /// How much of the index is built, against how much needs to be.
+    fn rebuild_progress(&self) -> crate::Result<crate::vector::RebuildProgress> {
+        let dimensions = self.vector_dimensions()?;
+        let completed: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vector WHERE dims = ?1",
+                [i64::from(dimensions)],
+                |r| r.get(0),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "count current vectors",
+            })?;
+        let total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory WHERE shredded_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "count memories",
+            })?;
+        Ok(crate::vector::RebuildProgress {
+            completed: completed.unsigned_abs(),
+            total: total.unsigned_abs(),
+        })
+    }
+}
+
+/// Reads a stored vector back out of its little-endian bytes.
+fn decode_vector(bytes: &[u8]) -> crate::Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(crate::Error::RowDecryptFailed { table: "vector" });
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// Fixtures shared by this file's test modules.
 #[cfg(test)]
-mod tests {
+mod tests_support {
     use ghostr_core::memory::MemoryBody;
     use ghostr_crypto::kdf::derive_dek;
 
     use super::*;
 
-    const SECRET_TEXT: &str = "met Nan at the tea shop and finally fixed the timezone bug";
-
-    fn dek() -> Dek {
+    pub(super) fn dek() -> Dek {
         derive_dek(&[42u8; 32])
     }
 
-    fn store(dir: &Path) -> SqliteStore {
+    pub(super) fn store(dir: &Path) -> SqliteStore {
         let s = SqliteStore::open(dir).expect("open");
         let dek = dek();
         s.upsert_source(
@@ -1212,7 +1781,7 @@ mod tests {
         s
     }
 
-    fn memory(source: SourceId, n: u8, text: &str) -> Memory {
+    pub(super) fn memory(source: SourceId, n: u8, text: &str) -> Memory {
         let id = MemoryId::new(1_700_000_000_000 + u64::from(n), [n; 10]);
         Memory {
             id,
@@ -1239,6 +1808,16 @@ mod tests {
             embedding: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, memory, store};
+    use super::*;
+
+    const SECRET_TEXT: &str = "met Nan at the tea shop and finally fixed the timezone bug";
 
     #[test]
     fn memory_round_trips_through_encryption() {
@@ -1405,6 +1984,333 @@ mod tests {
         assert_eq!(got.len(), 2);
     }
 
+    // --- entities (M1) ---------------------------------------------------
+
+    fn entity_id(n: u8) -> ghostr_core::ids::EntityId {
+        ghostr_core::ids::EntityId::new(u64::from(n), [n; 10])
+    }
+
+    #[test]
+    fn resolving_the_same_name_twice_returns_one_entity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let now = Timestamp::new(1_000, 0);
+
+        let a = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("first");
+        // Different case and whitespace: the same person, and resolution that
+        // missed on that would be worse than none.
+        let b = s
+            .resolve_entity(
+                &d,
+                "  nan ",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(2),
+                [2u8; 24],
+            )
+            .expect("second");
+
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.pseudonym, b.pseudonym);
+        assert_eq!(s.all_entities(&d).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn pseudonyms_are_sequential_and_stable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let now = Timestamp::new(1_000, 0);
+
+        let a = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("a");
+        let b = s
+            .resolve_entity(
+                &d,
+                "Somchai",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(2),
+                [2u8; 24],
+            )
+            .expect("b");
+        assert_eq!(a.pseudonym, "Person A");
+        assert_eq!(b.pseudonym, "Person B");
+
+        // Stable across a re-resolve: a model must be able to follow "Person A"
+        // through a conversation.
+        let again = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(3),
+                [3u8; 24],
+            )
+            .expect("again");
+        assert_eq!(again.pseudonym, "Person A");
+    }
+
+    #[test]
+    fn kinds_get_separate_pseudonym_sequences() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let now = Timestamp::new(1_000, 0);
+        let p = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                now,
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("person");
+        let pl = s
+            .resolve_entity(
+                &d,
+                "Bangkok",
+                crate::entity::EntityKind::Place,
+                now,
+                entity_id(2),
+                [2u8; 24],
+            )
+            .expect("place");
+        assert_eq!(p.pseudonym, "Person A");
+        assert_eq!(pl.pseudonym, "Place A");
+    }
+
+    /// The entity table is the highest-value target after the corpus itself: it
+    /// is what turns "Person A appears daily" into a name (THREAT_MODEL §T10).
+    #[test]
+    fn entity_names_are_not_readable_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let s = store(dir.path());
+            let d = dek();
+            for (n, name) in [(1u8, "Nan"), (2, "Somchai"), (3, "Ploy")] {
+                s.resolve_entity(
+                    &d,
+                    name,
+                    crate::entity::EntityKind::Person,
+                    Timestamp::new(1_000, 0),
+                    entity_id(n),
+                    [n; 24],
+                )
+                .expect("resolve");
+            }
+        }
+        let mut raw = Vec::new();
+        for entry in std::fs::read_dir(dir.path()).expect("read dir").flatten() {
+            raw.extend(std::fs::read(entry.path()).unwrap_or_default());
+        }
+        for name in ["Nan", "Somchai", "Ploy"] {
+            assert!(
+                !raw.windows(name.len()).any(|w| w == name.as_bytes()),
+                "entity name `{name}` is readable on disk"
+            );
+        }
+        // The pseudonym is not secret and is expected to be present.
+        assert!(raw.windows(8).any(|w| w == b"Person A"));
+    }
+
+    /// The lookup index must not be attackable with a dictionary of names.
+    #[test]
+    fn the_name_tag_is_keyed_to_the_vault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let mine = s.name_tag(&dek(), "Nan").expect("tag");
+        let theirs = s.name_tag(&derive_dek(&[99u8; 32]), "Nan").expect("tag");
+        assert_ne!(mine, theirs, "two vaults must not share a tag for one name");
+        // Deterministic within a vault, or resolution would create a new entity
+        // on every mention.
+        assert_eq!(mine, s.name_tag(&dek(), "Nan").expect("tag"));
+    }
+
+    #[test]
+    fn memories_link_to_entities_for_forget() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let src = SourceId::new(1, [0u8; 10]);
+        let m = memory(src, 1, SECRET_TEXT);
+        s.put_memory(&d, &m, [1u8; 24]).expect("put");
+        let e = s
+            .resolve_entity(
+                &d,
+                "Nan",
+                crate::entity::EntityKind::Person,
+                Timestamp::new(1, 0),
+                entity_id(1),
+                [1u8; 24],
+            )
+            .expect("entity");
+        s.link_memory_entity(m.id, e.id).expect("link");
+        assert_eq!(s.memories_for_entity(e.id).expect("lookup"), vec![m.id]);
+    }
+
+    #[test]
+    fn spreadsheet_labels_roll_over_past_z() {
+        assert_eq!(spreadsheet_label(0), "A");
+        assert_eq!(spreadsheet_label(25), "Z");
+        assert_eq!(spreadsheet_label(26), "AA");
+        assert_eq!(spreadsheet_label(51), "AZ");
+    }
+
+    // --- egress log + migration (M1) ---------------------------------------
+
+    fn record(provider: &str, decision: &str) -> EgressRecord {
+        EgressRecord {
+            at: Timestamp::new(1_000, 0),
+            provider: provider.to_owned(),
+            task: "extraction".to_owned(),
+            decision: decision.to_owned(),
+            deny_reason: (decision == "deny").then(|| "secret_content".to_owned()),
+            policy_id: "standard/v1".to_owned(),
+            bytes_sent: if decision == "deny" { 0 } else { 128 },
+            payload_digest: (decision != "deny").then(|| "ab".repeat(32)),
+            entities: 2,
+        }
+    }
+
+    #[test]
+    fn egress_records_round_trip_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append");
+        s.append_egress(&record("acme", "deny")).expect("append");
+
+        let all = s.egress_since(Timestamp::new(0, 0)).expect("read");
+        assert_eq!(all.len(), 2);
+        // Denials are recorded too: a log of only the allows cannot show that
+        // the system refused anything (SPEC I5).
+        assert_eq!(all[1].decision, "deny");
+        assert_eq!(all[1].deny_reason.as_deref(), Some("secret_content"));
+        assert_eq!(all[1].bytes_sent, 0);
+    }
+
+    /// An audit record that can be edited is not an audit record.
+    #[test]
+    fn the_egress_log_is_append_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append");
+        assert!(
+            s.conn
+                .execute("UPDATE egress_log SET bytes_sent = 0", [])
+                .is_err()
+        );
+        assert!(s.conn.execute("DELETE FROM egress_log", []).is_err());
+    }
+
+    /// The log must not become a second copy of the corpus.
+    #[test]
+    fn the_egress_log_stores_a_digest_not_a_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append");
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
+        assert!(!raw.windows(3).any(|w| w == b"Nan"));
+        // The digest is present and is what a user would compare against.
+        let back = s.egress_since(Timestamp::new(0, 0)).expect("read");
+        assert_eq!(
+            back[0].payload_digest.as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+    }
+
+    /// A vault created by M0 at schema v1 must upgrade, not fail to open.
+    #[test]
+    fn a_v1_vault_migrates_to_the_current_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            // Build a v1 database by hand: schema v1 only, version stamped 1.
+            let conn = rusqlite::Connection::open(dir.path().join(DB_FILENAME)).expect("open");
+            conn.execute_batch(crate::schema::SCHEMA_V1)
+                .expect("v1 schema");
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '1')",
+                [crate::schema::meta_key::SCHEMA_VERSION],
+            )
+            .expect("stamp");
+        }
+
+        let s = SqliteStore::open(dir.path()).expect("migrate on open");
+        assert_eq!(
+            s.meta(crate::schema::meta_key::SCHEMA_VERSION)
+                .expect("meta")
+                .as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        // Every table added since v1 exists and works.
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append after migration");
+        assert_eq!(s.egress_count().expect("count"), 1);
+        use crate::vector::VectorIndex as _;
+        assert_eq!(s.descriptor().expect("vector descriptor").count, 0);
+        // v4: two vaults at different paths are two sources.
+        let d = dek();
+        let a = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "markdown_vault",
+                "/a",
+                [2u8; 24],
+            )
+            .expect("first vault");
+        let b = s
+            .upsert_source(
+                &d,
+                SourceId::new(3, [3u8; 10]),
+                "markdown_vault",
+                "/b",
+                [3u8; 24],
+            )
+            .expect("second vault");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn migration_is_idempotent_across_reopens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for _ in 0..3 {
+            let s = SqliteStore::open(dir.path()).expect("open");
+            s.append_egress(&record("acme", "allow_redacted"))
+                .expect("append");
+        }
+        assert_eq!(
+            SqliteStore::open(dir.path())
+                .expect("open")
+                .egress_count()
+                .expect("count"),
+            3
+        );
+    }
+
     #[test]
     fn a_newer_schema_is_refused_rather_than_guessed_at() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1417,5 +2323,887 @@ mod tests {
             SqliteStore::open(dir.path()),
             Err(crate::Error::SchemaTooNew { found: 999, .. })
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entities (M1)
+// ---------------------------------------------------------------------------
+
+/// A resolved entity, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEntity {
+    /// Stable identifier.
+    pub id: ghostr_core::ids::EntityId,
+    /// Canonical name. Encrypted at rest; never egresses.
+    pub name: String,
+    /// What sort of thing this is.
+    pub kind: crate::entity::EntityKind,
+    /// Stable pseudonym used at the egress boundary.
+    pub pseudonym: String,
+    /// When first seen.
+    pub first_seen: Timestamp,
+    /// When last referenced.
+    pub last_seen: Timestamp,
+}
+
+impl SqliteStore {
+    /// Resolves a name to an entity, creating one if it is unknown.
+    ///
+    /// Lookup is by a **keyed digest of the normalised name**, not by the
+    /// plaintext. The name column is ciphertext, so a plaintext lookup would
+    /// mean decrypting every row on every mention. The digest is keyed by the
+    /// DEK, so the index leaks nothing to someone holding the file: without the
+    /// key it is 32 random-looking bytes, and it cannot be dictionary-attacked
+    /// the way a bare `SHA256(name)` could.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn resolve_entity(
+        &self,
+        dek: &Dek,
+        name: &str,
+        kind: crate::entity::EntityKind,
+        now: Timestamp,
+        new_id: ghostr_core::ids::EntityId,
+        nonce: [u8; 24],
+    ) -> crate::Result<StoredEntity> {
+        let tag = self.name_tag(dek, name)?;
+
+        if let Some(existing) = self.entity_by_tag(dek, &tag)? {
+            self.conn
+                .execute(
+                    "UPDATE entity SET last_seen = ?2 WHERE id = ?1",
+                    params![existing.id.to_string(), now.utc_millis()],
+                )
+                .map_err(|_| crate::Error::Backend {
+                    operation: "touch entity",
+                })?;
+            return Ok(StoredEntity {
+                last_seen: now,
+                ..existing
+            });
+        }
+
+        let pseudonym = self.next_pseudonym(kind)?;
+        let aad = format!("entity:{new_id}");
+        let sealed = seal_row(dek, name.trim().as_bytes(), &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO entity
+                 (id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed, name_tag)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)",
+                params![
+                    new_id.to_string(),
+                    entity_kind_str(kind),
+                    pseudonym,
+                    now.utc_millis(),
+                    nonce.to_vec(),
+                    sealed,
+                    tag,
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "insert entity",
+            })?;
+
+        Ok(StoredEntity {
+            id: new_id,
+            name: name.trim().to_owned(),
+            kind,
+            pseudonym,
+            first_seen: now,
+            last_seen: now,
+        })
+    }
+
+    /// Reads one entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn get_entity(
+        &self,
+        dek: &Dek,
+        id: ghostr_core::ids::EntityId,
+    ) -> crate::Result<Option<StoredEntity>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed
+                 FROM entity WHERE id = ?1",
+                [id.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Vec<u8>>(5)?,
+                        r.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| crate::Error::Backend {
+                operation: "read entity",
+            })?;
+        row.map(|r| self.decrypt_entity(dek, r)).transpose()
+    }
+
+    /// Every entity, ordered by pseudonym so listings are stable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn all_entities(&self, dek: &Dek) -> crate::Result<Vec<StoredEntity>> {
+        let rows: Vec<_> = {
+            let mut stmt = self
+                .conn
+                .prepare(
+                    "SELECT id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed
+                     FROM entity ORDER BY pseudonym",
+                )
+                .map_err(|_| crate::Error::Backend {
+                    operation: "prepare entity list",
+                })?;
+            let mapped = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Vec<u8>>(5)?,
+                        r.get::<_, Vec<u8>>(6)?,
+                    ))
+                })
+                .map_err(|_| crate::Error::Backend {
+                    operation: "list entities",
+                })?;
+            mapped
+                .collect::<Result<_, _>>()
+                .map_err(|_| crate::Error::Backend {
+                    operation: "collect entities",
+                })?
+        };
+        rows.into_iter()
+            .map(|r| self.decrypt_entity(dek, r))
+            .collect()
+    }
+
+    /// Links a memory to an entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn link_memory_entity(
+        &self,
+        memory: MemoryId,
+        entity: ghostr_core::ids::EntityId,
+    ) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO memory_entity (memory_id, entity_id) VALUES (?1, ?2)",
+                params![memory.to_string(), entity.to_string()],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "link memory to entity",
+            })?;
+        Ok(())
+    }
+
+    /// Every memory referencing an entity. Backs `ghostr forget <person>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn memories_for_entity(
+        &self,
+        entity: ghostr_core::ids::EntityId,
+    ) -> crate::Result<Vec<MemoryId>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT memory_id FROM memory_entity WHERE entity_id = ?1 ORDER BY memory_id")
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare entity memories",
+            })?;
+        let rows = stmt
+            .query_map([entity.to_string()], |r| r.get::<_, String>(0))
+            .map_err(|_| crate::Error::Backend {
+                operation: "read entity memories",
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id = row.map_err(|_| crate::Error::Backend {
+                operation: "entity memory row",
+            })?;
+            out.push(MemoryId::parse(&id).map_err(|_| crate::Error::Backend {
+                operation: "parse entity memory id",
+            })?);
+        }
+        Ok(out)
+    }
+
+    /// The keyed lookup digest for a name.
+    ///
+    /// Keyed by the DEK via HMAC, so two vaults holding the same name produce
+    /// different tags and the index cannot be attacked with a name dictionary.
+    fn name_tag(&self, dek: &Dek, name: &str) -> crate::Result<String> {
+        // Normalise first: "  Nan " and "nan" are the same person, and entity
+        // resolution that misses on whitespace is worse than none.
+        let normalised = name.trim().to_lowercase();
+        // The DEK is not exposed as bytes, so the tag is derived by sealing a
+        // fixed nonce and hashing the result. Deterministic because the nonce
+        // and AAD are fixed, and unforgeable without the key.
+        let sealed = seal_row(dek, normalised.as_bytes(), &[0u8; 24], b"entity-name-tag")?;
+        Ok(ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::MetaLeaf, &sealed).to_hex())
+    }
+
+    fn entity_by_tag(&self, dek: &Dek, tag: &str) -> crate::Result<Option<StoredEntity>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, kind, pseudonym, first_seen, last_seen, name_nonce, name_sealed
+                 FROM entity WHERE name_tag = ?1",
+                [tag],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Vec<u8>>(5)?,
+                        r.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| crate::Error::Backend {
+                operation: "look up entity by tag",
+            })?;
+        row.map(|r| self.decrypt_entity(dek, r)).transpose()
+    }
+
+    /// Allocates the next pseudonym for a kind: `Person A`, `Person B`, …
+    ///
+    /// Sequential and stable. A remote model can follow "Person A" through a
+    /// conversation without ever learning who that is, and the same person keeps
+    /// the same pseudonym across sessions (SPEC §11.2).
+    fn next_pseudonym(&self, kind: crate::entity::EntityKind) -> crate::Result<String> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity WHERE kind = ?1",
+                [entity_kind_str(kind)],
+                |r| r.get(0),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "count entities",
+            })?;
+        Ok(format!(
+            "{} {}",
+            entity_kind_label(kind),
+            spreadsheet_label(count.max(0).unsigned_abs())
+        ))
+    }
+
+    fn decrypt_entity(
+        &self,
+        dek: &Dek,
+        row: (String, String, String, i64, i64, Vec<u8>, Vec<u8>),
+    ) -> crate::Result<StoredEntity> {
+        let (id, kind, pseudonym, first_seen, last_seen, nonce, sealed) = row;
+        let id = ghostr_core::ids::EntityId::parse(&id).map_err(|_| crate::Error::Backend {
+            operation: "parse entity id",
+        })?;
+        let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+            operation: "entity nonce length",
+        })?;
+        let aad = format!("entity:{id}");
+        let name = open_row(dek, &sealed, &nonce, aad.as_bytes())
+            .map_err(|_| crate::Error::RowDecryptFailed { table: "entity" })?;
+        Ok(StoredEntity {
+            id,
+            name: String::from_utf8(name)
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "entity" })?,
+            kind: entity_kind_from_str(&kind),
+            pseudonym,
+            first_seen: Timestamp::new(first_seen, 0),
+            last_seen: Timestamp::new(last_seen, 0),
+        })
+    }
+}
+
+/// `0 -> A`, `25 -> Z`, `26 -> AA`, in the manner of spreadsheet columns.
+///
+/// Pseudonyms have to stay short and readable in a prompt, and a user with more
+/// than 26 people in their corpus is ordinary rather than exceptional.
+fn spreadsheet_label(mut n: u64) -> String {
+    let mut out = Vec::new();
+    loop {
+        out.push(b'A' + u8::try_from(n % 26).unwrap_or(0));
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_else(|_| "A".to_owned())
+}
+
+const fn entity_kind_str(kind: crate::entity::EntityKind) -> &'static str {
+    match kind {
+        crate::entity::EntityKind::Person => "person",
+        crate::entity::EntityKind::Place => "place",
+        crate::entity::EntityKind::Project => "project",
+        crate::entity::EntityKind::Organisation => "organisation",
+    }
+}
+
+const fn entity_kind_label(kind: crate::entity::EntityKind) -> &'static str {
+    match kind {
+        crate::entity::EntityKind::Person => "Person",
+        crate::entity::EntityKind::Place => "Place",
+        crate::entity::EntityKind::Project => "Project",
+        crate::entity::EntityKind::Organisation => "Org",
+    }
+}
+
+fn entity_kind_from_str(s: &str) -> crate::entity::EntityKind {
+    match s {
+        "place" => crate::entity::EntityKind::Place,
+        "project" => crate::entity::EntityKind::Project,
+        "organisation" => crate::entity::EntityKind::Organisation,
+        _ => crate::entity::EntityKind::Person,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The egress audit log (M1)
+// ---------------------------------------------------------------------------
+
+/// One recorded egress decision.
+///
+/// Holds no content: a provider, a task, a decision, a byte count, and a digest.
+/// Storing the payload would recreate the corpus inside the audit log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressRecord {
+    /// When.
+    pub at: Timestamp,
+    /// Where to.
+    pub provider: String,
+    /// What for.
+    pub task: String,
+    /// `allow`, `allow_redacted`, or `deny`.
+    pub decision: String,
+    /// Why, when the decision was a deny.
+    pub deny_reason: Option<String>,
+    /// Which policy decided.
+    pub policy_id: String,
+    /// Bytes actually transmitted. Zero for a deny.
+    pub bytes_sent: u32,
+    /// Digest of the exact bytes sent, after redaction.
+    pub payload_digest: Option<String>,
+    /// How many entity names were pseudonymised.
+    pub entities: u32,
+}
+
+impl SqliteStore {
+    /// Appends an egress record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    /// Callers must treat that as fatal to the request: an egress that could not
+    /// be recorded is the thing the user was told could not happen (SPEC I5).
+    pub fn append_egress(&self, record: &EgressRecord) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO egress_log
+                 (at, provider, task, decision, deny_reason, policy_id, bytes_sent,
+                  payload_digest, entities)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    record.at.utc_millis(),
+                    record.provider,
+                    record.task,
+                    record.decision,
+                    record.deny_reason,
+                    record.policy_id,
+                    i64::from(record.bytes_sent),
+                    record.payload_digest,
+                    i64::from(record.entities),
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "append egress record",
+            })?;
+        Ok(())
+    }
+
+    /// Records at or after `from`, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn egress_since(&self, from: Timestamp) -> crate::Result<Vec<EgressRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT at, provider, task, decision, deny_reason, policy_id, bytes_sent,
+                        payload_digest, entities
+                 FROM egress_log WHERE at >= ?1 ORDER BY at, id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare egress query",
+            })?;
+        let rows = stmt
+            .query_map([from.utc_millis()], |r| {
+                Ok(EgressRecord {
+                    at: Timestamp::new(r.get::<_, i64>(0)?, 0),
+                    provider: r.get(1)?,
+                    task: r.get(2)?,
+                    decision: r.get(3)?,
+                    deny_reason: r.get(4)?,
+                    policy_id: r.get(5)?,
+                    bytes_sent: u32::try_from(r.get::<_, i64>(6)?).unwrap_or(0),
+                    payload_digest: r.get(7)?,
+                    entities: u32::try_from(r.get::<_, i64>(8)?).unwrap_or(0),
+                })
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "read egress log",
+            })?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|_| crate::Error::Backend {
+                operation: "collect egress records",
+            })
+    }
+
+    /// How many records the log holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn egress_count(&self) -> crate::Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM egress_log", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n.max(0).unsigned_abs())
+            .map_err(|_| crate::Error::Backend {
+                operation: "count egress records",
+            })
+    }
+}
+
+#[cfg(test)]
+mod vector_tests {
+    use ghostr_core::ids::VectorId;
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, memory, store};
+    use super::*;
+    use crate::vector::{VectorFilter, VectorIndex as _};
+
+    fn vector_id(n: u8) -> VectorId {
+        VectorId::new(u64::from(n), [n; 10])
+    }
+
+    fn seeded(dir: &Path) -> (SqliteStore, Dek, Vec<MemoryId>) {
+        let s = store(dir);
+        let d = dek();
+        let source = SourceId::new(1, [0u8; 10]);
+        let mut ids = Vec::new();
+        for (n, text) in [
+            (1u8, "coffee with Nan"),
+            (2, "fixed the parser"),
+            (3, "long walk"),
+        ] {
+            let m = memory(source, n, text);
+            ids.push(m.id);
+            s.put_memory(&d, &m, [n; 24]).expect("put");
+        }
+        (s, d, ids)
+    }
+
+    #[test]
+    fn a_vector_round_trips_and_finds_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("upsert");
+        let hits = s
+            .knn(&d, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+            .expect("knn");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, ids[0]);
+        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+    }
+
+    /// I1. The index is the most reconstructible representation of the corpus,
+    /// so it is the last thing that should be readable without the DEK.
+    #[test]
+    fn no_vector_component_appears_in_the_raw_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        // A recognisable component that would survive as bytes if stored plain.
+        let vector = [0.123_456_79_f32, 0.0, 0.0];
+        s.upsert(&d, ids[0], &vector, vector_id(1), [1u8; 24])
+            .expect("upsert");
+        drop(s);
+
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read db");
+        let unit = crate::vector::normalize(&vector).expect("unit");
+        let mut needle = Vec::new();
+        for v in &unit {
+            needle.extend_from_slice(&v.to_le_bytes());
+        }
+        assert!(
+            !raw.windows(needle.len()).any(|w| w == needle),
+            "the vector is on disk in the clear"
+        );
+    }
+
+    #[test]
+    fn ranking_is_by_similarity_and_deterministic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.9, 0.1, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+        s.upsert(&d, ids[2], &[0.0, 1.0, 0.0], vector_id(3), [3u8; 24])
+            .expect("c");
+
+        let hits = s
+            .knn(&d, &[1.0, 0.0, 0.0], 3, &VectorFilter::default())
+            .expect("knn");
+        assert_eq!(hits[0].memory, ids[0]);
+        assert_eq!(hits[1].memory, ids[1]);
+        assert_eq!(hits[2].memory, ids[2]);
+
+        let again = s
+            .knn(&d, &[1.0, 0.0, 0.0], 3, &VectorFilter::default())
+            .expect("knn");
+        let order: Vec<_> = hits.iter().map(|h| h.memory).collect();
+        let order_again: Vec<_> = again.iter().map(|h| h.memory).collect();
+        assert_eq!(order, order_again);
+    }
+
+    /// SPEC Q18: a held-out memory must not come back through similarity
+    /// search, or the holdout is not held out.
+    #[test]
+    fn an_excluded_memory_never_appears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.9, 0.1, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+
+        let filter = VectorFilter {
+            exclude: vec![ids[0]],
+            ..VectorFilter::default()
+        };
+        let hits = s.knn(&d, &[1.0, 0.0, 0.0], 5, &filter).expect("knn");
+        assert!(hits.iter().all(|h| h.memory != ids[0]));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn only_restricts_the_search_to_a_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.9, 0.1, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+
+        let filter = VectorFilter {
+            only: vec![ids[1]],
+            ..VectorFilter::default()
+        };
+        let hits = s.knn(&d, &[1.0, 0.0, 0.0], 5, &filter).expect("knn");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, ids[1]);
+    }
+
+    #[test]
+    fn a_similarity_floor_drops_weak_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.0, 1.0, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+
+        let filter = VectorFilter {
+            min_similarity: Some(0.5),
+            ..VectorFilter::default()
+        };
+        let hits = s.knn(&d, &[1.0, 0.0, 0.0], 5, &filter).expect("knn");
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// Mixing two vector spaces produces neighbours that are not neighbours.
+    /// It must be an error, not a coercion.
+    #[test]
+    fn a_width_change_is_refused_rather_than_coerced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        let err = s
+            .upsert(&d, ids[1], &[1.0, 0.0], vector_id(2), [2u8; 24])
+            .expect_err("must refuse");
+        assert!(matches!(
+            err,
+            crate::Error::VectorDimensionMismatch {
+                found: 2,
+                expected: 3
+            }
+        ));
+        let err = s
+            .knn(&d, &[1.0, 0.0], 5, &VectorFilter::default())
+            .expect_err("must refuse");
+        assert!(matches!(err, crate::Error::VectorDimensionMismatch { .. }));
+    }
+
+    /// The property that makes a rebuild survive a laptop lid closing.
+    #[test]
+    fn a_rebuild_keeps_vectors_already_at_the_new_width() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+
+        let progress = s.rebuild("nomic-embed-text", 3).expect("rebuild");
+        assert_eq!(progress.completed, 1);
+        assert_eq!(progress.total, 3);
+        assert_eq!(s.unembedded(10).expect("pending").len(), 2);
+        assert!(!s.unembedded(10).expect("pending").contains(&ids[0]));
+    }
+
+    #[test]
+    fn changing_the_model_width_drops_the_old_vectors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+
+        let progress = s.rebuild("another-model", 4).expect("rebuild");
+        assert_eq!(progress.completed, 0, "the 3-wide vector is gone");
+        assert_eq!(s.unembedded(10).expect("pending").len(), 3);
+        assert_eq!(s.descriptor().expect("descriptor").model, "another-model");
+    }
+
+    /// A shredded memory whose embedding survived would make the shred a lie.
+    #[test]
+    fn removing_a_vector_takes_it_out_of_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.remove(ids[0]).expect("remove");
+        assert!(
+            s.knn(&d, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+                .expect("knn")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn upserting_the_same_memory_replaces_rather_than_duplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[0], &[0.0, 1.0, 0.0], vector_id(2), [2u8; 24])
+            .expect("again");
+        assert_eq!(s.descriptor().expect("descriptor").count, 1);
+        let hits = s
+            .knn(&d, &[0.0, 1.0, 0.0], 5, &VectorFilter::default())
+            .expect("knn");
+        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn an_empty_index_returns_nothing_rather_than_failing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, _) = seeded(dir.path());
+        assert!(
+            s.knn(&d, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+                .expect("knn")
+                .is_empty()
+        );
+    }
+
+    /// The wrong key must fail loudly rather than returning noise that would be
+    /// ranked as if it meant something.
+    #[test]
+    fn the_wrong_key_cannot_read_the_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        let wrong = derive_dek(&[7u8; 32]);
+        let err = s
+            .knn(&wrong, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+            .expect_err("must fail");
+        assert!(matches!(err, crate::Error::RowDecryptFailed { .. }));
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+
+    use super::tests_support::{dek, store};
+    use super::*;
+
+    /// The bug schema v4 fixes: keying on `kind` alone collapsed two vaults at
+    /// different paths into one source, and made a second `source add` of the
+    /// same kind impossible.
+    #[test]
+    fn two_vaults_at_different_paths_are_two_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let a = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "markdown_vault",
+                "/notes/a",
+                [2u8; 24],
+            )
+            .expect("a");
+        let b = s
+            .upsert_source(
+                &d,
+                SourceId::new(3, [3u8; 10]),
+                "markdown_vault",
+                "/notes/b",
+                [3u8; 24],
+            )
+            .expect("b");
+        assert_ne!(a, b);
+        assert_eq!(
+            s.all_sources(&d).expect("list").len(),
+            3,
+            "plus the fixture"
+        );
+    }
+
+    /// And re-adding the same path is still a no-op, which is what makes
+    /// `ingest` safe to run twice.
+    #[test]
+    fn re_adding_the_same_configuration_returns_the_existing_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let a = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "markdown_vault",
+                "/notes",
+                [2u8; 24],
+            )
+            .expect("a");
+        let again = s
+            .upsert_source(
+                &d,
+                SourceId::new(9, [9u8; 10]),
+                "markdown_vault",
+                "/notes",
+                [9u8; 24],
+            )
+            .expect("again");
+        assert_eq!(a, again);
+    }
+
+    /// A source's configuration names where the user keeps their notes, so it
+    /// is content and is sealed like content (I1).
+    #[test]
+    fn a_source_path_is_not_readable_in_the_raw_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        s.upsert_source(
+            &dek(),
+            SourceId::new(2, [2u8; 10]),
+            "markdown_vault",
+            "/home/someone/private-diary",
+            [2u8; 24],
+        )
+        .expect("add");
+        drop(s);
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
+        assert!(
+            !raw.windows(13).any(|w| w == b"private-diary"),
+            "the path is on disk in the clear"
+        );
+    }
+
+    #[test]
+    fn trust_and_sensitivity_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let id = s
+            .upsert_source_with(
+                &d,
+                &NewSourceRow {
+                    id: SourceId::new(2, [2u8; 10]),
+                    kind_tag: "structured_log",
+                    config: "/health.jsonl",
+                    trust: TrustLevel::SelfReported,
+                    sensitivity: Sensitivity::Secret,
+                },
+                [2u8; 24],
+            )
+            .expect("add");
+        let listed = s.all_sources(&d).expect("list");
+        let found = listed.iter().find(|x| x.id == id).expect("present");
+        assert_eq!(found.trust, TrustLevel::SelfReported);
+        assert_eq!(found.default_sensitivity, Sensitivity::Secret);
+        assert_eq!(found.config, "/health.jsonl");
+    }
+
+    /// A row written by a newer build reads as the strictest trust level, so an
+    /// unknown value is treated as hostile input rather than as the user's own
+    /// voice (THREAT_MODEL §T7).
+    #[test]
+    fn an_unrecognised_trust_level_reads_as_third_party() {
+        assert_eq!(trust_from_str("something_new"), TrustLevel::ThirdParty);
+        assert_eq!(trust_from_str("first_party"), TrustLevel::FirstParty);
+    }
+
+    #[test]
+    fn a_cursor_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let id = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "structured_log",
+                "/h.jsonl",
+                [2u8; 24],
+            )
+            .expect("add");
+        s.set_source_cursor(id, r#"{"type":"timestamp","0":123}"#)
+            .expect("set");
+        let listed = s.all_sources(&d).expect("list");
+        let found = listed.iter().find(|x| x.id == id).expect("present");
+        assert!(found.cursor_json.contains("timestamp"));
     }
 }

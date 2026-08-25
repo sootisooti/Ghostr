@@ -6,7 +6,7 @@
 
 use chrono::{NaiveDate, NaiveTime};
 use ghostr_anchor::{AnchorState, OtsClient};
-use ghostr_core::footage::{Commitment, Footage, Thread};
+use ghostr_core::footage::{Amendment, AmendmentReason, Commitment, Footage, Thread};
 use ghostr_core::hash::Hash32;
 use ghostr_core::ids::{EntityId, MemoryId, PersonaVersion, SourceId, ThreadId};
 use ghostr_core::memory::Memory;
@@ -14,7 +14,8 @@ use ghostr_core::time::Timestamp;
 use ghostr_ingest::markdown;
 use ghostr_memoria::compose::{self, NoteExtraction};
 use ghostr_memoria::extract;
-use ghostr_memoria::summarize::NaiveSummarizer;
+use ghostr_memoria::pipeline::DraftFootage;
+use ghostr_memoria::summarize::{NaiveSummarizer, Summarizer};
 use ghostr_store::memory::TimeRange;
 use ghostr_store::sqlite::{AnchorRecord, AnchorRecordState};
 
@@ -92,7 +93,7 @@ pub fn ingest(engine: &Engine, path: &std::path::Path) -> crate::Result<IngestRe
 /// Returns [`Error::Memoria`](crate::Error::Memoria) if the day is already
 /// sealed, or [`Error::Store`](crate::Error::Store) if the seal would fork or
 /// gap the chain.
-pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
+pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome> {
     let tz = engine.home_tz()?;
 
     if let Some(existing) = engine.store().date_is_sealed(date)? {
@@ -126,7 +127,10 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
     // deterministically from their name. That keeps the same @mention resolving
     // to the same id across days without inventing a resolution step the
     // milestone does not need.
-    let people = compose::people(&notes, &|name| entity_id_for(name));
+    // The real entity table, not a hash of the name: an entity that exists as a
+    // row is one the redactor can pseudonymise at the egress boundary, and one
+    // the user can see and merge. A derived id is neither.
+    let people = compose::people(&notes, &|name| resolve_person(engine, name));
 
     let previous_open = carry_forward_threads(engine)?;
     let seq = engine.store().tip()?.map_or(1, |t| t.seq + 1);
@@ -136,28 +140,15 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
         ThreadId::new(engine.now().utc_millis().unsigned_abs(), random)
     });
 
-    // Validation before sealing, not after: a highlight without evidence must
-    // never reach the chain (SPEC §6).
-    for highlight in &highlights {
-        if highlight.memory_ids.is_empty() {
-            return Err(crate::Error::Memoria(
-                ghostr_memoria::Error::ValidationFailed { count: 1 },
-            ));
-        }
-    }
+    // A memory that arrived after its own day sealed does not go back into it.
+    // It lands here, as an amendment pointing at the day it missed (I2).
+    let amendments = late_arrival_amendments(engine, &summarizer)?;
 
-    let (root, leaves) = build_root(&memories, seq, date, &tz)?;
-    let prev_link = match engine.store().tip()? {
-        Some(tip) => tip.link,
-        None => engine.store().genesis_link()?,
-    };
-    let link = ghostr_anchor::link(prev_link, root, seq, date, &tz);
-
-    let footage = Footage {
+    let mut draft = DraftFootage {
         seq,
         date,
         tz,
-        window: (window.start, window.end),
+        window,
         // An empty day still seals and still advances seq. A gap in the chain is
         // indistinguishable from a deletion, so there are no gaps (SPEC I3).
         empty: memories.is_empty(),
@@ -166,10 +157,46 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
         mood,
         open_threads: thread_update.open,
         closed_loops: thread_update.closed,
+        carried_threads: previous_open.iter().map(|t| t.id).collect(),
         unresolved,
         memory_ids: memories.iter().map(|m| m.id).collect(),
-        amendments: Vec::new(),
+        amendments,
         persona_version: PersonaVersion::genesis(),
+    };
+
+    // Drop first, then validate. Dropping is the filter — an unsupported claim
+    // is removed rather than allowed to stop the day closing — and validation
+    // is the backstop that catches anything dropping could not fix (SPEC §6).
+    let dropped_claims = ghostr_memoria::drop_unevidenced(&mut draft);
+    if let Err(errors) = ghostr_memoria::validate_draft(&draft) {
+        return Err(crate::Error::Memoria(
+            ghostr_memoria::Error::ValidationFailed {
+                count: errors.len(),
+            },
+        ));
+    }
+    let (root, leaves) = build_root(&memories, seq, date, &tz)?;
+    let prev_link = match engine.store().tip()? {
+        Some(tip) => tip.link,
+        None => engine.store().genesis_link()?,
+    };
+    let link = ghostr_anchor::link(prev_link, root, seq, date, &tz);
+
+    let footage = Footage {
+        seq: draft.seq,
+        date: draft.date,
+        tz: draft.tz,
+        window: (draft.window.start, draft.window.end),
+        empty: draft.empty,
+        highlights: draft.highlights,
+        people: draft.people,
+        mood: draft.mood,
+        open_threads: draft.open_threads,
+        closed_loops: draft.closed_loops,
+        unresolved: draft.unresolved,
+        memory_ids: draft.memory_ids,
+        amendments: draft.amendments,
+        persona_version: draft.persona_version,
         commitment: Commitment {
             merkle_root: root,
             prev_link,
@@ -181,7 +208,22 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
 
     let nonce = engine.nonce();
     engine.store().seal_footage(dek, &footage, &leaves, nonce)?;
-    Ok(footage)
+    Ok(MemoriaOutcome {
+        footage,
+        dropped_claims,
+    })
+}
+
+/// What one `memoria` run produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoriaOutcome {
+    /// The sealed day.
+    pub footage: Footage,
+    /// Claims removed for want of evidence.
+    ///
+    /// Reported rather than swallowed. A recap that quietly got shorter is a
+    /// recap the user cannot tell from one that had less to say.
+    pub dropped_claims: usize,
 }
 
 /// Builds the day's Merkle root and the per-memory leaves.
@@ -230,10 +272,37 @@ struct LeafPayload<'a> {
     occurred_at: Option<i64>,
 }
 
+/// Resolves a name to an entity in the store, creating one if it is unknown.
+///
+/// Falls back to [`entity_id_for`] if the store cannot be reached. That keeps a
+/// day sealable when entity resolution fails, at the cost of an id with no row
+/// behind it — which the redactor cannot pseudonymise. The fallback is the
+/// lesser harm only because the alternative is a gap in the chain (I3); it is
+/// not a good outcome and it is why `resolve_entity` is worth keeping cheap.
+fn resolve_person(engine: &Engine, name: &str) -> EntityId {
+    let Ok(dek) = engine.dek() else {
+        return entity_id_for(name);
+    };
+    let mut random = [0u8; 10];
+    engine.rng().fill(&mut random);
+    let now = engine.now();
+    engine
+        .store()
+        .resolve_entity(
+            dek,
+            name,
+            ghostr_store::entity::EntityKind::Person,
+            now,
+            EntityId::new(now.utc_millis().unsigned_abs(), random),
+            engine.nonce(),
+        )
+        .map_or_else(|_| entity_id_for(name), |stored| stored.id)
+}
+
 /// A deterministic entity id for a name.
 ///
-/// Same name, same id, forever — without an entity table. Real resolution
-/// (aliases, merging, pseudonyms) arrives with M1's entity store.
+/// Same name, same id, forever — without an entity table. The fallback when the
+/// store cannot resolve one.
 fn entity_id_for(name: &str) -> EntityId {
     let digest = ghostr_core::hash::tagged_hash(
         ghostr_core::hash::Tag::MetaLeaf,
@@ -254,6 +323,60 @@ fn entity_id_for(name: &str) -> EntityId {
         digest.as_bytes()[15],
     ]);
     EntityId::new(millis, random)
+}
+
+/// How long an amendment's note may be.
+const AMENDMENT_CHARS: usize = 160;
+
+/// Amendments for every memory that arrived after its own day had sealed.
+///
+/// This is the whole of I2 in practice. A nostr note from three days ago, pulled
+/// in today, does not retroactively enter a sealed window — that window's
+/// commitment is fixed and re-deriving it with an extra leaf would break every
+/// link after it. The memory lands in *today's* footage instead, with an
+/// amendment naming the day it should have been in.
+///
+/// A memory whose time predates the first sealed day amends nothing: there is no
+/// day for it to correct. It still enters today's window as an ordinary memory.
+fn late_arrival_amendments(
+    engine: &Engine,
+    summarizer: &dyn Summarizer,
+) -> crate::Result<Vec<Amendment>> {
+    let Some(tip) = engine.store().tip()? else {
+        // Nothing sealed yet, so nothing can be late.
+        return Ok(Vec::new());
+    };
+    let dek = engine.dek()?;
+    let Some(last) = engine.store().get_footage(dek, tip.seq)? else {
+        return Ok(Vec::new());
+    };
+    let sealed_through = last.window.1;
+
+    let late = engine
+        .store()
+        .late_arrivals(dek, sealed_through, tip.sealed_at)?;
+
+    let mut out = Vec::new();
+    for memory in &late {
+        let at = memory.occurred_at.unwrap_or(memory.ingested_at);
+        let Some(target_seq) = engine.store().sealed_seq_covering(at)? else {
+            continue;
+        };
+        out.push(Amendment {
+            target_seq,
+            reason: AmendmentReason::LateArrival,
+            note: summarizer.summarize(&memory.body.text, AMENDMENT_CHARS),
+            memory_ids: vec![memory.id],
+        });
+    }
+    // Grouped by the day they correct, then by memory, so the list is stable —
+    // it is hashed into today's root.
+    out.sort_by(|a, b| {
+        a.target_seq
+            .cmp(&b.target_seq)
+            .then_with(|| a.memory_ids.cmp(&b.memory_ids))
+    });
+    Ok(out)
 }
 
 /// The threads left open by the most recent sealed day.
@@ -456,4 +579,279 @@ pub fn verify(engine: &Engine) -> crate::Result<VerifyReport> {
     }
 
     Ok(report)
+}
+
+/// Records a journal entry.
+///
+/// Goes straight into the encrypted store. Ghostr never writes a plaintext
+/// journal file, not even its own (I1) — which is why the journal source has no
+/// location and nothing to poll.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if the entry is empty, or
+/// [`Error::Store`](crate::Error::Store) if the write fails.
+pub fn journal_add(engine: &Engine, text: &str) -> crate::Result<MemoryId> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(crate::Error::Config {
+            detail: "an empty journal entry records nothing".to_owned(),
+        });
+    }
+    let dek = engine.dek()?;
+    let source = journal_source(engine)?;
+    let now = engine.now();
+    let entry = ghostr_ingest::journal::JournalEntry {
+        relative_path: String::new(),
+        heading: now.utc_millis().to_string(),
+        at: chrono::DateTime::from_timestamp_millis(now.utc_millis())
+            .unwrap_or_default()
+            .naive_utc(),
+        text: text.to_owned(),
+        basis: ghostr_ingest::adapter::TimeBasis::Stated,
+    };
+    let memory = ghostr_ingest::journal::to_memory(&entry, source, engine.clock(), engine.rng());
+    engine.store().put_memory(dek, &memory, engine.nonce())?;
+    Ok(memory.id)
+}
+
+/// Imports a running journal file, splitting it at its timestamp headings.
+///
+/// Idempotent: an unchanged entry keeps its digest, so re-importing after
+/// appending adds exactly the new entries.
+///
+/// # Errors
+///
+/// Returns [`Error::Ingest`](crate::Error::Ingest) if the file cannot be read.
+pub fn journal_import(engine: &Engine, path: &std::path::Path) -> crate::Result<IngestReport> {
+    let dek = engine.dek()?;
+    let source = journal_source(engine)?;
+    let entries = ghostr_ingest::journal::scan(path, source)?;
+
+    let mut report = IngestReport::default();
+    for entry in &entries {
+        let memory = ghostr_ingest::journal::to_memory(entry, source, engine.clock(), engine.rng());
+        if engine
+            .store()
+            .has_raw_hash(source, memory.provenance.raw_hash)?
+        {
+            report.skipped += 1;
+            continue;
+        }
+        match engine.store().put_memory(dek, &memory, engine.nonce()) {
+            Ok(()) => report.ingested += 1,
+            Err(ghostr_store::Error::AppendOnlyViolation { .. }) => report.skipped += 1,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(report)
+}
+
+/// The journal source, created on first use.
+fn journal_source(engine: &Engine) -> crate::Result<SourceId> {
+    let dek = engine.dek()?;
+    let mut random = [0u8; 10];
+    engine.rng().fill(&mut random);
+    Ok(engine.store().upsert_source_with(
+        dek,
+        &ghostr_store::sqlite::NewSourceRow {
+            id: SourceId::new(engine.now().utc_millis().unsigned_abs(), random),
+            kind_tag: ghostr_ingest::journal::KIND_TAG,
+            // No location: the entries are in the store, not in a file.
+            config: r#"{"location":""}"#,
+            trust: ghostr_ingest::journal::default_trust(),
+            sensitivity: ghostr_core::sensitivity::Sensitivity::Private,
+        },
+        engine.nonce(),
+    )?)
+}
+
+/// A day's recap: the sealed footage if there is one, a preview if not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recap {
+    /// The day.
+    pub date: NaiveDate,
+    /// The footage, sealed or drafted.
+    pub footage: Footage,
+    /// Whether it is sealed, or a preview of a day still open.
+    pub sealed: bool,
+}
+
+/// Shows a day, sealing nothing.
+///
+/// A day already sealed is read back. A day still open is compiled and shown
+/// *without* being sealed: previewing a recap must not advance the chain, or
+/// looking at today would silently close it (I2, I3).
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the read fails.
+pub fn recap(engine: &Engine, date: NaiveDate) -> crate::Result<Recap> {
+    let dek = engine.dek()?;
+    if let Some(seq) = engine.store().date_is_sealed(date)?
+        && let Some(footage) = engine.store().get_footage(dek, seq)?
+    {
+        return Ok(Recap {
+            date,
+            footage,
+            sealed: true,
+        });
+    }
+    let footage = preview(engine, date)?;
+    Ok(Recap {
+        date,
+        footage,
+        sealed: false,
+    })
+}
+
+/// Compiles a day without sealing it.
+///
+/// Shares the compose stage with [`memoria`] and stops before the commitment.
+/// The commitment fields are zeroed rather than computed: a preview that
+/// carried a real-looking link would be a footage that never entered the chain
+/// and looked like it had.
+fn preview(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
+    let tz = engine.home_tz()?;
+    let window = day_window(date, &tz);
+    let dek = engine.dek()?;
+    let memories = engine.store().window(dek, window)?;
+
+    let summarizer = NaiveSummarizer;
+    let notes: Vec<NoteExtraction<'_>> = memories
+        .iter()
+        .map(|m| NoteExtraction {
+            memory: m,
+            extraction: extract::extract(&m.body.text),
+        })
+        .collect();
+
+    let previous_open = carry_forward_threads(engine)?;
+    let seq = engine.store().tip()?.map_or(1, |t| t.seq + 1);
+    let thread_update = compose::threads(&previous_open, &notes, seq, &|| {
+        let mut random = [0u8; 10];
+        engine.rng().fill(&mut random);
+        ThreadId::new(engine.now().utc_millis().unsigned_abs(), random)
+    });
+
+    Ok(Footage {
+        seq,
+        date,
+        tz,
+        window: (window.start, window.end),
+        empty: memories.is_empty(),
+        highlights: compose::highlights(&notes, &summarizer, MAX_HIGHLIGHTS),
+        // A preview resolves entities too, so the ids it shows are the ids the
+        // sealed day will carry.
+        people: compose::people(&notes, &|name| resolve_person(engine, name)),
+        mood: compose::mood(&notes),
+        open_threads: thread_update.open,
+        closed_loops: thread_update.closed,
+        unresolved: compose::unresolved(&notes),
+        memory_ids: memories.iter().map(|m| m.id).collect(),
+        amendments: Vec::new(),
+        persona_version: PersonaVersion::genesis(),
+        // Zeroed on purpose: nothing here is committed to anything.
+        commitment: Commitment {
+            merkle_root: Hash32::from_bytes([0u8; 32]),
+            prev_link: Hash32::from_bytes([0u8; 32]),
+            link: Hash32::from_bytes([0u8; 32]),
+            leaf_count: 0,
+        },
+        sealed_at: engine.now(),
+    })
+}
+
+/// Every thread open at the chain tip, plus the day each was opened.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the read fails.
+pub fn open_threads(engine: &Engine) -> crate::Result<Vec<Thread>> {
+    carry_forward_threads(engine)
+}
+
+/// The egress log, newest first.
+///
+/// Reads the audit record of everything that left the device. An empty log on a
+/// vault that has never used a remote model is the expected answer, and the one
+/// a user should be able to confirm for themselves (SPEC I5).
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the read fails.
+pub fn egress_log(
+    engine: &Engine,
+    since: Timestamp,
+) -> crate::Result<Vec<ghostr_store::sqlite::EgressRecord>> {
+    let mut records = engine.store().egress_since(since)?;
+    records.reverse();
+    Ok(records)
+}
+
+/// What a remote summarisation of one day would send, without sending it.
+///
+/// Backs `ghostr memoria --dry-run --remote`. The payload and the decision come
+/// from the same code path a real call takes, so this cannot drift from what
+/// actually happens — a preview that showed something other than the truth would
+/// be worse than no preview.
+#[cfg(feature = "llm")]
+#[derive(Debug, Clone)]
+pub struct RemoteDryRun {
+    /// The day that would be summarised.
+    pub date: NaiveDate,
+    /// Memories in the window.
+    pub memories: usize,
+    /// Memories the gate would never even consider, being `Secret`.
+    ///
+    /// Counted separately because they are the interesting number: they are the
+    /// ones the user is trusting the system not to send.
+    pub secret_withheld: usize,
+    /// One entry per note that would be sent.
+    pub notes: Vec<ghostr_llm::gate::DryRun>,
+}
+
+/// Shows what a remote model would receive for one day.
+///
+/// # Errors
+///
+/// Returns [`Error::Llm`](crate::Error::Llm) if the provider is not compiled in,
+/// or [`Error::Store`](crate::Error::Store) if the window cannot be read.
+#[cfg(feature = "llm")]
+pub fn dry_run_remote(
+    engine: &Engine,
+    date: NaiveDate,
+    config: ghostr_llm::gate::RemoteModelConfig,
+) -> crate::Result<RemoteDryRun> {
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+    use ghostr_llm::model::TaskKind;
+    use ghostr_llm::prompt::{PromptBuilder, TokenBudget};
+
+    let tz = engine.home_tz()?;
+    let window = day_window(date, &tz);
+    let dek = engine.dek()?;
+    let memories = engine.store().window(dek, window)?;
+    let gated = crate::model::remote_model(engine, config)?;
+
+    let mut out = RemoteDryRun {
+        date,
+        memories: memories.len(),
+        secret_withheld: 0,
+        notes: Vec::new(),
+    };
+
+    for memory in &memories {
+        // Counted, and not built into a prompt at all. `Secret` content is not
+        // "denied at the gate" — it never reaches the gate, which is one fewer
+        // place for it to go wrong (I5).
+        if memory.sensitivity == Sensitivity::Secret {
+            out.secret_withheld += 1;
+            continue;
+        }
+        let request = PromptBuilder::new(TaskKind::Summarization, TokenBudget(4096))
+            .corpus(std::slice::from_ref(memory), TrustLevel::FirstParty)
+            .build()?;
+        out.notes.push(gated.dry_run(&request)?);
+    }
+    Ok(out)
 }

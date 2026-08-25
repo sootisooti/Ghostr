@@ -15,7 +15,12 @@ ghostr-core = { workspace = true }
 ghostr-crypto = { workspace = true }
 ghostr-store = { workspace = true }
 ghostr-ingest = { workspace = true }
+# The composition root is where a model gets wired in. No provider is on by
+# default; `llm-local` turns Ollama on and `llm-remote` the gated providers.
+ghostr-llm = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
 ghostr-memoria = { workspace = true }
+serde_json = { workspace = true }
 ghostr-anchor = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
@@ -24,9 +29,20 @@ thiserror = { workspace = true }
 hex = { workspace = true }
 secp256k1 = { workspace = true }
 
+[features]
+default = []
+## Wire a language model in. Off by default: a stock build has no model path,
+## which makes "works offline with no LLM" checkable with `cargo tree`.
+llm = ["dep:ghostr-llm", "dep:async-trait", "ghostr-memoria/llm"]
+## A local Ollama-compatible runtime.
+llm-local = ["llm", "ghostr-llm/local-ollama"]
+## Remote providers, behind the egress gate. Off by default.
+llm-remote = ["llm", "ghostr-llm/remote"]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true

@@ -57,6 +57,14 @@ pub enum Error {
     /// Memoria failed.
     #[error(transparent)]
     Memoria(#[from] ghostr_memoria::Error),
+
+    /// A model call failed, or the gate refused it.
+    ///
+    /// Only reachable with the `llm` feature. Without it the binary has no
+    /// model path at all.
+    #[cfg(feature = "llm")]
+    #[error(transparent)]
+    Llm(#[from] ghostr_llm::Error),
     /// Hashing or canonical encoding failed.
     #[error(transparent)]
     Core(#[from] ghostr_core::Error),

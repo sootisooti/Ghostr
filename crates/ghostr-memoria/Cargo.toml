@@ -15,6 +15,8 @@ ghostr-llm = { workspace = true, optional = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 serde = { workspace = true }
+# Only reachable behind the `llm` feature: the extraction schema is JSON.
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
@@ -23,10 +25,11 @@ default = []
 ## An LLM-backed Summarizer. Off in M0: with this feature disabled, `cargo tree`
 ## shows the binary has no model path at all, which makes "works offline with no
 ## LLM" a checkable property rather than a claim.
-llm = ["dep:ghostr-llm"]
+llm = ["dep:ghostr-llm", "dep:serde_json"]
 
 [dev-dependencies]
 ghostr-testkit = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [lints]
 workspace = true
