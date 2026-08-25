@@ -13,6 +13,7 @@
 //! - [`nip19`] — bech32 `npub` / `nsec` / `nprofile` encoding.
 //! - [`nip44`] — v2 payload encryption, including self-encryption for app data.
 //! - [`kdf`] — Argon2id passphrase stretching and the KEK/DEK hierarchy.
+//! - [`keystore`] — the on-disk keystore file and its local implementation.
 //! - [`event`] — the minimal unsigned nostr event that signing operates on.
 //!
 //! # Unsafe
@@ -35,10 +36,15 @@
 // `cargo xtask scaffold-status` counts these markers so they cannot be quietly
 // forgotten.
 #![allow(unused_variables, dead_code, clippy::todo)]
+// CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
+// the exception: a failed assertion should panic loudly with a message, and
+// threading `Result` through test bodies buries what is actually being asserted.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod error;
 pub mod event;
 pub mod kdf;
+pub mod keystore;
 pub mod nip06;
 pub mod nip19;
 pub mod nip44;
@@ -46,4 +52,5 @@ pub mod secret;
 pub mod signer;
 
 pub use error::{Error, Result};
+pub use keystore::FileKeystore;
 pub use signer::{Keystore, Signer};

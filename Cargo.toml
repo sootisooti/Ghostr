@@ -29,19 +29,22 @@ authors = ["The Ghostr contributors"]
 
 [workspace.dependencies]
 # --- internal ---------------------------------------------------------------
-# Paths only, no versions: nothing here is published yet.
-ghostr-core = { path = "crates/ghostr-core" }
-ghostr-crypto = { path = "crates/ghostr-crypto" }
-ghostr-store = { path = "crates/ghostr-store" }
-ghostr-llm = { path = "crates/ghostr-llm" }
-ghostr-ingest = { path = "crates/ghostr-ingest" }
-ghostr-persona = { path = "crates/ghostr-persona" }
-ghostr-memoria = { path = "crates/ghostr-memoria" }
-ghostr-quests = { path = "crates/ghostr-quests" }
-ghostr-anchor = { path = "crates/ghostr-anchor" }
-ghostr-nostr = { path = "crates/ghostr-nostr" }
-ghostr-engine = { path = "crates/ghostr-engine" }
-ghostr-testkit = { path = "crates/ghostr-testkit" }
+# Each carries an explicit version alongside its path. Nothing here is published
+# yet, but a path-only dependency resolves as a wildcard (`*`), which
+# `cargo deny check bans` rejects — and rightly: a wildcard is what a publish
+# would need to fill in anyway. Keep these in step with `workspace.package.version`.
+ghostr-core = { path = "crates/ghostr-core", version = "0.0.0" }
+ghostr-crypto = { path = "crates/ghostr-crypto", version = "0.0.0" }
+ghostr-store = { path = "crates/ghostr-store", version = "0.0.0" }
+ghostr-llm = { path = "crates/ghostr-llm", version = "0.0.0" }
+ghostr-ingest = { path = "crates/ghostr-ingest", version = "0.0.0" }
+ghostr-persona = { path = "crates/ghostr-persona", version = "0.0.0" }
+ghostr-memoria = { path = "crates/ghostr-memoria", version = "0.0.0" }
+ghostr-quests = { path = "crates/ghostr-quests", version = "0.0.0" }
+ghostr-anchor = { path = "crates/ghostr-anchor", version = "0.0.0" }
+ghostr-nostr = { path = "crates/ghostr-nostr", version = "0.0.0" }
+ghostr-engine = { path = "crates/ghostr-engine", version = "0.0.0" }
+ghostr-testkit = { path = "crates/ghostr-testkit", version = "0.0.0" }
 
 # --- external ---------------------------------------------------------------
 # Every addition needs a justification in its PR (CLAUDE.md §4.9). Keep this
@@ -63,6 +66,46 @@ chrono-tz = { version = "0.10", default-features = false, features = ["serde"] }
 async-trait = "0.1"
 zeroize = { version = "1", features = ["derive"] }
 clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# --- M0: cryptography -------------------------------------------------------
+# No primitive is implemented in this tree. These are the audited building
+# blocks; ghostr-crypto owns only their composition (THREAT_MODEL §5).
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+secp256k1 = { version = "0.31", features = ["std", "rand"] }
+bip39 = { version = "2", default-features = false, features = ["std"] }
+bech32 = "0.11"
+hex = "0.4"
+subtle = "2"
+
+# --- M0: storage, ingest, anchoring -----------------------------------------
+# `bundled` compiles SQLite from source: no system library to install, and the
+# version is pinned by our lockfile rather than by whatever the OS ships.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Deterministic CBOR is built on top of this (see ghostr-core::canonical).
+ciborium = "0.2"
+walkdir = "2"
+pulldown-cmark = { version = "0.12", default-features = false }
+# The OpenTimestamps project's own crate. Handles `.ots` serialisation — the
+# part not worth hand-rolling — and deliberately has no HTTP client, so
+# calendar submission is ours.
+opentimestamps = "0.2"
+# Blocking HTTP for OTS calendar submission. Chosen over reqwest to keep hyper
+# and a second async runtime out of the tree (THREAT_MODEL §T8).
+# `native-certs` so the platform trust store is used rather than only ureq's
+# bundled webpki roots. Without it, anyone behind a TLS-inspecting proxy — which
+# is most corporate networks — cannot anchor, and the failure looks like a
+# calendar outage rather than a trust-store problem.
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
+
+# --- M0: dev-only -----------------------------------------------------------
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
 
 # Lints apply to `cargo build` as well as `cargo clippy`, so a violation cannot
 # survive to CI. Each crate opts in with `[lints] workspace = true`.

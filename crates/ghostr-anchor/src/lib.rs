@@ -2,7 +2,11 @@
 //!
 //! Two halves, deliberately separated (ARCHITECTURE §4.5):
 //!
-//! - [`chain`] is **pure, synchronous, and I/O-free**. It is the part where a
+//! - [`chain`] is **pure, synchronous, and I/O-free**. Free functions rather
+//!   than a trait: there is exactly one scheme at a time, its version is a
+//!   constant, and a trait with a single implementation would be abstraction
+//!   ahead of a second version that does not exist yet (CLAUDE.md §9). If a v2
+//!   ever needs to coexist with v1, that is when the seam earns its keep. It is the part where a
 //!   bug is unrecoverable — a wrong preimage silently forks every user's
 //!   history and no migration can repair it, because the old hashes are already
 //!   in Bitcoin. Being pure means it is testable with fixed vectors and property
@@ -24,6 +28,10 @@
 //! Scaffold. Types and signatures are defined; bodies are [`todo!`].
 
 #![forbid(unsafe_code)]
+// CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
+// the exception: a failed assertion should panic loudly with a message, and
+// threading `Result` through test bodies buries what is actually being asserted.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 // SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
 // only for the scaffold phase and are removed crate-by-crate as bodies land.
 // `unused_variables` and `dead_code` fire because a diverging body never reads
@@ -39,7 +47,9 @@ pub mod error;
 pub mod ots;
 pub mod verify;
 
-pub use chain::CommitmentChain;
+pub use chain::{
+    CHAIN_VERSION, ChainRecord, genesis, link, memory_leaf, meta_leaf, root, verify_run,
+};
 pub use error::{Error, Result};
-pub use ots::{AnchorState, Anchorer, PendingProof, Proof};
-pub use verify::{BlockHeaderSource, HeaderTrust};
+pub use ots::{AnchorState, CalendarConfig, OtsClient, Submission, default_calendars};
+pub use verify::{CheckResult, HeaderTrust, VerificationReport};

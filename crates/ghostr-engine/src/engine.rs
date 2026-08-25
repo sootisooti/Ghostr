@@ -1,112 +1,283 @@
 //! The engine: everything wired together.
+//!
+//! Holds no domain logic. It decides *when* things run and *which*
+//! implementations run; never *what* they mean. Rules about extraction,
+//! summarisation, or the chain live in the crates that own them.
 
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 
-use ghostr_anchor::{Anchorer, CommitmentChain};
-use ghostr_core::time::{Clock, Rng};
-use ghostr_crypto::{Keystore, Signer};
-use ghostr_ingest::AdapterRegistry;
-use ghostr_llm::{Embedder, LanguageModel};
-use ghostr_memoria::MemoriaPipeline;
-use ghostr_persona::{PersonaBuilder, Retriever};
-use ghostr_quests::{QuestGenerator, Scorer, VerdictIntake};
-use ghostr_store::{
-    BlobStore, EntityStore, FootageStore, MemoryStore, PersonaStore, QuestStore, VectorIndex,
-};
+use chrono::NaiveDate;
+use chrono_tz::Tz;
+use ghostr_core::hash::Hash32;
+use ghostr_core::identity::{Account, Npub};
+use ghostr_core::ids::ChainId;
+use ghostr_core::time::{Clock, Rng, Timestamp};
+use ghostr_crypto::kdf::Argon2Params;
+use ghostr_crypto::keystore::{FileKeystore, KEYSTORE_FILENAME};
+use ghostr_crypto::nip06::{Mnemonic, WordCount};
+use ghostr_crypto::secret::SecretString;
+use ghostr_crypto::signer::Keystore as _;
+use ghostr_store::SqliteStore;
 
-use crate::config::Config;
+use crate::runtime::{OsRng, SystemClock};
 
-/// Everything wired together.
+/// Everything wired together for M0.
 ///
-/// Constructed once at startup. Every field is a trait object, which is what
-/// lets the whole thing run against fakes in an integration test with no
-/// database, no model, and no network.
+/// Constructed once per command. The clock and RNG are trait objects so an
+/// integration test can drive the whole flow deterministically.
 pub struct Engine {
-    config: Config,
-    clock: Arc<dyn Clock>,
-    rng: Arc<dyn Rng>,
-    keystore: Arc<dyn Keystore>,
-    signer: Arc<dyn Signer>,
-    memories: Arc<dyn MemoryStore>,
-    footage: Arc<dyn FootageStore>,
-    quests_store: Arc<dyn QuestStore>,
-    persona_store: Arc<dyn PersonaStore>,
-    entities: Arc<dyn EntityStore>,
-    blobs: Arc<dyn BlobStore>,
-    vectors: Arc<dyn VectorIndex>,
-    model: Arc<dyn LanguageModel>,
-    embedder: Arc<dyn Embedder>,
-    adapters: AdapterRegistry,
-    memoria: Arc<dyn MemoriaPipeline>,
-    persona: Arc<dyn PersonaBuilder>,
-    retriever: Arc<dyn Retriever>,
-    generator: Arc<dyn QuestGenerator>,
-    intake: Arc<dyn VerdictIntake>,
-    scorer: Arc<dyn Scorer>,
-    chain: Arc<dyn CommitmentChain>,
-    anchorer: Arc<dyn Anchorer>,
+    dir: PathBuf,
+    keystore: FileKeystore,
+    store: SqliteStore,
+    clock: Box<dyn Clock>,
+    rng: Box<dyn Rng>,
 }
 
 impl core::fmt::Debug for Engine {
-    /// Prints which implementations are wired, never their state.
+    /// Prints location and lock state, never key material or content.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("print the model descriptor, device id and lock state")
+        f.debug_struct("Engine")
+            .field("dir", &self.dir)
+            .field("locked", &self.keystore.is_locked())
+            .finish()
     }
 }
 
+/// What `init` produced.
+#[derive(Debug)]
+pub struct InitOutcome {
+    /// The identity npub.
+    pub npub: Npub,
+    /// The generated mnemonic, if one was generated rather than imported.
+    ///
+    /// Returned exactly once, at creation, and never persisted in plaintext.
+    /// The caller shows it and forgets it.
+    pub mnemonic: Option<String>,
+    /// The genesis link this chain starts from.
+    pub genesis_link: Hash32,
+}
+
 impl Engine {
-    /// Builds an engine from configuration.
-    ///
-    /// The real [`Clock`] and [`Rng`] are constructed here and nowhere else.
-    /// `clippy.toml` bans the underlying constructors workspace-wide, so this
-    /// function carries the single documented
-    /// `#[allow(clippy::disallowed_methods)]` and every exception in the tree is
-    /// one grep away (ARCHITECTURE §4.7).
+    /// Creates a new identity, keystore, and store.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Config`](crate::Error::Config) if configuration is
-    /// unusable, or an underlying error if a component fails to construct.
-    pub fn build(config: Config) -> crate::Result<Self> {
-        todo!("construct the real clock, rng, store, model and pipelines")
+    /// Returns [`Error::Config`](crate::Error::Config) if a keystore already
+    /// exists — refusing rather than overwriting, because overwriting a keystore
+    /// destroys an identity that cannot be regenerated.
+    pub fn init(
+        dir: &Path,
+        passphrase: &SecretString,
+        home_tz: Tz,
+        import: Option<SecretString>,
+        params: Argon2Params,
+    ) -> crate::Result<(Self, InitOutcome)> {
+        let keystore_path = dir.join(KEYSTORE_FILENAME);
+        if FileKeystore::exists(&keystore_path) {
+            return Err(crate::Error::Config {
+                detail: format!("a keystore already exists at {}", keystore_path.display()),
+            });
+        }
+
+        let clock = SystemClock::new(home_tz);
+        let rng = OsRng;
+
+        let (mnemonic, revealed) = match import {
+            Some(phrase) => (Mnemonic::parse(phrase)?, None),
+            None => {
+                let mut entropy = [0u8; 16];
+                rng.fill(&mut entropy);
+                let m = Mnemonic::generate(WordCount::Twelve, &entropy)?;
+                let phrase = m.expose().to_owned();
+                (m, Some(phrase))
+            }
+        };
+
+        let mut salt = [0u8; 16];
+        let mut nonce = [0u8; 24];
+        rng.fill(&mut salt);
+        rng.fill(&mut nonce);
+
+        let mut keystore =
+            FileKeystore::create(&keystore_path, &mnemonic, passphrase, salt, nonce, params)?;
+        keystore.unlock(SecretString::new(passphrase.expose().to_owned()))?;
+
+        let identity = keystore.identity_pubkey()?;
+        let npub = keystore.npub();
+
+        let now = clock.now();
+        let mut chain_random = [0u8; 10];
+        rng.fill(&mut chain_random);
+        let chain_id = ChainId::new(now.utc_millis().unsigned_abs(), chain_random);
+        let genesis_link = ghostr_anchor::genesis(&identity, chain_id, now);
+
+        let store = SqliteStore::open(dir)?;
+        store.init_chain(chain_id, &identity, genesis_link, home_tz, now)?;
+
+        Ok((
+            Self {
+                dir: dir.to_path_buf(),
+                keystore,
+                store,
+                clock: Box::new(clock),
+                rng: Box::new(rng),
+            },
+            InitOutcome {
+                npub,
+                mnemonic: revealed,
+                genesis_link,
+            },
+        ))
     }
 
-    /// Unlocks the keystore.
+    /// Opens an existing vault and unlocks it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Crypto`](crate::Error::Crypto) with
-    /// `BadPassphrase` if the passphrase is wrong.
-    pub fn unlock(&self, passphrase: ghostr_crypto::secret::SecretString) -> crate::Result<()> {
-        todo!("unlock the keystore and start the auto-lock timer")
+    /// Returns [`Error::Config`](crate::Error::Config) if no vault exists, or a
+    /// crypto error if the passphrase is wrong.
+    pub fn open(dir: &Path, passphrase: &SecretString) -> crate::Result<Self> {
+        Self::open_with(dir, passphrase, None, None)
     }
 
-    /// Locks the keystore and zeroizes the keys.
-    pub fn lock(&self) {
-        todo!("lock the keystore")
-    }
-
-    /// Whether this device may seal (SPEC Q10).
+    /// Opens a vault with explicit clock and RNG.
     ///
-    /// Checked before every seal. Two devices advancing one chain is the failure
-    /// that produces a fork, and a forked chain is worthless.
+    /// The seam integration tests use: a fixed clock and a seeded RNG make the
+    /// whole flow reproducible, including salts, nonces, and identifiers.
     ///
     /// # Errors
     ///
-    /// Returns an error if the manifest cannot be read.
-    pub fn is_sealing_device(&self) -> crate::Result<bool> {
-        todo!("compare the configured device id against the manifest's sealer")
+    /// Returns [`Error::Config`](crate::Error::Config) if no vault exists.
+    pub fn open_with(
+        dir: &Path,
+        passphrase: &SecretString,
+        clock: Option<Box<dyn Clock>>,
+        rng: Option<Box<dyn Rng>>,
+    ) -> crate::Result<Self> {
+        let keystore_path = dir.join(KEYSTORE_FILENAME);
+        if !FileKeystore::exists(&keystore_path) {
+            return Err(crate::Error::Config {
+                detail: format!("no vault at {} — run `ghostr init` first", dir.display()),
+            });
+        }
+        let mut keystore = FileKeystore::open(&keystore_path)?;
+        keystore.unlock(SecretString::new(passphrase.expose().to_owned()))?;
+        let store = SqliteStore::open(dir)?;
+        let home_tz = store.home_tz()?;
+
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            keystore,
+            store,
+            clock: clock.unwrap_or_else(|| Box::new(SystemClock::new(home_tz))),
+            rng: rng.unwrap_or_else(|| Box::new(OsRng)),
+        })
     }
 
-    /// Runs any seals that are due, oldest first.
-    ///
-    /// Called at startup as well as on the schedule, so a machine that slept
-    /// through three cutoffs catches up rather than skipping them.
+    /// The data directory.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The store.
+    #[must_use]
+    pub fn store(&self) -> &SqliteStore {
+        &self.store
+    }
+
+    /// The keystore.
+    #[must_use]
+    pub fn keystore(&self) -> &FileKeystore {
+        &self.keystore
+    }
+
+    /// The clock.
+    #[must_use]
+    pub fn clock(&self) -> &dyn Clock {
+        self.clock.as_ref()
+    }
+
+    /// The RNG.
+    #[must_use]
+    pub fn rng(&self) -> &dyn Rng {
+        self.rng.as_ref()
+    }
+
+    /// The identity npub.
+    #[must_use]
+    pub fn npub(&self) -> Npub {
+        self.keystore.npub()
+    }
+
+    /// The home timezone this chain seals in.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NotSealer`](crate::Error::NotSealer) on a replica.
-    pub async fn seal_pending(&self) -> crate::Result<Vec<u64>> {
-        todo!("compute pending windows, compile, validate and seal each in order")
+    /// Returns [`Error::Store`](crate::Error::Store) if it is missing.
+    pub fn home_tz(&self) -> crate::Result<Tz> {
+        Ok(self.store.home_tz()?)
+    }
+
+    /// Resolves `today`, `yesterday`, or a `YYYY-MM-DD` string to a date.
+    ///
+    /// Parsed against the *home* zone rather than the ambient one, so "today"
+    /// means the same day the cutoff will seal (SPEC Q11).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`](crate::Error::Config) if the string is not a
+    /// date this understands.
+    pub fn resolve_date(&self, spec: &str) -> crate::Result<NaiveDate> {
+        let tz = self.home_tz()?;
+        let today = self.clock.now().date_in(&tz);
+        match spec.trim().to_lowercase().as_str() {
+            "today" => Ok(today),
+            "yesterday" => today.pred_opt().ok_or_else(|| crate::Error::Config {
+                detail: "date underflow".to_owned(),
+            }),
+            other => other
+                .parse::<NaiveDate>()
+                .map_err(|_| crate::Error::Config {
+                    detail: format!(
+                        "`{other}` is not a date; try `today`, `yesterday`, or YYYY-MM-DD"
+                    ),
+                }),
+        }
+    }
+
+    /// A fresh 24-byte AEAD nonce.
+    ///
+    /// Every sealed row gets its own. Reusing a nonce under one key is the
+    /// classic way to lose confidentiality in a stream cipher, so this is the
+    /// only way rows get one.
+    pub fn nonce(&self) -> [u8; 24] {
+        let mut out = [0u8; 24];
+        self.rng.fill(&mut out);
+        out
+    }
+
+    /// Borrows the data encryption key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if the keystore is locked.
+    pub fn dek(&self) -> crate::Result<&ghostr_crypto::kdf::Dek> {
+        self.keystore.dek().map_err(|_| crate::Error::Locked)
+    }
+
+    /// The identity account's key reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
+    pub fn identity_key(&self) -> crate::Result<ghostr_core::identity::KeyRef> {
+        Ok(self.keystore.key_ref(Account::Identity)?)
+    }
+
+    /// A timestamp for now.
+    #[must_use]
+    pub fn now(&self) -> Timestamp {
+        self.clock.now()
     }
 }

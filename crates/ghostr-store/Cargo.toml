@@ -15,9 +15,15 @@ authors.workspace = true
 ghostr-core = { workspace = true }
 ghostr-crypto = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
+rusqlite = { workspace = true }
+ciborium = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

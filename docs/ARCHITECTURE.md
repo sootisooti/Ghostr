@@ -1,6 +1,6 @@
 # Ghostr — Architecture
 
-**Status:** Draft v0.1 · scaffolded, unimplemented
+**Status:** Draft v0.2 · M0 implemented; M1+ scaffolded
 **Companion to:** [SPEC.md](SPEC.md) (what it does) and
 [THREAT_MODEL.md](THREAT_MODEL.md) (what it defends against)
 
@@ -41,7 +41,7 @@ ghostr/
 │   ├── ghostr-anchor/          # commitment chain, OpenTimestamps, verification
 │   ├── ghostr-nostr/           # relay client, event codec for our kinds
 │   ├── ghostr-engine/          # orchestration, scheduling, job queue — the composition root
-│   ├── ghostr-cli/             # `gst` binary
+│   ├── ghostr-cli/             # `ghostr` binary
 │   └── ghostr-testkit/         # fixtures, fake clock/rng/LLM, proptest strategies (dev only)
 └── xtask/                      # dev automation (vectors, schema dumps, dep-direction lint)
 ```
@@ -105,15 +105,20 @@ flowchart TD
 
 ### Rules
 
-1. **`ghostr-core` depends on nothing but serde, thiserror, and time/uuid.** No
-   tokio, no reqwest, no rusqlite. If core needs I/O, the design is wrong.
+1. **`ghostr-core` depends only on pure-computation crates**: serde, thiserror,
+   time/uuid, and the hashing and canonical-encoding primitives (`sha2`,
+   `ciborium`, `hex`). No tokio, no reqwest, no rusqlite, no `getrandom`. The
+   rule is "no I/O", not "no dependencies" — if core needs I/O, the design is
+   wrong.
 2. **No sideways dependencies between the domain crates.** `persona`, `memoria`,
    `quests`, and `ingest` do not import each other. They share types via `core`
    and are composed by `engine`. Memoria produces a `Footage`; persona consumes
    one; neither knows the other exists.
-3. **Only `ghostr-llm` may depend on a model provider SDK or HTTP client for
-   inference.** Enforced by an `xtask lint-deps` check in CI, not by good
-   intentions.
+3. **Only `ghostr-llm` may depend on a model provider SDK**, anywhere, ever. A
+   *generic* HTTP client is permitted only in the three crates whose job includes
+   a network call — `ghostr-llm`, `ghostr-anchor` (OpenTimestamps calendars), and
+   `ghostr-nostr` (relays) — and is banned everywhere else. Both halves are
+   enforced by `xtask lint-deps` in CI, not by good intentions.
 4. **Only `ghostr-crypto` touches secret key bytes.** Everything else holds a
    `KeyRef` and calls a `Signer`.
 5. **`ghostr-testkit` is a `dev-dependency` only.** A production crate depending
@@ -248,14 +253,18 @@ a fixture-driven test from `ghostr-testkit`. No changes anywhere else.
 
 ```rust
 /// Pure, synchronous, no I/O — the part that must be provably correct.
-pub trait CommitmentChain {
-    fn genesis(&self, identity: &PublicKey, chain_id: ChainId, at: Timestamp) -> Hash32;
-    fn leaf(&self, kind: LeafKind, salt: &[u8; 32], bytes: &[u8]) -> Hash32;
-    fn root(&self, leaves: &[Hash32]) -> Hash32;
-    fn link(&self, prev: Hash32, root: Hash32, seq: u64, date: NaiveDate, tz: &Tz) -> Hash32;
-    fn inclusion_proof(&self, leaves: &[Hash32], target: Hash32) -> Option<MerkleProof>;
-    fn verify_inclusion(&self, proof: &MerkleProof, root: Hash32) -> bool;
-}
+///
+/// Free functions plus a `CHAIN_VERSION` constant, not a trait: there is exactly
+/// one scheme at a time, and a trait with a single implementation is abstraction
+/// ahead of a v2 that does not exist. If a v2 ever has to coexist with v1 during
+/// a migration, that is when the seam earns its keep.
+pub const CHAIN_VERSION: u16 = 1;
+pub fn genesis(identity: &PublicKey, chain_id: ChainId, at: Timestamp) -> Hash32;
+pub fn memory_leaf(salt: &[u8; 32], canonical_bytes: &[u8]) -> Hash32;
+pub fn meta_leaf(seq: u64, date: NaiveDate, tz: &Tz, memory_count: u32) -> Hash32;
+pub fn root(leaves: Vec<Hash32>) -> Result<Hash32>;
+pub fn link(prev: Hash32, root: Hash32, seq: u64, date: NaiveDate, tz: &Tz) -> Hash32;
+pub fn verify_run(genesis: Hash32, records: &[ChainRecord]) -> Result<()>;
 
 /// The external timestamping side. OTS today, OP_RETURN later, no-op in tests.
 #[async_trait]
@@ -276,7 +285,7 @@ pub trait BlockHeaderSource: Send + Sync {
 Splitting `CommitmentChain` (pure) from `Anchorer` (network) means the hash chain
 — the part where a bug is unrecoverable — is testable with vectors and property
 tests and never needs a mock server. `BlockHeaderSource::trust_level` exists so
-`gst verify` can say *"verified against a block explorer"* rather than implying a
+`ghostr verify` can say *"verified against a block explorer"* rather than implying a
 verification it didn't perform.
 
 ### 4.6 `ghostr-persona`, `ghostr-quests`, `ghostr-memoria`

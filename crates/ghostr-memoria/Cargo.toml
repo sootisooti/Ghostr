@@ -11,12 +11,22 @@ authors.workspace = true
 [dependencies]
 ghostr-core = { workspace = true }
 ghostr-store = { workspace = true }
-ghostr-llm = { workspace = true }
+ghostr-llm = { workspace = true, optional = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+
+[features]
+default = []
+## An LLM-backed Summarizer. Off in M0: with this feature disabled, `cargo tree`
+## shows the binary has no model path at all, which makes "works offline with no
+## LLM" a checkable property rather than a claim.
+llm = ["dep:ghostr-llm"]
+
+[dev-dependencies]
+ghostr-testkit = { workspace = true }
 
 [lints]
 workspace = true

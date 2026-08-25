@@ -19,9 +19,23 @@ authors.workspace = true
 [dependencies]
 ghostr-core = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 zeroize = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+secp256k1 = { workspace = true }
+bip39 = { workspace = true }
+bech32 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

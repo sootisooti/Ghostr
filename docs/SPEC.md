@@ -478,7 +478,7 @@ sequenceDiagram
   G->>S: persist quests with answer_commitment (I6)
   Note over G,U: nothing shown until commitments are stored
 
-  U->>S: gst quest
+  U->>S: ghostr quest
   S->>U: present quest (answer hidden for Cloze/Preference)
   U->>S: Confirm | Correct | Reject | Unknown | Void
   S->>S: reveal + verify commitment
@@ -817,7 +817,7 @@ anchor receipts from account `2'` and prove liveness of a chain without revealin
 whose chain it is; they can point a NIP-46 remote signer at account `0'` and keep
 the identity key off the machine entirely while the ghost still runs.
 
-The mnemonic is entered or generated once at `gst init`, never written to disk in
+The mnemonic is entered or generated once at `ghostr init`, never written to disk in
 plaintext, and stored per §10.1.
 
 ### 8.2 The ghost binding
@@ -926,16 +926,23 @@ the held-out quest set — recompute the score themselves from the Merkle paths.
 ### 10.1 Key hierarchy at rest
 
 ```
-passphrase ──Argon2id──▶ KEK ──wraps──▶ DEK ──encrypts──▶ database + blobs
-   (m=256MiB, t=3, p=4)         (XChaCha20-Poly1305)
-                                        │
-seed (BIP-39) ──encrypted by KEK──▶ keystore file / OS keychain
+passphrase ──Argon2id──▶ KEK ──unwraps──▶ seed ──NIP-06──▶ identity secret key
+   (m=256MiB, t=3, p=4)                                            │
+                                  HKDF-SHA256(ikm = sk, info = label)
+                                                                   │
+                                                                  DEK
+                                                                   │
+                                     XChaCha20-Poly1305 ──▶ database + blobs
 ```
 
 - The passphrase never leaves the process. The KEK is derived on unlock, held in
   `zeroize`-on-drop memory, and `mlock`ed where the platform allows.
-- The DEK is wrapped, not derived, so the passphrase can be changed without
-  re-encrypting the corpus.
+- **The DEK is derived from the identity secret key, not stored.** The store is
+  therefore readable only by whoever can reach the nostr key, and there is no
+  second secret to back up, lose, or leak. Nothing on disk holds the DEK.
+- **The seed is what gets wrapped, not the DEK.** A passphrase change rewraps 64
+  bytes and leaves the DEK untouched — it derives from a key that did not
+  change — so the corpus is never re-encrypted.
 - On macOS/iOS the wrapped seed goes to Keychain; on Linux to the Secret Service
   when present, otherwise an encrypted file; on Windows to DPAPI + file.
 
@@ -1013,7 +1020,7 @@ Rules, in order:
 
 Every decision — allow *and* deny — is written to an append-only `EgressLog`
 with the provider, task, byte count, redaction plan, and a hash of the exact
-payload sent. `gst egress log` prints it. If a user cannot audit what left their
+payload sent. `ghostr egress log` prints it. If a user cannot audit what left their
 machine, the privacy claim is unverifiable, which makes it worthless.
 
 ### 11.3 Prompt construction
@@ -1042,7 +1049,7 @@ machine, the privacy claim is unverifiable, which makes it worthless.
 
 ## 12. Verification
 
-`gst verify` is a first-class command and must be runnable by a third party
+`ghostr verify` is a first-class command and must be runnable by a third party
 against an exported bundle, with no Ghostr install state:
 
 1. **Chain integrity** — recompute `link_n` from `link_{n-1}`, `root_n`, `seq`,
@@ -1163,7 +1170,7 @@ jurisdictions legal) claim to deletion.
 > deleting a memory's content *and its salt* leaves a leaf hash that still
 > verifies the chain while the content becomes unrecoverable and the commitment
 > becomes unopenable. The chain records that something was there and when;
-> nothing records what. Expose this as `gst forget <memory|person>`, with a
+> nothing records what. Expose this as `ghostr forget <memory|person>`, with a
 > `Redaction` amendment recorded in the current day's footage. This is the one
 > mechanism that lets us keep both invariants honestly.
 
@@ -1268,7 +1275,7 @@ remote embedding API for anything but `Public` memories.
 Every `PersonBeat` is a claim about someone who never agreed to be modelled.
 
 > **Recommendation:** pseudonymize by default at the egress boundary — real names
-> never reach a remote provider (§11.2). Support `gst forget <person>` as a
+> never reach a remote provider (§11.2). Support `ghostr forget <person>` as a
 > first-class operation that crypto-shreds every memory naming them (Q6). Never
 > publish `PersonBeat` data, even encrypted, without a separate explicit action.
 > This is a design constraint, not a legal disclaimer; the product should be

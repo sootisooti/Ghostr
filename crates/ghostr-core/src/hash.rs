@@ -19,6 +19,7 @@
 //! change here is a breaking change even when it compiles (CLAUDE.md §7).
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// A 32-byte domain-separated SHA-256 digest.
 ///
@@ -26,25 +27,37 @@ use serde::{Deserialize, Serialize};
 /// discloses nothing (SPEC §7.2).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Hash32([u8; 32]);
+pub struct Hash32(#[serde(with = "serde_bytes_array")] [u8; 32]);
 
 impl Hash32 {
     /// Wraps 32 raw bytes that are already a digest.
     #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// A digest of all zeroes, used as the parent of the genesis link.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self([0u8; 32])
     }
 
     /// The raw digest bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Lowercase hex.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        todo!("lowercase hex-encode the digest")
+        hex::encode(self.0)
+    }
+
+    /// The first eight hex digits, for display in lists and logs.
+    #[must_use]
+    pub fn short(&self) -> String {
+        self.to_hex()[..8].to_owned()
     }
 
     /// Parses lowercase hex, rejecting anything that is not exactly 64 digits.
@@ -55,13 +68,90 @@ impl Hash32 {
     /// 64 lowercase hex digits. Uppercase is rejected rather than accepted, so
     /// one digest has one encoding.
     pub fn from_hex(s: &str) -> crate::Result<Self> {
-        todo!("parse exactly 64 lowercase hex digits")
+        if s.len() != 64
+            || s.chars()
+                .any(|c| !c.is_ascii_hexdigit() || c.is_ascii_uppercase())
+        {
+            return Err(crate::Error::Canonical {
+                reason: "expected 64 lowercase hex digits",
+            });
+        }
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(s, &mut out).map_err(|_| crate::Error::Canonical {
+            reason: "invalid hex digest",
+        })?;
+        Ok(Self(out))
     }
 }
 
 impl core::fmt::Debug for Hash32 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("write the lowercase hex digest")
+        f.write_str(&self.to_hex())
+    }
+}
+
+impl core::fmt::Display for Hash32 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// Serde support for `[u8; 32]`.
+///
+/// Serde has no array impls past 32 elements and encodes byte arrays as
+/// sequences by default, which would make a digest 32 separate CBOR integers.
+/// Human-readable formats get hex so a config file or a JSON API response stays
+/// legible; binary formats get a byte string, which is also what keeps the
+/// canonical CBOR encoding compact.
+mod serde_bytes_array {
+    use serde::de::{Error as _, SeqAccess, Visitor};
+    use serde::{Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            s.serialize_str(&hex::encode(v))
+        } else {
+            s.serialize_bytes(v)
+        }
+    }
+
+    struct Bytes32;
+
+    impl<'de> Visitor<'de> for Bytes32 {
+        type Value = [u8; 32];
+
+        fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str("a 32-byte digest")
+        }
+
+        fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+            v.try_into()
+                .map_err(|_| E::custom("expected exactly 32 bytes"))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            let mut out = [0u8; 32];
+            hex::decode_to_slice(v, &mut out).map_err(E::custom)?;
+            Ok(out)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut out = [0u8; 32];
+            for (i, slot) in out.iter_mut().enumerate() {
+                *slot = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(i, &"32 bytes"))?;
+            }
+            Ok(out)
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        if d.is_human_readable() {
+            d.deserialize_str(Bytes32)
+        } else {
+            d.deserialize_bytes(Bytes32)
+        }
     }
 }
 
@@ -96,7 +186,7 @@ impl Tag {
     /// These strings are frozen. They are part of the commitment scheme, so
     /// editing one silently forks every existing chain.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::MemoryLeaf => "ghostr/v1/memory-leaf",
             Self::QuestLeaf => "ghostr/v1/quest-leaf",
@@ -117,7 +207,7 @@ impl Tag {
 /// accident.
 #[must_use]
 pub fn tagged_hash(tag: Tag, msg: &[u8]) -> Hash32 {
-    todo!("SHA256(SHA256(tag) || SHA256(tag) || msg)")
+    tagged_hash_parts(tag, &[msg])
 }
 
 /// Computes a tagged hash over several pieces without allocating a joined buffer.
@@ -129,5 +219,88 @@ pub fn tagged_hash(tag: Tag, msg: &[u8]) -> Hash32 {
 /// without it would be a commitment bug.
 #[must_use]
 pub fn tagged_hash_parts(tag: Tag, parts: &[&[u8]]) -> Hash32 {
-    todo!("SHA256(SHA256(tag) || SHA256(tag) || parts.concat())")
+    let tag_digest = Sha256::digest(tag.as_str().as_bytes());
+    let mut h = Sha256::new();
+    h.update(tag_digest);
+    h.update(tag_digest);
+    for part in parts {
+        h.update(part);
+    }
+    Hash32(h.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Golden vectors, committed and fixed.
+    ///
+    /// Independently derivable: `SHA256(SHA256(tag) || SHA256(tag) || msg)`.
+    /// If one of these changes, every chain users already hold has been
+    /// invalidated, and unlike a schema migration there is no way for them to
+    /// migrate — the old hashes are in Bitcoin (CLAUDE.md §7).
+    #[test]
+    fn tagged_hash_golden_vectors() {
+        assert_eq!(
+            tagged_hash(Tag::MemoryLeaf, b"").to_hex(),
+            "7c35dc5cf93c939e02e56bcc72efa505f3e4cff7e60cad1d62e37e10ad2b9dc9",
+        );
+        assert_eq!(
+            tagged_hash(Tag::Genesis, b"abc").to_hex(),
+            "7259fadd8f54713afe2af1f50f18a0c75c6c4c76aa141b2c9eae9995922685db",
+        );
+        assert_eq!(
+            tagged_hash(Tag::Node, b"").to_hex(),
+            "902776ad8a65c510e7673a1259dcf8c576cf01ab1ad0b43a70a90532dd4023fb",
+        );
+    }
+
+    /// Domain separation is the whole point of tagging: one message hashed under
+    /// two tags must never collide, or a memory leaf could be presented as a
+    /// chain link.
+    #[test]
+    fn every_tag_is_a_distinct_domain() {
+        const ALL: [Tag; 8] = [
+            Tag::MemoryLeaf,
+            Tag::QuestLeaf,
+            Tag::MetaLeaf,
+            Tag::Node,
+            Tag::FootageRoot,
+            Tag::Link,
+            Tag::Genesis,
+            Tag::QuestAnswer,
+        ];
+        let mut strings = std::collections::HashSet::new();
+        let mut digests = std::collections::HashSet::new();
+        for t in ALL {
+            assert!(
+                strings.insert(t.as_str()),
+                "duplicate tag string: {}",
+                t.as_str()
+            );
+            assert!(
+                digests.insert(tagged_hash(t, b"same message")),
+                "tag collision: {t:?}"
+            );
+        }
+        assert_eq!(digests.len(), ALL.len());
+    }
+
+    /// `tagged_hash_parts` must equal hashing the concatenation. Preimages in
+    /// this scheme are built from fixed-width fields, so no framing is inserted
+    /// and the two must agree byte for byte.
+    #[test]
+    fn parts_equal_concatenation() {
+        let joined = tagged_hash(Tag::Link, b"abcdef");
+        let split = tagged_hash_parts(Tag::Link, &[b"abc", b"def"]);
+        assert_eq!(joined, split);
+    }
+
+    #[test]
+    fn hex_round_trips_and_rejects_uppercase() {
+        let h = tagged_hash(Tag::Link, b"abc");
+        assert_eq!(Hash32::from_hex(&h.to_hex()).expect("round trip"), h);
+        assert!(Hash32::from_hex(&h.to_hex().to_uppercase()).is_err());
+        assert!(Hash32::from_hex("abc").is_err());
+    }
 }

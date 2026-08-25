@@ -42,6 +42,9 @@ pub enum Error {
     },
 
     /// The model failed.
+    ///
+    /// Only reachable with the `llm` feature. M0 has no model path at all.
+    #[cfg(feature = "llm")]
     #[error("model error")]
     Llm(#[from] ghostr_llm::Error),
 

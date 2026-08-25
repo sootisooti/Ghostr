@@ -47,25 +47,21 @@ pub enum Error {
     /// The store failed.
     #[error(transparent)]
     Store(#[from] ghostr_store::Error),
-    /// A model call failed.
-    #[error(transparent)]
-    Llm(#[from] ghostr_llm::Error),
+    /// Something in the domain layer refused.
+    #[error("{0}")]
+    Domain(String),
+
     /// Ingest failed.
     #[error(transparent)]
     Ingest(#[from] ghostr_ingest::Error),
     /// Memoria failed.
     #[error(transparent)]
     Memoria(#[from] ghostr_memoria::Error),
-    /// Persona work failed.
+    /// Hashing or canonical encoding failed.
     #[error(transparent)]
-    Persona(#[from] ghostr_persona::Error),
-    /// Quest work failed.
-    #[error(transparent)]
-    Quests(#[from] ghostr_quests::Error),
+    Core(#[from] ghostr_core::Error),
+
     /// Anchoring failed.
     #[error(transparent)]
     Anchor(#[from] ghostr_anchor::Error),
-    /// A relay operation failed.
-    #[error(transparent)]
-    Nostr(#[from] ghostr_nostr::Error),
 }

@@ -28,6 +28,10 @@
 //! Scaffold. Types and signatures are defined; bodies are [`todo!`].
 
 #![forbid(unsafe_code)]
+// CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
+// the exception: a failed assertion should panic loudly with a message, and
+// threading `Result` through test bodies buries what is actually being asserted.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 // SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
 // only for the scaffold phase and are removed crate-by-crate as bodies land.
 // `unused_variables` and `dead_code` fire because a diverging body never reads
@@ -46,6 +50,8 @@ pub mod memory;
 pub mod migration;
 pub mod persona;
 pub mod quest;
+pub mod schema;
+pub mod sqlite;
 pub mod vector;
 
 pub use blob::BlobStore;
@@ -55,4 +61,5 @@ pub use footage::FootageStore;
 pub use memory::MemoryStore;
 pub use persona::PersonaStore;
 pub use quest::QuestStore;
+pub use sqlite::{DB_FILENAME, SqliteStore};
 pub use vector::VectorIndex;

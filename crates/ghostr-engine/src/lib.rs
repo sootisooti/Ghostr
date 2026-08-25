@@ -28,6 +28,10 @@
 //! Scaffold. Types and signatures are defined; bodies are [`todo!`].
 
 #![forbid(unsafe_code)]
+// CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
+// the exception: a failed assertion should panic loudly with a message, and
+// threading `Result` through test bodies buries what is actually being asserted.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 // SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
 // only for the scaffold phase and are removed crate-by-crate as bodies land.
 // `unused_variables` and `dead_code` fire because a diverging body never reads
@@ -38,12 +42,11 @@
 // forgotten.
 #![allow(unused_variables, dead_code, clippy::todo)]
 
-pub mod api;
 pub mod config;
 pub mod engine;
 pub mod error;
-pub mod jobs;
-pub mod schedule;
+pub mod ops;
+pub mod runtime;
 
 pub use engine::Engine;
 pub use error::{Error, Result};
@@ -54,9 +57,8 @@ pub use error::{Error, Result};
 /// nothing else. Re-exporting here keeps that true without the CLI reaching past
 /// its one dependency.
 pub mod types {
-    pub use ghostr_anchor::verify::{CheckResult, HeaderTrust, VerificationReport};
-    pub use ghostr_core::fidelity::FidelityScore;
-    pub use ghostr_core::footage::{Amendment, Footage};
-    pub use ghostr_core::persona::PersonaDiff;
-    pub use ghostr_core::quest::{Quest, Verdict};
+    pub use ghostr_core::footage::{Footage, Highlight, MoodReading, PersonBeat, Thread};
+    pub use ghostr_core::hash::Hash32;
+    pub use ghostr_core::identity::Npub;
+    pub use ghostr_store::sqlite::{AnchorRecord, AnchorRecordState};
 }
