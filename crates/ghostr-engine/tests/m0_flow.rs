@@ -90,7 +90,7 @@ fn init_ingest_memoria_verify() {
     let day1 = "2026-08-24".parse().unwrap();
     let day2 = "2026-08-25".parse().unwrap();
 
-    let f1 = ops::memoria(&engine, day1).expect("seal day 1");
+    let f1 = ops::memoria(&engine, day1).expect("seal day 1").footage;
     assert_eq!(f1.seq, 1);
     assert!(
         !f1.highlights.is_empty(),
@@ -105,7 +105,7 @@ fn init_ingest_memoria_verify() {
         engine.store().genesis_link().unwrap()
     );
 
-    let f2 = ops::memoria(&engine, day2).expect("seal day 2");
+    let f2 = ops::memoria(&engine, day2).expect("seal day 2").footage;
     assert_eq!(f2.seq, 2);
     // The chain links day 2 to day 1.
     assert_eq!(f2.commitment.prev_link, f1.commitment.link);
@@ -235,7 +235,9 @@ fn a_day_with_no_notes_still_seals() {
     let vault = home.path().join("vault");
     let engine = init(&vault);
 
-    let footage = ops::memoria(&engine, "2026-08-24".parse().unwrap()).expect("seal empty day");
+    let footage = ops::memoria(&engine, "2026-08-24".parse().unwrap())
+        .expect("seal empty day")
+        .footage;
     assert!(footage.empty);
     assert_eq!(footage.seq, 1);
     assert!(footage.memory_ids.is_empty());
@@ -269,6 +271,7 @@ fn a_reopened_vault_can_read_what_it_wrote() {
         ops::ingest(&engine, &notes).expect("ingest");
         ops::memoria(&engine, "2026-08-24".parse().unwrap())
             .expect("seal")
+            .footage
             .commitment
             .link
     };

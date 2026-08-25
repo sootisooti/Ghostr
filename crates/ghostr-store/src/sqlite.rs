@@ -470,6 +470,89 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// Memories that arrived after their day had already been sealed.
+    ///
+    /// A memory is *late* when its effective time falls before `sealed_through`
+    /// — the end of the most recently sealed window — but it was ingested at or
+    /// after `ingested_from`, which is the moment that seal happened. It missed
+    /// the day it belongs to, and that day is immutable (I2).
+    ///
+    /// Ordered by effective time so the amendments a caller builds from these
+    /// come out in a stable order; the footage carrying them is hashed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn late_arrivals(
+        &self,
+        dek: &Dek,
+        sealed_through: Timestamp,
+        ingested_from: Timestamp,
+    ) -> crate::Result<Vec<Memory>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, source_id, occurred_at, occurred_off, ingested_at, ingested_off,
+                        kind, sensitivity, salience, supersedes, raw_hash, salt,
+                        body_nonce, body_sealed, shredded_at
+                 FROM memory
+                 WHERE COALESCE(occurred_at, ingested_at) < ?1
+                   AND ingested_at >= ?2
+                   AND shredded_at IS NULL
+                 ORDER BY COALESCE(occurred_at, ingested_at), id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare late-arrival query",
+            })?;
+        let rows = stmt
+            .query_map(
+                params![sealed_through.utc_millis(), ingested_from.utc_millis()],
+                |r| Ok(RawMemory::from_row(r)),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "run late-arrival query",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let raw = row
+                .map_err(|_| crate::Error::Backend {
+                    operation: "read late-arrival row",
+                })?
+                .map_err(|_| crate::Error::Backend {
+                    operation: "decode late-arrival row",
+                })?;
+            out.push(raw.decrypt(dek)?);
+        }
+        Ok(out)
+    }
+
+    /// The sealed sequence whose window contains `at`, if any.
+    ///
+    /// Backs amendment targeting: a late memory has to name the day it should
+    /// have been in, and that day is found by its window, not by its date — the
+    /// two differ whenever a cutoff is not midnight.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn sealed_seq_covering(&self, at: Timestamp) -> crate::Result<Option<u64>> {
+        self.conn
+            .query_row(
+                "SELECT seq FROM footage
+                 WHERE window_start <= ?1 AND window_end > ?1
+                 ORDER BY seq
+                 LIMIT 1",
+                [at.utc_millis()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|o| o.map(|s| s.max(0).unsigned_abs()))
+            .map_err(|_| crate::Error::Backend {
+                operation: "find sealed window",
+            })
+    }
+
     /// Every memory, ordered by id. Backs `verify` and `ingest` reporting.
     ///
     /// # Errors

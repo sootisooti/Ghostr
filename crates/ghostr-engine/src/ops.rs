@@ -6,7 +6,7 @@
 
 use chrono::{NaiveDate, NaiveTime};
 use ghostr_anchor::{AnchorState, OtsClient};
-use ghostr_core::footage::{Commitment, Footage, Thread};
+use ghostr_core::footage::{Amendment, AmendmentReason, Commitment, Footage, Thread};
 use ghostr_core::hash::Hash32;
 use ghostr_core::ids::{EntityId, MemoryId, PersonaVersion, SourceId, ThreadId};
 use ghostr_core::memory::Memory;
@@ -14,7 +14,8 @@ use ghostr_core::time::Timestamp;
 use ghostr_ingest::markdown;
 use ghostr_memoria::compose::{self, NoteExtraction};
 use ghostr_memoria::extract;
-use ghostr_memoria::summarize::NaiveSummarizer;
+use ghostr_memoria::pipeline::DraftFootage;
+use ghostr_memoria::summarize::{NaiveSummarizer, Summarizer};
 use ghostr_store::memory::TimeRange;
 use ghostr_store::sqlite::{AnchorRecord, AnchorRecordState};
 
@@ -92,7 +93,7 @@ pub fn ingest(engine: &Engine, path: &std::path::Path) -> crate::Result<IngestRe
 /// Returns [`Error::Memoria`](crate::Error::Memoria) if the day is already
 /// sealed, or [`Error::Store`](crate::Error::Store) if the seal would fork or
 /// gap the chain.
-pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
+pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome> {
     let tz = engine.home_tz()?;
 
     if let Some(existing) = engine.store().date_is_sealed(date)? {
@@ -136,28 +137,15 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
         ThreadId::new(engine.now().utc_millis().unsigned_abs(), random)
     });
 
-    // Validation before sealing, not after: a highlight without evidence must
-    // never reach the chain (SPEC §6).
-    for highlight in &highlights {
-        if highlight.memory_ids.is_empty() {
-            return Err(crate::Error::Memoria(
-                ghostr_memoria::Error::ValidationFailed { count: 1 },
-            ));
-        }
-    }
+    // A memory that arrived after its own day sealed does not go back into it.
+    // It lands here, as an amendment pointing at the day it missed (I2).
+    let amendments = late_arrival_amendments(engine, &summarizer)?;
 
-    let (root, leaves) = build_root(&memories, seq, date, &tz)?;
-    let prev_link = match engine.store().tip()? {
-        Some(tip) => tip.link,
-        None => engine.store().genesis_link()?,
-    };
-    let link = ghostr_anchor::link(prev_link, root, seq, date, &tz);
-
-    let footage = Footage {
+    let mut draft = DraftFootage {
         seq,
         date,
         tz,
-        window: (window.start, window.end),
+        window,
         // An empty day still seals and still advances seq. A gap in the chain is
         // indistinguishable from a deletion, so there are no gaps (SPEC I3).
         empty: memories.is_empty(),
@@ -166,10 +154,46 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
         mood,
         open_threads: thread_update.open,
         closed_loops: thread_update.closed,
+        carried_threads: previous_open.iter().map(|t| t.id).collect(),
         unresolved,
         memory_ids: memories.iter().map(|m| m.id).collect(),
-        amendments: Vec::new(),
+        amendments,
         persona_version: PersonaVersion::genesis(),
+    };
+
+    // Drop first, then validate. Dropping is the filter — an unsupported claim
+    // is removed rather than allowed to stop the day closing — and validation
+    // is the backstop that catches anything dropping could not fix (SPEC §6).
+    let dropped_claims = ghostr_memoria::drop_unevidenced(&mut draft);
+    if let Err(errors) = ghostr_memoria::validate_draft(&draft) {
+        return Err(crate::Error::Memoria(
+            ghostr_memoria::Error::ValidationFailed {
+                count: errors.len(),
+            },
+        ));
+    }
+    let (root, leaves) = build_root(&memories, seq, date, &tz)?;
+    let prev_link = match engine.store().tip()? {
+        Some(tip) => tip.link,
+        None => engine.store().genesis_link()?,
+    };
+    let link = ghostr_anchor::link(prev_link, root, seq, date, &tz);
+
+    let footage = Footage {
+        seq: draft.seq,
+        date: draft.date,
+        tz: draft.tz,
+        window: (draft.window.start, draft.window.end),
+        empty: draft.empty,
+        highlights: draft.highlights,
+        people: draft.people,
+        mood: draft.mood,
+        open_threads: draft.open_threads,
+        closed_loops: draft.closed_loops,
+        unresolved: draft.unresolved,
+        memory_ids: draft.memory_ids,
+        amendments: draft.amendments,
+        persona_version: draft.persona_version,
         commitment: Commitment {
             merkle_root: root,
             prev_link,
@@ -181,7 +205,22 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
 
     let nonce = engine.nonce();
     engine.store().seal_footage(dek, &footage, &leaves, nonce)?;
-    Ok(footage)
+    Ok(MemoriaOutcome {
+        footage,
+        dropped_claims,
+    })
+}
+
+/// What one `memoria` run produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoriaOutcome {
+    /// The sealed day.
+    pub footage: Footage,
+    /// Claims removed for want of evidence.
+    ///
+    /// Reported rather than swallowed. A recap that quietly got shorter is a
+    /// recap the user cannot tell from one that had less to say.
+    pub dropped_claims: usize,
 }
 
 /// Builds the day's Merkle root and the per-memory leaves.
@@ -254,6 +293,60 @@ fn entity_id_for(name: &str) -> EntityId {
         digest.as_bytes()[15],
     ]);
     EntityId::new(millis, random)
+}
+
+/// How long an amendment's note may be.
+const AMENDMENT_CHARS: usize = 160;
+
+/// Amendments for every memory that arrived after its own day had sealed.
+///
+/// This is the whole of I2 in practice. A nostr note from three days ago, pulled
+/// in today, does not retroactively enter a sealed window — that window's
+/// commitment is fixed and re-deriving it with an extra leaf would break every
+/// link after it. The memory lands in *today's* footage instead, with an
+/// amendment naming the day it should have been in.
+///
+/// A memory whose time predates the first sealed day amends nothing: there is no
+/// day for it to correct. It still enters today's window as an ordinary memory.
+fn late_arrival_amendments(
+    engine: &Engine,
+    summarizer: &dyn Summarizer,
+) -> crate::Result<Vec<Amendment>> {
+    let Some(tip) = engine.store().tip()? else {
+        // Nothing sealed yet, so nothing can be late.
+        return Ok(Vec::new());
+    };
+    let dek = engine.dek()?;
+    let Some(last) = engine.store().get_footage(dek, tip.seq)? else {
+        return Ok(Vec::new());
+    };
+    let sealed_through = last.window.1;
+
+    let late = engine
+        .store()
+        .late_arrivals(dek, sealed_through, tip.sealed_at)?;
+
+    let mut out = Vec::new();
+    for memory in &late {
+        let at = memory.occurred_at.unwrap_or(memory.ingested_at);
+        let Some(target_seq) = engine.store().sealed_seq_covering(at)? else {
+            continue;
+        };
+        out.push(Amendment {
+            target_seq,
+            reason: AmendmentReason::LateArrival,
+            note: summarizer.summarize(&memory.body.text, AMENDMENT_CHARS),
+            memory_ids: vec![memory.id],
+        });
+    }
+    // Grouped by the day they correct, then by memory, so the list is stable —
+    // it is hashed into today's root.
+    out.sort_by(|a, b| {
+        a.target_seq
+            .cmp(&b.target_seq)
+            .then_with(|| a.memory_ids.cmp(&b.memory_ids))
+    });
+    Ok(out)
 }
 
 /// The threads left open by the most recent sealed day.

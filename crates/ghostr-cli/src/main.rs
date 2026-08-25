@@ -218,8 +218,17 @@ fn cmd_ingest(dir: &std::path::Path, path: &std::path::Path) -> Result<()> {
 fn cmd_memoria(dir: &std::path::Path, date: &str) -> Result<()> {
     let engine = open(dir)?;
     let day = engine.resolve_date(date)?;
-    let footage = ops::memoria(&engine, day).context("compiling footage")?;
-    println!("{}", render::sealed(&footage));
+    let outcome = ops::memoria(&engine, day).context("compiling footage")?;
+    let footage = &outcome.footage;
+    println!("{}", render::sealed(footage));
+    if outcome.dropped_claims > 0 {
+        // Said out loud. A recap that quietly got shorter is one the user
+        // cannot tell from a day that had less to say.
+        println!(
+            "  {} claim(s) dropped for want of evidence",
+            outcome.dropped_claims
+        );
+    }
     Ok(())
 }
 
