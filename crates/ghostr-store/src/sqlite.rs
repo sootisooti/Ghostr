@@ -42,6 +42,31 @@ impl core::fmt::Debug for SqliteStore {
     }
 }
 
+/// Encodes a row payload for storage.
+///
+/// Plain CBOR, not the canonical encoding from `ghostr-core`. The distinction is
+/// deliberate and worth being precise about: canonical CBOR exists so that one
+/// value has exactly one byte representation, which matters only for things that
+/// get *hashed*. A row payload is encrypted storage — the commitment for a day
+/// is computed separately over its Merkle leaves — so it needs no such
+/// guarantee, and requiring one would ban the `f32` fields that mood readings
+/// and salience legitimately use.
+fn encode_row<T: Serialize>(value: &T) -> crate::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    ciborium::into_writer(value, &mut out).map_err(|_| crate::Error::Backend {
+        operation: "encode row payload",
+    })?;
+    Ok(out)
+}
+
+/// Decodes a row payload written by [`encode_row`].
+fn decode_row<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    table: &'static str,
+) -> crate::Result<T> {
+    ciborium::from_reader(bytes).map_err(|_| crate::Error::RowDecryptFailed { table })
+}
+
 /// The parts of a [`Memory`] that are sealed rather than indexed.
 ///
 /// Split out as its own serialisable type so that exactly one place decides what
@@ -308,11 +333,7 @@ impl SqliteStore {
             url: memory.provenance.url.clone(),
             entities: memory.entities.iter().map(|e| e.id.to_string()).collect(),
         };
-        let plaintext = ghostr_core::canonical::to_canonical_cbor(&body).map_err(|_| {
-            crate::Error::Backend {
-                operation: "encode memory body",
-            }
-        })?;
+        let plaintext = encode_row(&body)?;
         let aad = format!("memory:{}", memory.id);
         let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
 
@@ -506,7 +527,7 @@ impl SqliteStore {
     /// exists — the fork guard — or [`Error::ChainGap`](crate::Error::ChainGap)
     /// if it does not directly follow the tip.
     pub fn seal_footage(
-        &mut self,
+        &self,
         dek: &Dek,
         footage: &Footage,
         leaves: &[(MemoryId, Hash32)],
@@ -534,20 +555,23 @@ impl SqliteStore {
             amendments: footage.amendments.clone(),
             persona_version: footage.persona_version,
         };
-        let plaintext = ghostr_core::canonical::to_canonical_cbor(&body).map_err(|_| {
-            crate::Error::Backend {
-                operation: "encode footage body",
-            }
-        })?;
+        let plaintext = encode_row(&body)?;
         let aad = format!("footage:{}", footage.seq);
         let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
 
         // One transaction: there is no valid state between "not sealed" and
         // "sealed", and a half-written link is indistinguishable from a tampered
         // one (SPEC I2, I3).
-        let tx = self.conn.transaction().map_err(|_| crate::Error::Backend {
-            operation: "begin seal transaction",
-        })?;
+        // `unchecked_transaction` so this takes `&self`: the caller already holds
+        // a shared borrow of the engine in order to reach the DEK, and there is
+        // exactly one connection with no nested transactions, so the check it
+        // skips cannot fire here.
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| crate::Error::Backend {
+                operation: "begin seal transaction",
+            })?;
         tx.execute(
             "INSERT INTO footage
              (seq, date, tz, window_start, window_end, empty, merkle_root, prev_link,
@@ -964,8 +988,7 @@ impl RawMemory {
         let aad = format!("memory:{id}");
         let plaintext = open_row(dek, &sealed, &nonce, aad.as_bytes())
             .map_err(|_| crate::Error::RowDecryptFailed { table: "memory" })?;
-        let body: SealedMemoryBody = ghostr_core::canonical::from_canonical_cbor(&plaintext)
-            .map_err(|_| crate::Error::RowDecryptFailed { table: "memory" })?;
+        let body: SealedMemoryBody = decode_row(&plaintext, "memory")?;
 
         let salt: [u8; 32] = salt.try_into().map_err(|_| crate::Error::Backend {
             operation: "memory salt length",
@@ -1067,8 +1090,7 @@ impl RawFootage {
         let aad = format!("footage:{seq}");
         let plaintext = open_row(dek, &self.sealed, &nonce, aad.as_bytes())
             .map_err(|_| crate::Error::RowDecryptFailed { table: "footage" })?;
-        let body: SealedFootageBody = ghostr_core::canonical::from_canonical_cbor(&plaintext)
-            .map_err(|_| crate::Error::RowDecryptFailed { table: "footage" })?;
+        let body: SealedFootageBody = decode_row(&plaintext, "footage")?;
 
         Ok(Footage {
             seq,

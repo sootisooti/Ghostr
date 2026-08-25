@@ -42,12 +42,11 @@
 // forgotten.
 #![allow(unused_variables, dead_code, clippy::todo)]
 
-pub mod api;
 pub mod config;
 pub mod engine;
 pub mod error;
-pub mod jobs;
-pub mod schedule;
+pub mod ops;
+pub mod runtime;
 
 pub use engine::Engine;
 pub use error::{Error, Result};
@@ -58,9 +57,8 @@ pub use error::{Error, Result};
 /// nothing else. Re-exporting here keeps that true without the CLI reaching past
 /// its one dependency.
 pub mod types {
-    pub use ghostr_anchor::verify::{CheckResult, HeaderTrust, VerificationReport};
-    pub use ghostr_core::fidelity::FidelityScore;
-    pub use ghostr_core::footage::{Amendment, Footage};
-    pub use ghostr_core::persona::PersonaDiff;
-    pub use ghostr_core::quest::{Quest, Verdict};
+    pub use ghostr_core::footage::{Footage, Highlight, MoodReading, PersonBeat, Thread};
+    pub use ghostr_core::hash::Hash32;
+    pub use ghostr_core::identity::Npub;
+    pub use ghostr_store::sqlite::{AnchorRecord, AnchorRecordState};
 }

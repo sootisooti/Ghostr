@@ -5,7 +5,7 @@
 //!
 //! # Dating a note
 //!
-//! In descending order of trust ([`TimeBasis`](crate::adapter::TimeBasis)):
+//! In descending order of trust, recorded as a [`TimeBasis`]:
 //!
 //! 1. A `date:` line in YAML front matter — the user said so.
 //! 2. A `YYYY-MM-DD` prefix in the filename — the user's own convention.

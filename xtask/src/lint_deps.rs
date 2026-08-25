@@ -31,20 +31,43 @@ const IO_CRATES: &[&str] = &[
     "mio",
 ];
 
-/// HTTP and provider clients, which only `ghostr-llm` may have.
-const INFERENCE_CLIENTS: &[&str] = &[
-    "reqwest",
-    "hyper",
-    "ureq",
-    "async-openai",
-    "ollama-rs",
-    "anthropic",
+/// Model provider SDKs. Only `ghostr-llm` may have these, anywhere, ever.
+const PROVIDER_SDKS: &[&str] = &["async-openai", "ollama-rs", "anthropic", "openai"];
+
+/// Generic HTTP clients.
+///
+/// ARCHITECTURE §3.3 is about *inference*: "only ghostr-llm may depend on a
+/// model provider SDK or an HTTP client for inference". Anchoring and relays
+/// need HTTP for reasons that have nothing to do with a model, so the ban is
+/// scoped to the crates that have no business making a network call at all.
+const HTTP_CLIENTS: &[&str] = &["reqwest", "hyper", "ureq", "isahc", "curl"];
+
+/// Crates permitted a generic HTTP client, and why.
+const HTTP_ALLOWED: &[(&str, &str)] = &[
+    (
+        "ghostr-llm",
+        "the egress gate; the only crate that may reach a model",
+    ),
+    ("ghostr-anchor", "OpenTimestamps calendar submission"),
+    ("ghostr-nostr", "relay transport"),
 ];
 
 const RULES: &[Rule] = &[
     Rule {
         crate_name: "ghostr-core",
-        allowed: Some(&["serde", "thiserror", "uuid", "chrono", "chrono-tz"]),
+        // Pure-computation crates are fine here. The rule is "no I/O", not "no
+        // dependencies": hashing and canonical encoding have to live somewhere,
+        // and a leaf crate is exactly where they belong.
+        allowed: Some(&[
+            "serde",
+            "thiserror",
+            "uuid",
+            "chrono",
+            "chrono-tz",
+            "sha2",
+            "ciborium",
+            "hex",
+        ]),
         forbidden: IO_CRATES,
         reason: "ARCHITECTURE 3.1: core is a leaf with no I/O",
     },
@@ -111,13 +134,32 @@ pub(crate) fn run() -> Result<()> {
             }
         }
 
-        // Rule 3: only ghostr-llm may reach a provider.
+        // Rule 3, part one: a provider SDK anywhere but ghostr-llm is always a
+        // violation, with no exceptions.
         if name != "ghostr-llm" {
             for dep in &deps {
-                if INFERENCE_CLIENTS.iter().any(|c| dep.contains(c)) {
+                if PROVIDER_SDKS.iter().any(|c| dep.contains(c)) {
                     violations.push(format!(
-                        "{name}: depends on `{dep}` \
-                         (ARCHITECTURE 3.3: only ghostr-llm may reach a provider)"
+                        "{name}: depends on provider SDK `{dep}` \
+                         (ARCHITECTURE 3.3: only ghostr-llm may reach a model provider)"
+                    ));
+                }
+            }
+        }
+
+        // Rule 3, part two: a generic HTTP client is allowed only where a
+        // network call is part of the crate's job.
+        if !HTTP_ALLOWED.iter().any(|(c, _)| *c == name) {
+            for dep in &deps {
+                if HTTP_CLIENTS.iter().any(|c| dep.contains(c)) {
+                    violations.push(format!(
+                        "{name}: depends on HTTP client `{dep}`, which is only \
+                         permitted in {} (ARCHITECTURE 3.3)",
+                        HTTP_ALLOWED
+                            .iter()
+                            .map(|(c, _)| *c)
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ));
                 }
             }

@@ -14,18 +14,19 @@ authors.workspace = true
 ghostr-core = { workspace = true }
 ghostr-crypto = { workspace = true }
 ghostr-store = { workspace = true }
-ghostr-llm = { workspace = true }
 ghostr-ingest = { workspace = true }
-ghostr-persona = { workspace = true }
 ghostr-memoria = { workspace = true }
-ghostr-quests = { workspace = true }
 ghostr-anchor = { workspace = true }
-ghostr-nostr = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-async-trait = { workspace = true }
+hex = { workspace = true }
+secp256k1 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

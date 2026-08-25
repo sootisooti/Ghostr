@@ -9,6 +9,21 @@ version = 2
 # An unmaintained crate in this tree is a real finding, not noise.
 yanked = "deny"
 
+# Exceptions are listed individually with a reason, never blanket-disabled. Each
+# one is a decision someone made and can be argued with.
+ignore = [
+    # rustls-pemfile is archived upstream: its PEM parsing moved into
+    # rustls-pki-types, and the final release is a thin wrapper over it. Reached
+    # transitively via ureq -> rustls-native-certs, which ghostr-anchor needs so
+    # that OpenTimestamps submission works behind a TLS-inspecting proxy.
+    #
+    # Unmaintained, not vulnerable: no CVE, and the code is a few hundred lines
+    # of PEM parsing that now lives in a maintained crate. Revisit when
+    # rustls-native-certs drops the dependency, which is already in progress
+    # upstream.
+    { id = "RUSTSEC-2025-0134", reason = "unmaintained, not vulnerable; transitive via ureq/rustls-native-certs" },
+]
+
 [licenses]
 version = 2
 # MIT-compatible only. A copyleft dependency would make the MIT promise on the
@@ -22,6 +37,13 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # A public-domain dedication — strictly more permissive than MIT, so it
+    # cannot make the MIT promise on the tin false. Standard across the
+    # rust-bitcoin ecosystem, which is where bip39 and bitcoin_hashes come from.
+    "CC0-1.0",
+    # Permissive data licence, no copyleft obligation on linked code. Carried by
+    # a transitive data table.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

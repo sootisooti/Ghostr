@@ -96,7 +96,11 @@ pulldown-cmark = { version = "0.12", default-features = false }
 opentimestamps = "0.2"
 # Blocking HTTP for OTS calendar submission. Chosen over reqwest to keep hyper
 # and a second async runtime out of the tree (THREAT_MODEL §T8).
-ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+# `native-certs` so the platform trust store is used rather than only ureq's
+# bundled webpki roots. Without it, anyone behind a TLS-inspecting proxy — which
+# is most corporate networks — cannot anchor, and the failure looks like a
+# calendar outage rather than a trust-store problem.
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
 
 # --- M0: dev-only -----------------------------------------------------------
 tempfile = "3"
