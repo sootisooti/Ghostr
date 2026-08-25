@@ -8,6 +8,7 @@ members = [
     "crates/ghostr-llm",
     "crates/ghostr-anchor",
     "crates/ghostr-nostr",
+    "crates/ghostr-ingest",
 ]
 
 

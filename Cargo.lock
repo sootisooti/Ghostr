@@ -76,6 +76,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostr-ingest"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "ghostr-core",
+ "ghostr-store",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "ghostr-llm"
 version = "0.0.0"
 dependencies = [
