@@ -29,19 +29,22 @@ authors = ["The Ghostr contributors"]
 
 [workspace.dependencies]
 # --- internal ---------------------------------------------------------------
-# Paths only, no versions: nothing here is published yet.
-ghostr-core = { path = "crates/ghostr-core" }
-ghostr-crypto = { path = "crates/ghostr-crypto" }
-ghostr-store = { path = "crates/ghostr-store" }
-ghostr-llm = { path = "crates/ghostr-llm" }
-ghostr-ingest = { path = "crates/ghostr-ingest" }
-ghostr-persona = { path = "crates/ghostr-persona" }
-ghostr-memoria = { path = "crates/ghostr-memoria" }
-ghostr-quests = { path = "crates/ghostr-quests" }
-ghostr-anchor = { path = "crates/ghostr-anchor" }
-ghostr-nostr = { path = "crates/ghostr-nostr" }
-ghostr-engine = { path = "crates/ghostr-engine" }
-ghostr-testkit = { path = "crates/ghostr-testkit" }
+# Each carries an explicit version alongside its path. Nothing here is published
+# yet, but a path-only dependency resolves as a wildcard (`*`), which
+# `cargo deny check bans` rejects — and rightly: a wildcard is what a publish
+# would need to fill in anyway. Keep these in step with `workspace.package.version`.
+ghostr-core = { path = "crates/ghostr-core", version = "0.0.0" }
+ghostr-crypto = { path = "crates/ghostr-crypto", version = "0.0.0" }
+ghostr-store = { path = "crates/ghostr-store", version = "0.0.0" }
+ghostr-llm = { path = "crates/ghostr-llm", version = "0.0.0" }
+ghostr-ingest = { path = "crates/ghostr-ingest", version = "0.0.0" }
+ghostr-persona = { path = "crates/ghostr-persona", version = "0.0.0" }
+ghostr-memoria = { path = "crates/ghostr-memoria", version = "0.0.0" }
+ghostr-quests = { path = "crates/ghostr-quests", version = "0.0.0" }
+ghostr-anchor = { path = "crates/ghostr-anchor", version = "0.0.0" }
+ghostr-nostr = { path = "crates/ghostr-nostr", version = "0.0.0" }
+ghostr-engine = { path = "crates/ghostr-engine", version = "0.0.0" }
+ghostr-testkit = { path = "crates/ghostr-testkit", version = "0.0.0" }
 
 # --- external ---------------------------------------------------------------
 # Every addition needs a justification in its PR (CLAUDE.md §4.9). Keep this
