@@ -75,7 +75,15 @@ impl<M: LanguageModel + ?Sized> LanguageModelExt for M {
     where
         T: StructuredOutput + 'static,
     {
-        todo!("call complete_with_schema(T::schema()), validate, then deserialize")
+        let schema = T::schema();
+        let raw = self.complete_with_schema(request, &schema).await?;
+        // Parse, validate, then deserialize — in that order. Deserializing first
+        // would let serde's own leniency (unknown fields, coercions) decide what
+        // conforms, and the schema is the contract, not serde.
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|_| crate::Error::SchemaViolation)?;
+        schema.validate(&value)?;
+        serde_json::from_value(value).map_err(|_| crate::Error::SchemaViolation)
     }
 }
 

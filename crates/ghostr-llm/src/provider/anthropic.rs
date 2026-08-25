@@ -265,8 +265,15 @@ impl LanguageModel for AnthropicModel {
             .content
             .into_iter()
             .find_map(|b| match b {
-                ContentBlock::ToolUse { input, .. } => Some(input.to_string()),
-                ContentBlock::Text { .. } | ContentBlock::Other => None,
+                // The tool name is checked, not ignored: a block naming some
+                // other tool is not this schema's output, and treating it as
+                // such would hand the caller a value it never asked for.
+                ContentBlock::ToolUse { name, input } if name == schema.name => {
+                    Some(input.to_string())
+                }
+                ContentBlock::ToolUse { .. } | ContentBlock::Text { .. } | ContentBlock::Other => {
+                    None
+                }
             })
             .ok_or(crate::Error::SchemaViolation)
     }
@@ -566,5 +573,39 @@ mod tests {
             .expect("runtime");
         let out = rt.block_on(m.complete(request())).expect("complete");
         assert!(!out.text.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tool_name_tests {
+    use super::*;
+
+    /// A block naming another tool is not this schema's output. Accepting it
+    /// would hand the caller a value it never asked for.
+    #[test]
+    fn only_the_named_tool_supplies_the_structured_output() {
+        let blocks = vec![
+            ContentBlock::ToolUse {
+                name: "some_other_tool".to_owned(),
+                input: serde_json::json!({"summary": "wrong tool"}),
+            },
+            ContentBlock::ToolUse {
+                name: "daily_extraction".to_owned(),
+                input: serde_json::json!({"summary": "right tool"}),
+            },
+        ];
+        let picked = blocks
+            .into_iter()
+            .find_map(|b| match b {
+                ContentBlock::ToolUse { name, input } if name == "daily_extraction" => {
+                    Some(input.to_string())
+                }
+                ContentBlock::ToolUse { .. } | ContentBlock::Text { .. } | ContentBlock::Other => {
+                    None
+                }
+            })
+            .expect("the named tool");
+        assert!(picked.contains("right tool"));
+        assert!(!picked.contains("wrong tool"));
     }
 }
