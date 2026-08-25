@@ -12,4 +12,7 @@
 pub(crate) mod ollama;
 
 #[cfg(feature = "remote")]
+pub(crate) mod anthropic;
+
+#[cfg(feature = "remote")]
 pub(crate) mod openai_compatible;
