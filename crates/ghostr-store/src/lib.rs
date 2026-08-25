@@ -25,29 +25,19 @@
 //!
 //! # Status
 //!
-//! Scaffold. Types and signatures are defined; bodies are [`todo!`].
+//! Implemented for M1: memories, footage, sources, entities, the egress log,
+//! and the encrypted vector index. Quests and persona rows arrive with M2.
 
 #![forbid(unsafe_code)]
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
 // the exception: a failed assertion should panic loudly with a message, and
 // threading `Result` through test bodies buries what is actually being asserted.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
-// only for the scaffold phase and are removed crate-by-crate as bodies land.
-// `unused_variables` and `dead_code` fire because a diverging body never reads
-// its arguments and never calls its helpers; parameters keep real names rather
-// than `_` prefixes so the signatures stay readable. `clippy::todo` is denied
-// workspace-wide by CLAUDE.md §5 and this is the documented exception.
-// `cargo xtask scaffold-status` counts these markers so they cannot be quietly
-// forgotten.
-#![allow(unused_variables, dead_code, clippy::todo)]
-
 pub mod blob;
 pub mod entity;
 pub mod error;
 pub mod footage;
 pub mod memory;
-pub mod migration;
 pub mod persona;
 pub mod quest;
 pub mod schema;

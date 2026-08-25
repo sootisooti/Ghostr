@@ -55,8 +55,13 @@ impl<const N: usize> SecretBytes<N> {
 }
 
 impl<const N: usize> core::fmt::Debug for SecretBytes<N> {
+    /// The length, never the bytes (SPEC I8).
+    ///
+    /// Written out rather than left to the scaffold: a `todo!()` here is a
+    /// panic on any path that formats a key, which is the opposite of what a
+    /// redacting `Debug` is for.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("write `SecretBytes<N>(<redacted>)` with the length but no bytes")
+        write!(f, "SecretBytes<{N}>(<redacted>)")
     }
 }
 
@@ -97,5 +102,49 @@ impl MemoryLock {
 impl Drop for MemoryLock {
     fn drop(&mut self) {
         todo!("munlock/VirtualUnlock if the lock was acquired")
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    /// I8. Key material never appears in a `Debug` rendering, and formatting
+    /// one must not panic — a panic here is a crash on the path that was
+    /// supposed to protect the key.
+    #[test]
+    fn secret_bytes_debug_shows_a_length_and_nothing_else() {
+        let key = SecretBytes::new([0xABu8; 32]);
+        let rendered = format!("{key:?}");
+        assert_eq!(rendered, "SecretBytes<32>(<redacted>)");
+        assert!(!rendered.contains("ab"));
+        assert!(!rendered.contains("171"));
+    }
+
+    #[test]
+    fn secret_string_debug_is_redacted_too() {
+        let s = SecretString::new("correct horse battery staple".to_owned());
+        assert_eq!(format!("{s:?}"), "SecretString(<redacted>)");
+    }
+
+    /// A secret nested inside another structure must stay redacted, which is
+    /// the case that actually bites: nobody formats a key directly.
+    #[test]
+    fn a_nested_secret_stays_redacted() {
+        #[derive(Debug)]
+        struct Holder {
+            name: &'static str,
+            key: SecretBytes<32>,
+        }
+        let rendered = format!(
+            "{:?}",
+            Holder {
+                name: "identity",
+                key: SecretBytes::new([0x42u8; 32]),
+            }
+        );
+        assert!(rendered.contains("identity"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("66"));
     }
 }

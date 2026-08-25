@@ -218,6 +218,58 @@ ALTER TABLE source ADD COLUMN config_tag TEXT NOT NULL DEFAULT '';
 CREATE UNIQUE INDEX source_config_tag_idx ON source(kind, config_tag);
 ";
 
+/// One migration step, for the release notes and the migration log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Migration {
+    /// Version this migrates from.
+    pub from: u32,
+    /// Version this migrates to.
+    pub to: u32,
+    /// One-line description.
+    pub description: &'static str,
+    /// Whether this rewrites anything inside a commitment preimage.
+    ///
+    /// A migration that touches one needs a chain re-verification pass
+    /// afterwards, and needs flagging in the release notes as breaking even
+    /// though it compiles — it invalidates users' chains, which is
+    /// unrecoverable (CLAUDE.md §7).
+    pub touches_commitments: bool,
+}
+
+/// Every migration this build knows, in order.
+///
+/// The catalogue, next to the SQL it describes. The application itself lives in
+/// [`SqliteStore::open`](crate::sqlite::SqliteStore::open), which applies each
+/// pending step in one transaction and refuses a database newer than this build
+/// — a downgrade that writes with an older understanding of the schema can
+/// corrupt a chain beyond repair.
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 0,
+        to: 1,
+        description: "initial schema: meta, source, memory, footage, entity, anchor",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 1,
+        to: 2,
+        description: "append-only egress log",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 2,
+        to: 3,
+        description: "encrypted vector index",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 3,
+        to: 4,
+        description: "sources keyed by a digest of their configuration",
+        touches_commitments: false,
+    },
+];
+
 /// `meta` keys.
 pub mod meta_key {
     /// Schema version, as a decimal string.
@@ -236,4 +288,36 @@ pub mod meta_key {
     pub const HOME_TZ: &str = "home_tz";
     /// When the chain was created, as Unix milliseconds.
     pub const CREATED_AT: &str = "created_at";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The catalogue must describe exactly the migrations the store applies.
+    /// A step described but not applied — or applied but not described — is how
+    /// a release note comes to be wrong about whether a chain was touched.
+    #[test]
+    fn the_catalogue_covers_every_version_in_order() {
+        assert_eq!(
+            MIGRATIONS.len(),
+            crate::sqlite::SCHEMA_VERSION as usize,
+            "one step per version"
+        );
+        for (index, m) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(m.from, index as u32);
+            assert_eq!(m.to, m.from + 1);
+        }
+        assert_eq!(
+            MIGRATIONS.last().map(|m| m.to),
+            Some(crate::sqlite::SCHEMA_VERSION)
+        );
+    }
+
+    /// Nothing shipped so far rewrites a commitment preimage. When something
+    /// does, this test is where a reviewer finds out.
+    #[test]
+    fn no_migration_so_far_touches_a_commitment() {
+        assert!(MIGRATIONS.iter().all(|m| !m.touches_commitments));
+    }
 }
