@@ -2,8 +2,7 @@
 //!
 //! Errors carry identifiers and context, never content: no variant may hold a
 //! memory body, a persona facet, an entity name, or key material (SPEC I8).
-//! When you need to say *which* memory failed, hold its
-//! [`MemoryId`](crate::ids::MemoryId).
+//! When you need to say *which* memory failed, hold its [`MemoryId`].
 
 use crate::ids::MemoryId;
 

@@ -1,4 +1,5 @@
-//! Source adapters: everything that turns outside data into [`Memory`] values.
+//! Source adapters: everything that turns outside data into
+//! [`Memory`](ghostr_core::memory::Memory) values.
 //!
 //! # Adding a source
 //!
@@ -12,11 +13,15 @@
 //! `nostr`, `rss`, and `archive` sources carry text written by other people, and
 //! that text is fed to a language model. An adapter's
 //! [`IngestAdapter::default_trust`] is a security control, not a quality
-//! signal: [`TrustLevel::ThirdParty`] content never becomes a voice exemplar and
+//! signal:
+//! [`TrustLevel::ThirdParty`](ghostr_core::sensitivity::TrustLevel::ThirdParty)
+//! content never becomes a voice exemplar and
 //! never sources a claim about what the user believes
 //! (THREAT_MODEL §T7).
 //!
-//! An adapter that returns [`TrustLevel::FirstParty`] for content the user did
+//! An adapter that returns
+//! [`TrustLevel::FirstParty`](ghostr_core::sensitivity::TrustLevel::FirstParty)
+//! for content the user did
 //! not write is a vulnerability, not a bug.
 //!
 //! # Status

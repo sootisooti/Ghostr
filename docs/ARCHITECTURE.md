@@ -1,6 +1,6 @@
 # Ghostr — Architecture
 
-**Status:** Draft v0.1 · no code exists yet
+**Status:** Draft v0.1 · scaffolded, unimplemented
 **Companion to:** [SPEC.md](SPEC.md) (what it does) and
 [THREAT_MODEL.md](THREAT_MODEL.md) (what it defends against)
 

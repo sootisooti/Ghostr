@@ -67,11 +67,18 @@ chained, anchored. Corrections are amendments, never rewrites.
 
 ## Status
 
-**Pre-alpha. Documentation only. There is no code in this repository yet.**
+**Pre-alpha. The workspace is scaffolded; no behaviour is implemented.**
 
-This repo currently contains the design: the spec, the architecture, the threat
-model, and the roadmap. That is deliberate — the anchoring scheme and the privacy
-boundary are much cheaper to get right on paper than in a migration.
+Every type, trait, and signature is defined and documented. Every body is
+`todo!()`. That is deliberate: the shape is meant to be reviewable before
+anything is built, and the anchoring scheme and privacy boundary are far cheaper
+to get right on paper than in a migration.
+
+```console
+$ cargo build --workspace        # 14 crates, compiles clean
+$ cargo xtask scaffold-status    # what is still unimplemented, per crate
+$ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
+```
 
 | Document | What's in it |
 | --- | --- |
@@ -80,6 +87,7 @@ boundary are much cheaper to get right on paper than in a migration.
 | [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | What an attacker gets in each scenario, and what stops them |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | M0–M4, each shippable on its own |
 | [CLAUDE.md](CLAUDE.md) | Working conventions for this repo |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, CI, commit format, good first contributions |
 
 Milestone **M0** (encrypted local journal with an anchored, verifiable history —
 no LLM involved) is the next thing to be built. See the

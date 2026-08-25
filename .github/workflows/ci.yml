@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref. A queue of stale runs on a busy PR
+# costs minutes and tells you nothing the newest run will not.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 2
+  # Deliberately NOT setting `RUSTFLAGS: -D warnings`. RUSTFLAGS applies to
+  # dependency compilation too, so a warning in someone else's crate would fail
+  # our build. Warnings are denied through `[workspace.lints]` in Cargo.toml,
+  # which applies to this workspace only, plus `-- -D warnings` on clippy.
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the version; no toolchain action needed.
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # --all-targets covers tests, benches, and examples, not just lib.
+      # --all-features so a feature-gated path cannot rot unnoticed.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  build:
+    name: build (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Builds the *default* feature set specifically. The default build has no
+      # provider features and therefore cannot egress; if it stops compiling on
+      # its own, the offline path has quietly become non-default.
+      - run: cargo build --workspace
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # Doc comments are load-bearing in this repo: they carry the invariants and
+      # the reasoning. A broken intra-doc link is a broken cross-reference
+      # between an invariant and the type that upholds it.
+      - run: cargo doc --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  arch:
+    name: architecture rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # ARCHITECTURE §3: core stays a leaf, no sideways domain deps, providers
+      # only in ghostr-llm, testkit dev-only, nothing depends on engine or cli.
+      # These are the rules a code review will eventually miss.
+      - run: cargo xtask lint-deps
+      # Progress report, not a gate.
+      - run: cargo xtask scaffold-status
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the dev toolchain, so it has to be removed for
+      # the declared minimum to actually be exercised.
+      - run: rm rust-toolchain.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Licences, advisories, and duplicate versions. This project is
+      # supply-chain sensitive (THREAT_MODEL §T8) and the dependency tree is
+      # small on purpose — keeping it that way needs a check, not a habit.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

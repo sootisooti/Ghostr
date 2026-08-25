@@ -1,0 +1,44 @@
+# cargo-deny configuration.
+#
+# This project is supply-chain sensitive: code running in-process holds the DEK
+# (THREAT_MODEL §T8). The dependency tree is small on purpose, and every
+# addition needs a justification in its PR (CLAUDE.md §4.9).
+
+[advisories]
+version = 2
+# An unmaintained crate in this tree is a real finding, not noise.
+yanked = "deny"
+
+[licenses]
+version = 2
+# MIT-compatible only. A copyleft dependency would make the MIT promise on the
+# tin false for anyone linking the result.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Warn rather than deny: duplicate versions are usually a transitive pin someone
+# else controls, and blocking a PR on it helps nobody.
+multiple-versions = "warn"
+wildcards = "deny"
+# Crates that would violate an architectural rule wherever they appeared.
+deny = [
+    { name = "openssl", reason = "use rustls; no system OpenSSL dependency" },
+    { name = "openssl-sys", reason = "use rustls; no system OpenSSL dependency" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# No git dependencies. A git dependency is a supply-chain edge with no registry
+# audit trail and no yank mechanism.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -1,6 +1,6 @@
 //! Construction of models, and the wrapper that makes the gate unavoidable.
 //!
-//! This module is the reason [`EgressPolicy`](crate::EgressPolicy) is not merely
+//! This module is the reason [`EgressPolicy`] is not merely
 //! advisory. The provider implementations are private to this crate, and the
 //! only constructor that yields a remote model is [`remote`], which requires a
 //! policy and a log. **A caller cannot obtain an ungated remote model**, because
