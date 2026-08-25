@@ -45,8 +45,11 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+#[cfg(feature = "llm")]
+pub mod model;
 pub mod ops;
 pub mod runtime;
+pub mod sources;
 
 pub use engine::Engine;
 pub use error::{Error, Result};

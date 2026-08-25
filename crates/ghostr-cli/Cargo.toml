@@ -17,8 +17,19 @@ ghostr-engine = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
+ghostr-core = { workspace = true }
 ghostr-crypto = { workspace = true }
+ghostr-store = { workspace = true }
 ghostr-anchor = { workspace = true }
+ghostr-llm = { workspace = true, optional = true }
+
+[features]
+default = []
+## A local Ollama-compatible model.
+llm-local = ["ghostr-engine/llm-local"]
+## Remote providers, behind the egress gate. Off by default: a stock build
+## cannot egress at all.
+llm-remote = ["ghostr-engine/llm-remote", "dep:ghostr-llm", "ghostr-llm/remote"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

@@ -33,6 +33,17 @@ pub struct Config {
     /// network, and it should be a thing the user asks for rather than a thing
     /// that happens because they wrote a note.
     pub auto_anchor: bool,
+    /// Whether any content may leave the device for a model at all.
+    ///
+    /// **False by default**, and the master switch: with it off, no
+    /// `egress_allow` entry does anything. Two settings rather than one because
+    /// "turn it all off" should not mean editing a list.
+    pub egress_enabled: bool,
+    /// Which `provider:task` pairs may egress, e.g. `anthropic:summarization`.
+    ///
+    /// Per task, not per provider. Enabling a provider for conversation must not
+    /// silently enable it for bulk extraction over the whole corpus (SPEC §11.2).
+    pub egress_allow: Vec<String>,
 }
 
 impl Default for Config {
@@ -46,6 +57,8 @@ impl Default for Config {
                 .map(|c| c.url)
                 .collect(),
             auto_anchor: false,
+            egress_enabled: false,
+            egress_allow: Vec::new(),
         }
     }
 }
@@ -92,6 +105,14 @@ impl Config {
                         })?;
                 }
                 "auto_anchor" => config.auto_anchor = value == "true",
+                "egress_enabled" => config.egress_enabled = value == "true",
+                "egress_allow" => {
+                    config.egress_allow = value
+                        .split(',')
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
                 "calendars" => {
                     config.calendars = value
                         .split(',')

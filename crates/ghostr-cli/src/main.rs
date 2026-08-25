@@ -62,7 +62,40 @@ enum Command {
         /// Which day: `today`, `yesterday`, or `YYYY-MM-DD`.
         #[arg(long, default_value = "today")]
         date: String,
+        /// Show what would be sent to a remote model, and send nothing.
+        ///
+        /// Requires `--remote`. There is no dry run of the local path because
+        /// nothing leaves the device on it, and nothing is what a dry run is
+        /// for.
+        #[arg(long)]
+        dry_run: bool,
+        /// Route summarisation at the configured remote provider.
+        #[arg(long)]
+        remote: bool,
     },
+
+    /// Show a day, sealing nothing.
+    Recap {
+        /// Which day: `today`, `yesterday`, or `YYYY-MM-DD`.
+        #[arg(default_value = "today")]
+        date: String,
+    },
+
+    /// Configured sources.
+    #[command(subcommand)]
+    Source(SourceCommand),
+
+    /// Threads still open at the chain tip.
+    #[command(subcommand)]
+    Thread(ThreadCommand),
+
+    /// Entries made inside Ghostr.
+    #[command(subcommand)]
+    Journal(JournalCommand),
+
+    /// What has left this device.
+    #[command(subcommand)]
+    Egress(EgressCommand),
 
     /// Inspect sealed footage.
     #[command(subcommand)]
@@ -76,6 +109,60 @@ enum Command {
 
     /// Show vault status.
     Status,
+}
+
+#[derive(Debug, Subcommand)]
+enum SourceCommand {
+    /// Add a source, after showing what adding it means.
+    Add {
+        /// Which adapter: `markdown`, `journal`, or `structlog`.
+        kind: String,
+        /// Path it reads from. Omitted for `journal`, which has none.
+        #[arg(default_value = "")]
+        path: String,
+        /// For `structlog`, which schema its rows conform to:
+        /// `places`, `people`, `habits`, `health`, or `media`.
+        #[arg(long)]
+        schema: Option<String>,
+    },
+    /// List configured sources.
+    List,
+    /// Pull from every enabled source.
+    Sync {
+        /// Only this source, by its full or short id.
+        #[arg(long)]
+        id: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ThreadCommand {
+    /// Threads still open.
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+enum JournalCommand {
+    /// Record an entry. It goes straight into the encrypted vault.
+    Add {
+        /// The entry. Read from stdin when omitted.
+        text: Option<String>,
+    },
+    /// Import a running journal file, split at its timestamp headings.
+    Import {
+        /// The file, or a directory of them.
+        path: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EgressCommand {
+    /// Every decision the gate made, newest first.
+    Log {
+        /// Only the last N days.
+        #[arg(long)]
+        days: Option<u32>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -107,7 +194,21 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { import, tz } => cmd_init(&dir, import, &tz),
         Command::Ingest { path } => cmd_ingest(&dir, &path),
-        Command::Memoria { date } => cmd_memoria(&dir, &date),
+        Command::Memoria {
+            date,
+            dry_run,
+            remote,
+        } => cmd_memoria(&dir, &date, dry_run, remote),
+        Command::Recap { date } => cmd_recap(&dir, &date),
+        Command::Source(SourceCommand::Add { kind, path, schema }) => {
+            cmd_source_add(&dir, &kind, &path, schema.as_deref())
+        }
+        Command::Source(SourceCommand::List) => cmd_source_list(&dir),
+        Command::Source(SourceCommand::Sync { id }) => cmd_source_sync(&dir, id.as_deref()),
+        Command::Thread(ThreadCommand::List) => cmd_thread_list(&dir),
+        Command::Journal(JournalCommand::Add { text }) => cmd_journal_add(&dir, text.as_deref()),
+        Command::Journal(JournalCommand::Import { path }) => cmd_journal_import(&dir, &path),
+        Command::Egress(EgressCommand::Log { days }) => cmd_egress_log(&dir, days),
         Command::Footage(FootageCommand::List) => cmd_footage_list(&dir),
         Command::Footage(FootageCommand::Show { id }) => cmd_footage_show(&dir, id),
         Command::Anchor => cmd_anchor(&dir),
@@ -215,9 +316,26 @@ fn cmd_ingest(dir: &std::path::Path, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_memoria(dir: &std::path::Path, date: &str) -> Result<()> {
+fn cmd_memoria(dir: &std::path::Path, date: &str, dry_run: bool, remote: bool) -> Result<()> {
     let engine = open(dir)?;
     let day = engine.resolve_date(date)?;
+
+    if dry_run {
+        if !remote {
+            bail!(
+                "--dry-run needs --remote: nothing leaves the device on the local path, \
+                 so there is nothing to preview"
+            );
+        }
+        return cmd_dry_run_remote(&engine, day);
+    }
+    if remote {
+        bail!(
+            "routing memoria at a remote provider is not implemented yet; \
+             `--dry-run --remote` shows what it would send"
+        );
+    }
+
     let outcome = ops::memoria(&engine, day).context("compiling footage")?;
     let footage = &outcome.footage;
     println!("{}", render::sealed(footage));
@@ -289,4 +407,184 @@ fn cmd_status(dir: &std::path::Path) -> Result<()> {
 fn open(dir: &std::path::Path) -> Result<Engine> {
     let pass = passphrase(false)?;
     Engine::open(dir, &pass).context("opening the vault")
+}
+
+/// Shows what a remote model would receive, and sends nothing.
+#[cfg(feature = "llm-remote")]
+fn cmd_dry_run_remote(
+    engine: &ghostr_engine::engine::Engine,
+    day: chrono::NaiveDate,
+) -> Result<()> {
+    use ghostr_llm::egress::EgressDecision;
+
+    let config = ghostr_llm::gate::RemoteModelConfig {
+        provider: std::env::var("GHOSTR_PROVIDER").unwrap_or_else(|_| "anthropic".to_owned()),
+        model: std::env::var("GHOSTR_MODEL").unwrap_or_else(|_| "claude-opus-5".to_owned()),
+        enabled_tasks: vec![ghostr_llm::model::TaskKind::Summarization],
+    };
+    let run = ops::dry_run_remote(engine, day, config).context("planning the dry run")?;
+
+    println!("dry run for {} — nothing was sent", run.date);
+    println!("  {} memory(ies) in the window", run.memories);
+    if run.secret_withheld > 0 {
+        println!(
+            "  {} withheld as Secret (never offered to the gate at all)",
+            run.secret_withheld
+        );
+    }
+    for (index, note) in run.notes.iter().enumerate() {
+        match &note.decision {
+            EgressDecision::Deny { reason } => {
+                println!("\n  [{index}] DENIED: {reason}");
+            }
+            EgressDecision::Allow | EgressDecision::AllowRedacted(_) => {
+                println!(
+                    "\n  [{index}] would send {} byte(s), {} name(s) pseudonymised",
+                    note.payload.as_ref().map_or(0, String::len),
+                    note.entities_pseudonymised
+                );
+                if let Some(payload) = &note.payload {
+                    // The exact bytes, because that is the question the user
+                    // asked. Redaction has already happened, so this is what
+                    // would leave and not what was in the corpus.
+                    for line in payload.lines() {
+                        println!("      {line}");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Without a remote provider compiled in there is nothing to preview.
+#[cfg(not(feature = "llm-remote"))]
+fn cmd_dry_run_remote(
+    _engine: &ghostr_engine::engine::Engine,
+    _day: chrono::NaiveDate,
+) -> Result<()> {
+    bail!(
+        "this build has no remote provider compiled in, so nothing can leave it; \
+         rebuild with `--features llm-remote` if you want one"
+    )
+}
+
+fn cmd_recap(dir: &std::path::Path, date: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let day = engine.resolve_date(date)?;
+    let recap = ops::recap(&engine, day).context("reading the recap")?;
+    println!("{}", render::recap(&recap));
+    Ok(())
+}
+
+fn cmd_source_add(
+    dir: &std::path::Path,
+    kind: &str,
+    path: &str,
+    schema: Option<&str>,
+) -> Result<()> {
+    use ghostr_core::source::{LogSchema, SourceKindTag};
+    use ghostr_engine::sources::{self, NewSource};
+
+    let kind = match kind {
+        "markdown" | "markdown_vault" => SourceKindTag::MarkdownVault,
+        "journal" => SourceKindTag::Journal,
+        "structlog" | "structured_log" => SourceKindTag::StructuredLog,
+        other => bail!("unknown source kind `{other}` (try markdown, journal, or structlog)"),
+    };
+    let schema = match schema {
+        Some("places") => Some(LogSchema::Places),
+        Some("people") => Some(LogSchema::People),
+        Some("habits") => Some(LogSchema::Habits),
+        Some("health") => Some(LogSchema::Health),
+        Some("media") => Some(LogSchema::Media),
+        Some(other) => bail!("unknown schema `{other}`"),
+        None => None,
+    };
+
+    let engine = open(dir)?;
+    let (id, plan) = sources::add(
+        &engine,
+        &NewSource {
+            kind,
+            location: path.to_owned(),
+            schema,
+        },
+    )
+    .context("adding the source")?;
+    println!("{}", render::source_added(id, &plan));
+    Ok(())
+}
+
+fn cmd_source_list(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let sources = ghostr_engine::sources::list(&engine).context("listing sources")?;
+    println!("{}", render::source_list(&sources));
+    Ok(())
+}
+
+fn cmd_source_sync(dir: &std::path::Path, id: Option<&str>) -> Result<()> {
+    let engine = open(dir)?;
+    let only = match id {
+        Some(raw) => Some(
+            ghostr_core::ids::SourceId::parse(raw)
+                .map_err(|_| anyhow::anyhow!("`{raw}` is not a source id"))?,
+        ),
+        None => None,
+    };
+    let report = ghostr_engine::sources::sync(&engine, only).context("syncing")?;
+    println!("{}", render::source_sync(&report));
+    Ok(())
+}
+
+fn cmd_thread_list(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let threads = ops::open_threads(&engine).context("reading threads")?;
+    println!("{}", render::thread_list(&threads));
+    Ok(())
+}
+
+fn cmd_journal_add(dir: &std::path::Path, text: Option<&str>) -> Result<()> {
+    use std::io::Read as _;
+
+    let entry = match text {
+        Some(t) => t.to_owned(),
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("reading the entry from stdin")?;
+            buf
+        }
+    };
+    let engine = open(dir)?;
+    let id = ops::journal_add(&engine, &entry).context("recording the entry")?;
+    // The id, never the entry. It is already in the vault; echoing it back
+    // would put it in the terminal scrollback too (I8).
+    println!("recorded {}", id.display_short());
+    Ok(())
+}
+
+fn cmd_journal_import(dir: &std::path::Path, path: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let report = ops::journal_import(&engine, path).context("importing the journal")?;
+    println!(
+        "imported {} entry(ies), {} already present\n",
+        report.ingested, report.skipped
+    );
+    Ok(())
+}
+
+fn cmd_egress_log(dir: &std::path::Path, days: Option<u32>) -> Result<()> {
+    let engine = open(dir)?;
+    let since = match days {
+        Some(d) => ghostr_core::time::Timestamp::new(
+            engine.now().utc_millis() - i64::from(d) * 86_400_000,
+            0,
+        ),
+        None => ghostr_core::time::Timestamp::new(0, 0),
+    };
+    let records = ops::egress_log(&engine, since).context("reading the egress log")?;
+    println!("{}", render::egress_log(&records));
+    Ok(())
 }

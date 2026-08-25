@@ -202,6 +202,22 @@ CREATE TABLE vector (
 CREATE INDEX vector_dims_idx ON vector(dims);
 ";
 
+/// Migration to schema version 4: sources are identified by their configuration.
+///
+/// Version 3 keyed `source` on `kind` alone, which quietly collapsed two
+/// markdown vaults at different paths into one row — and made `ghostr source
+/// add` unable to add a second source of the same kind at all. The key is now a
+/// keyed digest of the configuration, computed the same way entity name tags
+/// are: unforgeable without the DEK, and deterministic with it, so the
+/// configuration itself stays sealed.
+pub const SCHEMA_V4: &str = r"
+ALTER TABLE source ADD COLUMN config_tag TEXT NOT NULL DEFAULT '';
+
+-- Existing rows keep their empty tag, which is unique among them because
+-- version 3 allowed only one source per kind in the first place.
+CREATE UNIQUE INDEX source_config_tag_idx ON source(kind, config_tag);
+";
+
 /// `meta` keys.
 pub mod meta_key {
     /// Schema version, as a decimal string.

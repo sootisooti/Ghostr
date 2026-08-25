@@ -13,20 +13,20 @@ use ghostr_core::hash::Hash32;
 use ghostr_core::identity::PublicKey;
 use ghostr_core::ids::{ChainId, MemoryId, SourceId};
 use ghostr_core::memory::{Memory, MemoryBody, MemoryKind, Provenance};
-use ghostr_core::sensitivity::Sensitivity;
+use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
 use ghostr_core::time::Timestamp;
 use ghostr_crypto::kdf::{Dek, open_row, seal_row};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, meta_key};
+use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, meta_key};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -162,7 +162,12 @@ impl SqliteStore {
         };
 
         // (applies_when_current_is_at_most, sql)
-        for (from, sql) in [(0u32, SCHEMA_V1), (1, SCHEMA_V2), (2, SCHEMA_V3)] {
+        for (from, sql) in [
+            (0u32, SCHEMA_V1),
+            (1, SCHEMA_V2),
+            (2, SCHEMA_V3),
+            (3, SCHEMA_V4),
+        ] {
             if current <= from {
                 self.conn
                     .execute_batch(sql)
@@ -274,11 +279,51 @@ impl SqliteStore {
         config: &str,
         nonce: [u8; 24],
     ) -> crate::Result<SourceId> {
+        self.upsert_source_with(
+            dek,
+            &NewSourceRow {
+                id,
+                kind_tag,
+                config,
+                trust: TrustLevel::FirstParty,
+                sensitivity: Sensitivity::Private,
+            },
+            nonce,
+        )
+    }
+
+    /// Inserts a source, or returns the id of the one already configured the
+    /// same way.
+    ///
+    /// Identity is `(kind, config)`, not `kind`: two markdown vaults at
+    /// different paths are two sources, and re-running `source add` on the same
+    /// path is not. The configuration stays sealed, so the match is on a keyed
+    /// digest of it — deterministic with the DEK, unforgeable without.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn upsert_source_with(
+        &self,
+        dek: &Dek,
+        new: &NewSourceRow<'_>,
+        nonce: [u8; 24],
+    ) -> crate::Result<SourceId> {
+        let NewSourceRow {
+            id,
+            kind_tag,
+            config,
+            trust,
+            sensitivity,
+        } = *new;
+        let tag = self.config_tag(dek, kind_tag, config)?;
         if let Some(existing) = self
             .conn
-            .query_row("SELECT id FROM source WHERE kind = ?1", [kind_tag], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT id FROM source WHERE kind = ?1 AND config_tag = ?2",
+                params![kind_tag, tag],
+                |r| r.get::<_, String>(0),
+            )
             .optional()
             .map_err(|_| crate::Error::Backend {
                 operation: "look up source",
@@ -294,14 +339,110 @@ impl SqliteStore {
             .execute(
                 "INSERT INTO source
                  (id, kind, trust, default_sensitivity, enabled, cursor_json,
-                  config_nonce, config_sealed)
-                 VALUES (?1, ?2, 'first_party', 'private', 1, '{}', ?3, ?4)",
-                params![id.to_string(), kind_tag, nonce.to_vec(), sealed],
+                  config_nonce, config_sealed, config_tag)
+                 VALUES (?1, ?2, ?3, ?4, 1, '{}', ?5, ?6, ?7)",
+                params![
+                    id.to_string(),
+                    kind_tag,
+                    trust_str(trust),
+                    sensitivity_str(sensitivity),
+                    nonce.to_vec(),
+                    sealed,
+                    tag
+                ],
             )
             .map_err(|_| crate::Error::Backend {
                 operation: "insert source",
             })?;
         Ok(id)
+    }
+
+    /// A keyed, deterministic digest of a source's configuration.
+    ///
+    /// Same construction as entity name tags: the DEK is not exposed as bytes,
+    /// so the tag is a hash of the configuration sealed under a fixed nonce.
+    fn config_tag(&self, dek: &Dek, kind_tag: &str, config: &str) -> crate::Result<String> {
+        let material = format!("{kind_tag}\u{0}{}", config.trim());
+        let sealed = seal_row(dek, material.as_bytes(), &[0u8; 24], b"source-config-tag")?;
+        Ok(ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::MetaLeaf, &sealed).to_hex())
+    }
+
+    /// Every configured source, ordered by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn all_sources(&self, dek: &Dek) -> crate::Result<Vec<StoredSource>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, kind, trust, default_sensitivity, enabled, cursor_json,
+                        config_nonce, config_sealed
+                 FROM source ORDER BY id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare source list",
+            })?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Vec<u8>>(6)?,
+                    r.get::<_, Vec<u8>>(7)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "list sources",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, kind, trust, sensitivity, enabled, cursor, nonce, sealed) =
+                row.map_err(|_| crate::Error::Backend {
+                    operation: "read source row",
+                })?;
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+                operation: "source nonce length",
+            })?;
+            let aad = format!("source:{id}");
+            let config = open_row(dek, &sealed, &nonce, aad.as_bytes())
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "source" })?;
+            out.push(StoredSource {
+                id: SourceId::parse(&id).map_err(|_| crate::Error::Backend {
+                    operation: "parse source id",
+                })?,
+                kind_tag: kind,
+                trust: trust_from_str(&trust),
+                default_sensitivity: sensitivity_from_str(&sensitivity),
+                enabled: enabled != 0,
+                cursor_json: cursor,
+                config: String::from_utf8(config)
+                    .map_err(|_| crate::Error::RowDecryptFailed { table: "source" })?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Records a source's resumable position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn set_source_cursor(&self, id: SourceId, cursor_json: &str) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "UPDATE source SET cursor_json = ?2 WHERE id = ?1",
+                params![id.to_string(), cursor_json],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "set source cursor",
+            })?;
+        Ok(())
     }
 
     /// Whether a raw-content digest has already been ingested from this source.
@@ -1274,6 +1415,69 @@ fn sensitivity_from_str(s: &str) -> Sensitivity {
     }
 }
 
+/// The stored form of a trust level.
+const fn trust_str(t: TrustLevel) -> &'static str {
+    match t {
+        TrustLevel::FirstParty => "first_party",
+        TrustLevel::SelfReported => "self_reported",
+        TrustLevel::ThirdParty => "third_party",
+    }
+}
+
+/// Reads a stored trust level.
+///
+/// An unrecognised value reads as `ThirdParty`: the strictest level, so a row
+/// written by a newer build is treated as hostile input rather than as the
+/// user's own voice (THREAT_MODEL §T7).
+fn trust_from_str(s: &str) -> TrustLevel {
+    match s {
+        "first_party" => TrustLevel::FirstParty,
+        "self_reported" => TrustLevel::SelfReported,
+        _ => TrustLevel::ThirdParty,
+    }
+}
+
+/// A source about to be written.
+///
+/// Grouped rather than passed as seven arguments: the two policy fields are the
+/// ones that matter, and a positional call site made it easy to swap them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewSourceRow<'a> {
+    /// Its identifier, used only if no source is already configured this way.
+    pub id: SourceId,
+    /// The adapter kind tag.
+    pub kind_tag: &'a str,
+    /// Its configuration, which will be sealed.
+    pub config: &'a str,
+    /// How its content is trusted. A security control, not a quality score.
+    pub trust: TrustLevel,
+    /// The sensitivity floor its memories carry.
+    pub sensitivity: Sensitivity,
+}
+
+/// A configured source, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSource {
+    /// Its identifier.
+    pub id: SourceId,
+    /// The adapter kind tag it registers under.
+    pub kind_tag: String,
+    /// How its content is trusted.
+    pub trust: TrustLevel,
+    /// The sensitivity floor applied to its memories.
+    pub default_sensitivity: Sensitivity,
+    /// Whether it is pulled.
+    pub enabled: bool,
+    /// Its resumable position, as stored JSON.
+    pub cursor_json: String,
+    /// Its configuration, decrypted.
+    ///
+    /// A path or a URL, so it is content: it names where a user keeps their
+    /// notes. It is sealed at rest and only decrypted for a caller holding the
+    /// DEK (I1).
+    pub config: String,
+}
+
 /// Unused in M0; kept so the query type stays exercised by the compiler.
 #[allow(dead_code)]
 fn _assert_query_type(_q: &MemoryQuery) {}
@@ -2067,6 +2271,27 @@ mod tests {
         assert_eq!(s.egress_count().expect("count"), 1);
         use crate::vector::VectorIndex as _;
         assert_eq!(s.descriptor().expect("vector descriptor").count, 0);
+        // v4: two vaults at different paths are two sources.
+        let d = dek();
+        let a = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "markdown_vault",
+                "/a",
+                [2u8; 24],
+            )
+            .expect("first vault");
+        let b = s
+            .upsert_source(
+                &d,
+                SourceId::new(3, [3u8; 10]),
+                "markdown_vault",
+                "/b",
+                [3u8; 24],
+            )
+            .expect("second vault");
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -2833,5 +3058,152 @@ mod vector_tests {
             .knn(&wrong, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
             .expect_err("must fail");
         assert!(matches!(err, crate::Error::RowDecryptFailed { .. }));
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+
+    use super::tests_support::{dek, store};
+    use super::*;
+
+    /// The bug schema v4 fixes: keying on `kind` alone collapsed two vaults at
+    /// different paths into one source, and made a second `source add` of the
+    /// same kind impossible.
+    #[test]
+    fn two_vaults_at_different_paths_are_two_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let a = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "markdown_vault",
+                "/notes/a",
+                [2u8; 24],
+            )
+            .expect("a");
+        let b = s
+            .upsert_source(
+                &d,
+                SourceId::new(3, [3u8; 10]),
+                "markdown_vault",
+                "/notes/b",
+                [3u8; 24],
+            )
+            .expect("b");
+        assert_ne!(a, b);
+        assert_eq!(
+            s.all_sources(&d).expect("list").len(),
+            3,
+            "plus the fixture"
+        );
+    }
+
+    /// And re-adding the same path is still a no-op, which is what makes
+    /// `ingest` safe to run twice.
+    #[test]
+    fn re_adding_the_same_configuration_returns_the_existing_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let a = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "markdown_vault",
+                "/notes",
+                [2u8; 24],
+            )
+            .expect("a");
+        let again = s
+            .upsert_source(
+                &d,
+                SourceId::new(9, [9u8; 10]),
+                "markdown_vault",
+                "/notes",
+                [9u8; 24],
+            )
+            .expect("again");
+        assert_eq!(a, again);
+    }
+
+    /// A source's configuration names where the user keeps their notes, so it
+    /// is content and is sealed like content (I1).
+    #[test]
+    fn a_source_path_is_not_readable_in_the_raw_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        s.upsert_source(
+            &dek(),
+            SourceId::new(2, [2u8; 10]),
+            "markdown_vault",
+            "/home/someone/private-diary",
+            [2u8; 24],
+        )
+        .expect("add");
+        drop(s);
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
+        assert!(
+            !raw.windows(13).any(|w| w == b"private-diary"),
+            "the path is on disk in the clear"
+        );
+    }
+
+    #[test]
+    fn trust_and_sensitivity_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let id = s
+            .upsert_source_with(
+                &d,
+                &NewSourceRow {
+                    id: SourceId::new(2, [2u8; 10]),
+                    kind_tag: "structured_log",
+                    config: "/health.jsonl",
+                    trust: TrustLevel::SelfReported,
+                    sensitivity: Sensitivity::Secret,
+                },
+                [2u8; 24],
+            )
+            .expect("add");
+        let listed = s.all_sources(&d).expect("list");
+        let found = listed.iter().find(|x| x.id == id).expect("present");
+        assert_eq!(found.trust, TrustLevel::SelfReported);
+        assert_eq!(found.default_sensitivity, Sensitivity::Secret);
+        assert_eq!(found.config, "/health.jsonl");
+    }
+
+    /// A row written by a newer build reads as the strictest trust level, so an
+    /// unknown value is treated as hostile input rather than as the user's own
+    /// voice (THREAT_MODEL §T7).
+    #[test]
+    fn an_unrecognised_trust_level_reads_as_third_party() {
+        assert_eq!(trust_from_str("something_new"), TrustLevel::ThirdParty);
+        assert_eq!(trust_from_str("first_party"), TrustLevel::FirstParty);
+    }
+
+    #[test]
+    fn a_cursor_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let id = s
+            .upsert_source(
+                &d,
+                SourceId::new(2, [2u8; 10]),
+                "structured_log",
+                "/h.jsonl",
+                [2u8; 24],
+            )
+            .expect("add");
+        s.set_source_cursor(id, r#"{"type":"timestamp","0":123}"#)
+            .expect("set");
+        let listed = s.all_sources(&d).expect("list");
+        let found = listed.iter().find(|x| x.id == id).expect("present");
+        assert!(found.cursor_json.contains("timestamp"));
     }
 }

@@ -39,13 +39,20 @@ macro_rules! uuid_id {
                 &self.0
             }
 
-            #[doc = concat!("Renders as `", $prefix, ":` plus the first eight hex digits.")]
+            #[doc = concat!("Renders as `", $prefix, ":` plus the last eight hex digits.")]
+            ///
+            /// The *last* eight, not the first. A UUIDv7 begins with its
+            /// timestamp, so two ids minted in the same millisecond share their
+            /// leading digits and would render identically — which is exactly
+            /// what happens when a command creates several records at once. The
+            /// tail is entropy, so it distinguishes them.
             ///
             /// Logging an identifier is always acceptable; logging the record it
             /// points at is not (SPEC I8).
             #[must_use]
             pub fn display_short(&self) -> String {
-                format!("{}:{}", $prefix, &self.0.as_simple().to_string()[..8])
+                let simple = self.0.as_simple().to_string();
+                format!("{}:{}", $prefix, &simple[simple.len() - 8..])
             }
 
             #[doc = concat!("Parses a `", $prefix, ":`-prefixed short form or a full UUID.")]
@@ -229,5 +236,15 @@ mod tests {
     fn display_short_is_prefixed() {
         let id = SourceId::new(1, [0u8; 10]);
         assert!(id.display_short().starts_with("src:"));
+    }
+
+    /// The reason the short form takes the tail. A UUIDv7 leads with its
+    /// timestamp, so ids minted in one millisecond — which is what a command
+    /// creating several records does — would otherwise all print the same.
+    #[test]
+    fn ids_minted_in_the_same_millisecond_render_differently() {
+        let a = SourceId::new(1_700_000_000_000, [1u8; 10]);
+        let b = SourceId::new(1_700_000_000_000, [2u8; 10]);
+        assert_ne!(a.display_short(), b.display_short());
     }
 }

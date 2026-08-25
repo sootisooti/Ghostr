@@ -4,9 +4,13 @@
 //! bare count or a bare "ok" invites a conclusion the evidence may not support,
 //! and this project's whole claim rests on its numbers being trustworthy.
 
+use ghostr_core::footage::Thread;
+use ghostr_core::sensitivity::Sensitivity;
 use ghostr_engine::engine::{Engine, InitOutcome};
-use ghostr_engine::ops::{IngestReport, VerifyReport};
+use ghostr_engine::ops::{IngestReport, Recap, VerifyReport};
+use ghostr_engine::sources::{SourcePlan, SyncReport};
 use ghostr_engine::types::{AnchorRecord, AnchorRecordState, Footage};
+use ghostr_store::sqlite::{EgressRecord, StoredSource};
 
 /// Renders the result of `init`.
 ///
@@ -191,6 +195,14 @@ pub(crate) fn footage_show(footage: &Footage) -> String {
             out.push_str(&format!("  - {}\n", q.question));
         }
     }
+    if !footage.amendments.is_empty() {
+        // Shown with the day they correct, not just as a count. An amendment
+        // whose target is invisible is a correction to nothing in particular.
+        out.push_str("\nAMENDMENTS\n");
+        for a in &footage.amendments {
+            out.push_str(&format!("  - seq {}: {}\n", a.target_seq, a.note));
+        }
+    }
     out
 }
 
@@ -290,4 +302,169 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
             |t| format!("seq {} · {}", t.seq, t.link.short())
         ),
     ))
+}
+
+/// Renders the result of adding a source.
+///
+/// States the two things the user is agreeing to — how the content will be
+/// trusted, and whether pulling reaches the network — at the moment of the
+/// decision, rather than leaving them to be discovered afterwards
+/// (THREAT_MODEL §T7).
+pub(crate) fn source_added(id: ghostr_core::ids::SourceId, plan: &SourcePlan) -> String {
+    format!(
+        "added {}  {}\n  trust        {}\n  sensitivity  {}{}\n  network      {}\n",
+        id.display_short(),
+        plan.kind_tag,
+        trust_word(plan.trust),
+        sensitivity_word(plan.sensitivity),
+        if plan.sensitivity == Sensitivity::Secret {
+            "  (never leaves this device)"
+        } else {
+            ""
+        },
+        if plan.touches_network {
+            "yes — this source will talk to the internet"
+        } else {
+            "no"
+        }
+    )
+}
+
+/// Renders the configured sources.
+pub(crate) fn source_list(sources: &[StoredSource]) -> String {
+    if sources.is_empty() {
+        return "no sources configured\n  add one with `ghostr source add`\n".to_owned();
+    }
+    let mut out = format!("{} source(s)\n", sources.len());
+    for s in sources {
+        out.push_str(&format!(
+            "  {}  {:<16} {:<13} {:<7} {}\n",
+            s.id.display_short(),
+            s.kind_tag,
+            trust_word(s.trust),
+            sensitivity_word(s.default_sensitivity),
+            if s.enabled { "enabled" } else { "disabled" },
+        ));
+    }
+    out
+}
+
+/// Renders a sync.
+pub(crate) fn source_sync(report: &SyncReport) -> String {
+    let mut out = format!(
+        "synced {} source(s): {} new, {} already present",
+        report.sources, report.ingested, report.skipped
+    );
+    if report.unparseable > 0 {
+        // Named rather than swallowed: an import that silently dropped rows is
+        // worse than one that says how many it could not read.
+        out.push_str(&format!(", {} unparseable", report.unparseable));
+    }
+    if report.unreachable > 0 {
+        out.push_str(&format!(", {} unreachable", report.unreachable));
+    }
+    out.push('\n');
+    out
+}
+
+/// Renders a recap.
+pub(crate) fn recap(recap: &Recap) -> String {
+    if recap.sealed {
+        return footage_show(&recap.footage);
+    }
+    // Said first, and plainly, and the commitment lines are dropped: a preview
+    // has none, and printing a row of zeroes where a link belongs invites
+    // someone to copy it as if it were one.
+    let mut out = format!(
+        "{} is not sealed yet — this is a preview, and nothing here is committed\n\n",
+        recap.date
+    );
+    let full = footage_show(&recap.footage);
+    for line in full.lines() {
+        if line.starts_with("link ") || line.starts_with("prev ") || line.starts_with("root ") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Renders the open threads.
+pub(crate) fn thread_list(threads: &[Thread]) -> String {
+    if threads.is_empty() {
+        return "no open threads\n".to_owned();
+    }
+    let mut out = format!("{} open thread(s)\n", threads.len());
+    for t in threads {
+        out.push_str(&format!(
+            "  {}  {}\n      opened seq {}, last touched seq {}, {} memory(ies)\n",
+            t.id.display_short(),
+            t.title,
+            t.opened_seq,
+            t.last_touched_seq,
+            t.memory_ids.len(),
+        ));
+    }
+    out
+}
+
+/// Renders the egress log.
+///
+/// An empty log on a vault that has never used a remote model is the expected
+/// answer, and the sentence says so — "nothing" and "not recorded" must not look
+/// the same (SPEC I5).
+pub(crate) fn egress_log(records: &[EgressRecord]) -> String {
+    if records.is_empty() {
+        return "nothing has left this device\n  \
+                (the log records every decision, allows and denies alike)\n"
+            .to_owned();
+    }
+    let mut out = format!("{} egress decision(s), newest first\n", records.len());
+    for r in records {
+        out.push_str(&format!(
+            "  {}  {:<10} {:<15} {:<15} {} byte(s)",
+            r.at.utc_millis(),
+            r.decision,
+            r.provider,
+            r.task,
+            r.bytes_sent,
+        ));
+        if let Some(reason) = &r.deny_reason {
+            out.push_str(&format!("  [{reason}]"));
+        }
+        if r.entities > 0 {
+            out.push_str(&format!("  {} name(s) pseudonymised", r.entities));
+        }
+        out.push('\n');
+        if let Some(digest) = &r.payload_digest {
+            // The digest, not the payload. The log must not become a second
+            // copy of the corpus.
+            out.push_str(&format!(
+                "      digest {}\n",
+                &digest[..16.min(digest.len())]
+            ));
+        }
+    }
+    out
+}
+
+/// The word for a trust level.
+const fn trust_word(t: ghostr_core::sensitivity::TrustLevel) -> &'static str {
+    use ghostr_core::sensitivity::TrustLevel;
+
+    match t {
+        TrustLevel::FirstParty => "first-party",
+        TrustLevel::SelfReported => "self-reported",
+        TrustLevel::ThirdParty => "third-party",
+    }
+}
+
+/// The word for a sensitivity.
+const fn sensitivity_word(s: Sensitivity) -> &'static str {
+    match s {
+        Sensitivity::Public => "public",
+        Sensitivity::Private => "private",
+        Sensitivity::Secret => "secret",
+    }
 }
