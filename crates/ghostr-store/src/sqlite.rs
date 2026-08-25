@@ -20,13 +20,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, SCHEMA_V2, meta_key};
+use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, meta_key};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -162,7 +162,7 @@ impl SqliteStore {
         };
 
         // (applies_when_current_is_at_most, sql)
-        for (from, sql) in [(0u32, SCHEMA_V1), (1, SCHEMA_V2)] {
+        for (from, sql) in [(0u32, SCHEMA_V1), (1, SCHEMA_V2), (2, SCHEMA_V3)] {
             if current <= from {
                 self.conn
                     .execute_batch(sql)
@@ -1195,20 +1195,292 @@ fn sensitivity_from_str(s: &str) -> Sensitivity {
 #[allow(dead_code)]
 fn _assert_query_type(_q: &MemoryQuery) {}
 
+/// The encrypted vector index (SPEC Q13).
+///
+/// Brute-force cosine over sealed rows. See [`crate::vector`] for why an ANN
+/// extension is not an option here and what the scan costs.
+impl crate::vector::VectorIndex for SqliteStore {
+    fn upsert(
+        &self,
+        dek: &Dek,
+        memory: MemoryId,
+        embedding: &[f32],
+        id: ghostr_core::ids::VectorId,
+        nonce: [u8; 24],
+    ) -> crate::Result<ghostr_core::ids::VectorId> {
+        let expected = self.vector_dimensions()?;
+        let found = u32::try_from(embedding.len()).unwrap_or(u32::MAX);
+        if expected != 0 && found != expected {
+            return Err(crate::Error::VectorDimensionMismatch { found, expected });
+        }
+        let unit =
+            crate::vector::normalize(embedding).ok_or(crate::Error::VectorDimensionMismatch {
+                found: 0,
+                expected: found,
+            })?;
+
+        let mut plaintext = Vec::with_capacity(unit.len() * 4);
+        for value in &unit {
+            plaintext.extend_from_slice(&value.to_le_bytes());
+        }
+        let aad = format!("vector:{memory}");
+        let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO vector (memory_id, id, dims, nonce, sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(memory_id) DO UPDATE SET
+                     id = excluded.id, dims = excluded.dims,
+                     nonce = excluded.nonce, sealed = excluded.sealed",
+                params![
+                    memory.to_string(),
+                    id.to_string(),
+                    i64::from(found),
+                    nonce.to_vec(),
+                    sealed
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "upsert vector",
+            })?;
+
+        // First vector in an empty index settles its width.
+        if expected == 0 {
+            self.set_meta(meta_key::VECTOR_DIMENSIONS, &found.to_string())?;
+        }
+        Ok(id)
+    }
+
+    fn knn(
+        &self,
+        dek: &Dek,
+        query: &[f32],
+        k: u32,
+        filter: &crate::vector::VectorFilter,
+    ) -> crate::Result<Vec<crate::vector::Neighbor>> {
+        let expected = self.vector_dimensions()?;
+        let found = u32::try_from(query.len()).unwrap_or(u32::MAX);
+        if expected == 0 {
+            return Ok(Vec::new());
+        }
+        if found != expected {
+            return Err(crate::Error::VectorDimensionMismatch { found, expected });
+        }
+        let Some(unit) = crate::vector::normalize(query) else {
+            return Ok(Vec::new());
+        };
+
+        let only: std::collections::BTreeSet<String> =
+            filter.only.iter().map(ToString::to_string).collect();
+        let exclude: std::collections::BTreeSet<String> =
+            filter.exclude.iter().map(ToString::to_string).collect();
+
+        let mut statement = self
+            .conn
+            .prepare("SELECT memory_id, nonce, sealed FROM vector WHERE dims = ?1")
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare knn scan",
+            })?;
+        let rows = statement
+            .query_map([i64::from(expected)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "scan vectors",
+            })?;
+
+        let mut scored: Vec<crate::vector::Neighbor> = Vec::new();
+        for row in rows {
+            let (memory_id, nonce, sealed) = row.map_err(|_| crate::Error::Backend {
+                operation: "read vector row",
+            })?;
+            if !only.is_empty() && !only.contains(&memory_id) {
+                continue;
+            }
+            if exclude.contains(&memory_id) {
+                continue;
+            }
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+                operation: "vector nonce length",
+            })?;
+            let aad = format!("vector:{memory_id}");
+            let plaintext = open_row(dek, &sealed, &nonce, aad.as_bytes())
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "vector" })?;
+            let vector = decode_vector(&plaintext)?;
+            let similarity = crate::vector::dot(&unit, &vector);
+            if filter
+                .min_similarity
+                .is_some_and(|floor| similarity < floor)
+            {
+                continue;
+            }
+            let memory = MemoryId::parse(&memory_id)
+                .map_err(|_| crate::Error::RowDecryptFailed { table: "vector" })?;
+            scored.push(crate::vector::Neighbor { memory, similarity });
+        }
+
+        // Ties break on id so the ordering is total: a retrieval set that
+        // varied between two runs over the same corpus would make every
+        // downstream prompt non-reproducible.
+        scored.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then_with(|| a.memory.cmp(&b.memory))
+        });
+        scored.truncate(k as usize);
+        Ok(scored)
+    }
+
+    fn remove(&self, memory: MemoryId) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "DELETE FROM vector WHERE memory_id = ?1",
+                [memory.to_string()],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "remove vector",
+            })?;
+        Ok(())
+    }
+
+    fn rebuild(
+        &self,
+        model: &str,
+        dimensions: u32,
+    ) -> crate::Result<crate::vector::RebuildProgress> {
+        self.set_meta(meta_key::VECTOR_MODEL, model)?;
+        self.set_meta(meta_key::VECTOR_DIMENSIONS, &dimensions.to_string())?;
+        // Vectors already at the new width are kept. That is what makes a
+        // rebuild resumable: a lid closing halfway through loses the work still
+        // to do, not the work already done.
+        self.conn
+            .execute(
+                "DELETE FROM vector WHERE dims != ?1",
+                [i64::from(dimensions)],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "drop stale vectors",
+            })?;
+        self.rebuild_progress()
+    }
+
+    fn unembedded(&self, limit: u32) -> crate::Result<Vec<MemoryId>> {
+        let dimensions = self.vector_dimensions()?;
+        let mut statement = self
+            .conn
+            .prepare(
+                "SELECT m.id FROM memory m
+                 LEFT JOIN vector v ON v.memory_id = m.id AND v.dims = ?1
+                 WHERE v.memory_id IS NULL AND m.shredded_at IS NULL
+                 ORDER BY m.id
+                 LIMIT ?2",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare unembedded query",
+            })?;
+        let rows = statement
+            .query_map(params![i64::from(dimensions), i64::from(limit)], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "query unembedded",
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let id = row.map_err(|_| crate::Error::Backend {
+                operation: "read unembedded row",
+            })?;
+            if let Ok(parsed) = MemoryId::parse(&id) {
+                out.push(parsed);
+            }
+        }
+        Ok(out)
+    }
+
+    fn descriptor(&self) -> crate::Result<crate::vector::IndexDescriptor> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vector", [], |r| r.get(0))
+            .map_err(|_| crate::Error::Backend {
+                operation: "count vectors",
+            })?;
+        Ok(crate::vector::IndexDescriptor {
+            model: self.meta(meta_key::VECTOR_MODEL)?.unwrap_or_default(),
+            dimensions: self.vector_dimensions()?,
+            count: count.unsigned_abs(),
+        })
+    }
+}
+
+impl SqliteStore {
+    /// The index's declared width, or `0` if nothing has set one yet.
+    fn vector_dimensions(&self) -> crate::Result<u32> {
+        Ok(self
+            .meta(meta_key::VECTOR_DIMENSIONS)?
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0))
+    }
+
+    /// How much of the index is built, against how much needs to be.
+    fn rebuild_progress(&self) -> crate::Result<crate::vector::RebuildProgress> {
+        let dimensions = self.vector_dimensions()?;
+        let completed: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM vector WHERE dims = ?1",
+                [i64::from(dimensions)],
+                |r| r.get(0),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "count current vectors",
+            })?;
+        let total: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory WHERE shredded_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "count memories",
+            })?;
+        Ok(crate::vector::RebuildProgress {
+            completed: completed.unsigned_abs(),
+            total: total.unsigned_abs(),
+        })
+    }
+}
+
+/// Reads a stored vector back out of its little-endian bytes.
+fn decode_vector(bytes: &[u8]) -> crate::Result<Vec<f32>> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(crate::Error::RowDecryptFailed { table: "vector" });
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// Fixtures shared by this file's test modules.
 #[cfg(test)]
-mod tests {
+mod tests_support {
     use ghostr_core::memory::MemoryBody;
     use ghostr_crypto::kdf::derive_dek;
 
     use super::*;
 
-    const SECRET_TEXT: &str = "met Nan at the tea shop and finally fixed the timezone bug";
-
-    fn dek() -> Dek {
+    pub(super) fn dek() -> Dek {
         derive_dek(&[42u8; 32])
     }
 
-    fn store(dir: &Path) -> SqliteStore {
+    pub(super) fn store(dir: &Path) -> SqliteStore {
         let s = SqliteStore::open(dir).expect("open");
         let dek = dek();
         s.upsert_source(
@@ -1222,7 +1494,7 @@ mod tests {
         s
     }
 
-    fn memory(source: SourceId, n: u8, text: &str) -> Memory {
+    pub(super) fn memory(source: SourceId, n: u8, text: &str) -> Memory {
         let id = MemoryId::new(1_700_000_000_000 + u64::from(n), [n; 10]);
         Memory {
             id,
@@ -1249,6 +1521,16 @@ mod tests {
             embedding: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, memory, store};
+    use super::*;
+
+    const SECRET_TEXT: &str = "met Nan at the tea shop and finally fixed the timezone bug";
 
     #[test]
     fn memory_round_trips_through_encryption() {
@@ -1675,7 +1957,7 @@ mod tests {
 
     /// A vault created by M0 at schema v1 must upgrade, not fail to open.
     #[test]
-    fn a_v1_vault_migrates_to_v2() {
+    fn a_v1_vault_migrates_to_the_current_schema() {
         let dir = tempfile::tempdir().expect("tempdir");
         {
             // Build a v1 database by hand: schema v1 only, version stamped 1.
@@ -1694,12 +1976,14 @@ mod tests {
             s.meta(crate::schema::meta_key::SCHEMA_VERSION)
                 .expect("meta")
                 .as_deref(),
-            Some("2")
+            Some(SCHEMA_VERSION.to_string().as_str())
         );
-        // The v2 table exists and works.
+        // Every table added since v1 exists and works.
         s.append_egress(&record("acme", "allow_redacted"))
             .expect("append after migration");
         assert_eq!(s.egress_count().expect("count"), 1);
+        use crate::vector::VectorIndex as _;
+        assert_eq!(s.descriptor().expect("vector descriptor").count, 0);
     }
 
     #[test]
@@ -2208,5 +2492,263 @@ impl SqliteStore {
             .map_err(|_| crate::Error::Backend {
                 operation: "count egress records",
             })
+    }
+}
+
+#[cfg(test)]
+mod vector_tests {
+    use ghostr_core::ids::VectorId;
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, memory, store};
+    use super::*;
+    use crate::vector::{VectorFilter, VectorIndex as _};
+
+    fn vector_id(n: u8) -> VectorId {
+        VectorId::new(u64::from(n), [n; 10])
+    }
+
+    fn seeded(dir: &Path) -> (SqliteStore, Dek, Vec<MemoryId>) {
+        let s = store(dir);
+        let d = dek();
+        let source = SourceId::new(1, [0u8; 10]);
+        let mut ids = Vec::new();
+        for (n, text) in [
+            (1u8, "coffee with Nan"),
+            (2, "fixed the parser"),
+            (3, "long walk"),
+        ] {
+            let m = memory(source, n, text);
+            ids.push(m.id);
+            s.put_memory(&d, &m, [n; 24]).expect("put");
+        }
+        (s, d, ids)
+    }
+
+    #[test]
+    fn a_vector_round_trips_and_finds_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("upsert");
+        let hits = s
+            .knn(&d, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+            .expect("knn");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, ids[0]);
+        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+    }
+
+    /// I1. The index is the most reconstructible representation of the corpus,
+    /// so it is the last thing that should be readable without the DEK.
+    #[test]
+    fn no_vector_component_appears_in_the_raw_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        // A recognisable component that would survive as bytes if stored plain.
+        let vector = [0.123_456_79_f32, 0.0, 0.0];
+        s.upsert(&d, ids[0], &vector, vector_id(1), [1u8; 24])
+            .expect("upsert");
+        drop(s);
+
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read db");
+        let unit = crate::vector::normalize(&vector).expect("unit");
+        let mut needle = Vec::new();
+        for v in &unit {
+            needle.extend_from_slice(&v.to_le_bytes());
+        }
+        assert!(
+            !raw.windows(needle.len()).any(|w| w == needle),
+            "the vector is on disk in the clear"
+        );
+    }
+
+    #[test]
+    fn ranking_is_by_similarity_and_deterministic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.9, 0.1, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+        s.upsert(&d, ids[2], &[0.0, 1.0, 0.0], vector_id(3), [3u8; 24])
+            .expect("c");
+
+        let hits = s
+            .knn(&d, &[1.0, 0.0, 0.0], 3, &VectorFilter::default())
+            .expect("knn");
+        assert_eq!(hits[0].memory, ids[0]);
+        assert_eq!(hits[1].memory, ids[1]);
+        assert_eq!(hits[2].memory, ids[2]);
+
+        let again = s
+            .knn(&d, &[1.0, 0.0, 0.0], 3, &VectorFilter::default())
+            .expect("knn");
+        let order: Vec<_> = hits.iter().map(|h| h.memory).collect();
+        let order_again: Vec<_> = again.iter().map(|h| h.memory).collect();
+        assert_eq!(order, order_again);
+    }
+
+    /// SPEC Q18: a held-out memory must not come back through similarity
+    /// search, or the holdout is not held out.
+    #[test]
+    fn an_excluded_memory_never_appears() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.9, 0.1, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+
+        let filter = VectorFilter {
+            exclude: vec![ids[0]],
+            ..VectorFilter::default()
+        };
+        let hits = s.knn(&d, &[1.0, 0.0, 0.0], 5, &filter).expect("knn");
+        assert!(hits.iter().all(|h| h.memory != ids[0]));
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn only_restricts_the_search_to_a_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.9, 0.1, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+
+        let filter = VectorFilter {
+            only: vec![ids[1]],
+            ..VectorFilter::default()
+        };
+        let hits = s.knn(&d, &[1.0, 0.0, 0.0], 5, &filter).expect("knn");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, ids[1]);
+    }
+
+    #[test]
+    fn a_similarity_floor_drops_weak_matches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[1], &[0.0, 1.0, 0.0], vector_id(2), [2u8; 24])
+            .expect("b");
+
+        let filter = VectorFilter {
+            min_similarity: Some(0.5),
+            ..VectorFilter::default()
+        };
+        let hits = s.knn(&d, &[1.0, 0.0, 0.0], 5, &filter).expect("knn");
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// Mixing two vector spaces produces neighbours that are not neighbours.
+    /// It must be an error, not a coercion.
+    #[test]
+    fn a_width_change_is_refused_rather_than_coerced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        let err = s
+            .upsert(&d, ids[1], &[1.0, 0.0], vector_id(2), [2u8; 24])
+            .expect_err("must refuse");
+        assert!(matches!(
+            err,
+            crate::Error::VectorDimensionMismatch {
+                found: 2,
+                expected: 3
+            }
+        ));
+        let err = s
+            .knn(&d, &[1.0, 0.0], 5, &VectorFilter::default())
+            .expect_err("must refuse");
+        assert!(matches!(err, crate::Error::VectorDimensionMismatch { .. }));
+    }
+
+    /// The property that makes a rebuild survive a laptop lid closing.
+    #[test]
+    fn a_rebuild_keeps_vectors_already_at_the_new_width() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+
+        let progress = s.rebuild("nomic-embed-text", 3).expect("rebuild");
+        assert_eq!(progress.completed, 1);
+        assert_eq!(progress.total, 3);
+        assert_eq!(s.unembedded(10).expect("pending").len(), 2);
+        assert!(!s.unembedded(10).expect("pending").contains(&ids[0]));
+    }
+
+    #[test]
+    fn changing_the_model_width_drops_the_old_vectors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+
+        let progress = s.rebuild("another-model", 4).expect("rebuild");
+        assert_eq!(progress.completed, 0, "the 3-wide vector is gone");
+        assert_eq!(s.unembedded(10).expect("pending").len(), 3);
+        assert_eq!(s.descriptor().expect("descriptor").model, "another-model");
+    }
+
+    /// A shredded memory whose embedding survived would make the shred a lie.
+    #[test]
+    fn removing_a_vector_takes_it_out_of_search() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.remove(ids[0]).expect("remove");
+        assert!(
+            s.knn(&d, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+                .expect("knn")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn upserting_the_same_memory_replaces_rather_than_duplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        s.upsert(&d, ids[0], &[0.0, 1.0, 0.0], vector_id(2), [2u8; 24])
+            .expect("again");
+        assert_eq!(s.descriptor().expect("descriptor").count, 1);
+        let hits = s
+            .knn(&d, &[0.0, 1.0, 0.0], 5, &VectorFilter::default())
+            .expect("knn");
+        assert!((hits[0].similarity - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn an_empty_index_returns_nothing_rather_than_failing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, _) = seeded(dir.path());
+        assert!(
+            s.knn(&d, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+                .expect("knn")
+                .is_empty()
+        );
+    }
+
+    /// The wrong key must fail loudly rather than returning noise that would be
+    /// ranked as if it meant something.
+    #[test]
+    fn the_wrong_key_cannot_read_the_index() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, d, ids) = seeded(dir.path());
+        s.upsert(&d, ids[0], &[1.0, 0.0, 0.0], vector_id(1), [1u8; 24])
+            .expect("a");
+        let wrong = derive_dek(&[7u8; 32]);
+        let err = s
+            .knn(&wrong, &[1.0, 0.0, 0.0], 5, &VectorFilter::default())
+            .expect_err("must fail");
+        assert!(matches!(err, crate::Error::RowDecryptFailed { .. }));
     }
 }

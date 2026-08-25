@@ -102,6 +102,38 @@ pub fn local(config: LocalModelConfig) -> crate::Result<Arc<dyn LanguageModel>> 
     }
 }
 
+/// Builds a local embedder.
+///
+/// There is no remote counterpart, by design: an embedding reconstructs much of
+/// its source text, so sending one is sending the content (SPEC Q13).
+///
+/// `dimensions` is declared rather than discovered, so a runtime quietly serving
+/// a different model than the index was built with is an error instead of a
+/// corrupted neighbourhood.
+///
+/// # Errors
+///
+/// Returns [`Error::ProviderNotEnabled`](crate::Error::ProviderNotEnabled) if no
+/// local provider feature is compiled in.
+pub fn local_embedder(
+    config: LocalModelConfig,
+    dimensions: u32,
+) -> crate::Result<Arc<dyn crate::embed::Embedder>> {
+    #[cfg(feature = "local-ollama")]
+    {
+        Ok(Arc::new(
+            crate::provider::ollama_embed::OllamaEmbedder::new(config, dimensions),
+        ))
+    }
+    #[cfg(not(feature = "local-ollama"))]
+    {
+        let _ = (config, dimensions);
+        Err(crate::Error::ProviderNotEnabled {
+            provider: "local-ollama".to_owned(),
+        })
+    }
+}
+
 /// Builds a remote model, wrapped in its gate.
 ///
 /// The only way to obtain a remote model. Note the return type: a concrete
@@ -120,14 +152,17 @@ pub fn remote(
 ) -> crate::Result<GatedModel> {
     #[cfg(feature = "remote")]
     {
-        let inner = crate::provider::openai_compatible::RemoteModel::new(config.clone())?;
-        Ok(GatedModel::new(
-            Arc::new(inner),
-            config,
-            policy,
-            log,
-            redactor,
-        ))
+        let inner: Arc<dyn LanguageModel> = match config.provider.as_str() {
+            "anthropic" => Arc::new(crate::provider::anthropic::AnthropicModel::new(
+                config.clone(),
+            )?),
+            // Everything else speaks the OpenAI chat-completions shape, which is
+            // what most providers and every local proxy implement.
+            _ => Arc::new(crate::provider::openai_compatible::RemoteModel::new(
+                config.clone(),
+            )?),
+        };
+        Ok(GatedModel::new(inner, config, policy, log, redactor))
     }
     #[cfg(not(feature = "remote"))]
     {

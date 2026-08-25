@@ -962,9 +962,22 @@ corpus — how much, how often, how many people — but not its content. See
 THREAT_MODEL §T1.
 
 Blobs (media, archives) are content-addressed and encrypted with per-blob keys
-wrapped by the DEK. Vector embeddings live in a local index (`sqlite-vec` or
-`usearch`, Q13) and are treated as sensitive: embeddings are invertible enough to
-count as content.
+wrapped by the DEK.
+
+Vector embeddings are treated as content, not as metadata: they are invertible
+enough to reconstruct much of the text they came from. They are therefore
+computed **locally only** — there is no remote embedding path and there is not
+going to be one, including for `Public` memories, because a rule with an
+exception is a rule with a failure mode — and they are **encrypted at rest like
+any other content column**.
+
+That rules out an ANN extension, which needs the vectors in the clear. The index
+is an encrypted table scanned exhaustively: each vector is stored normalised, so
+cosine similarity is a dot product, and a query decrypts each row and scores it.
+The vector's *width* is stored in the clear, because width is shape and shape is
+already the documented leak above. Changing embedding model is a resumable
+rebuild: vectors already at the new width are kept, and the rest are re-embedded
+from the work queue.
 
 ### 10.3 On the wire
 
@@ -1258,15 +1271,20 @@ brief doesn't address it.
 
 ---
 
-**Q13 — Which embedding model and vector store?**
+**~~Q13 — Which embedding model and vector store?~~ — resolved in M1.**
 
-Embeddings are invertible enough to be treated as content, which rules out a
-remote embedding API for anything but `Public` memories.
-
-> **Recommendation:** local embeddings only, no exceptions, even for `Public`
-> content (simpler rule, no failure mode). `sqlite-vec` for the index — it keeps
-> the store single-file and avoids a second persistence layer. Re-embedding on
-> model change must be a supported, resumable migration, because it will happen.
+*Local embeddings only, and an encrypted exhaustive index rather than
+`sqlite-vec`.* The local-only half of the recommendation stands as written and
+is now §10.2. The index half did not survive contact with I1: `sqlite-vec` — and
+every ANN library like it — searches a **plaintext** vector table, so adopting
+one would have meant writing the most reconstructible representation of the
+corpus to disk in the clear, which is the exact thing the invariant exists to
+prevent. Encrypting the vectors and scanning them costs a few hundred
+milliseconds on a corpus of 100 000 memories, next to a local model call
+measured in seconds. If a corpus ever outgrows that, the answer is an encrypted
+ANN structure, not a plaintext one. Re-embedding on a model change is resumable
+as recommended: `rebuild` keeps vectors already at the new width and the caller
+drains the remainder.
 
 ---
 

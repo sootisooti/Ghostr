@@ -223,7 +223,9 @@ pub trait FootageStore: Send + Sync {
 pub trait QuestStore  { /* issue, list_open, record_verdict, holdout_set */ }
 pub trait PersonaStore{ /* put_version, get_version, head, diff */ }
 pub trait BlobStore   { /* put (content-addressed), get, gc */ }
-pub trait VectorIndex { /* upsert, knn, rebuild */ }
+pub trait VectorIndex { /* upsert, knn, remove, rebuild, unembedded */ }
+//   ^ synchronous, and takes a &Dek: the vectors are encrypted at rest, so a
+//     search decrypts as it scans. See SPEC Q13.
 ```
 
 `FootageStore::seal` rejecting a duplicate `seq` is the last line of defence

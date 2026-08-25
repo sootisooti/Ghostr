@@ -183,6 +183,25 @@ BEGIN
 END;
 ";
 
+/// Migration to schema version 3: the encrypted vector index.
+///
+/// The vector is sealed like any other content column. An ANN extension would
+/// need it in the clear, and the most reconstructible representation of the
+/// corpus is the last thing that should be readable without the DEK (I1,
+/// SPEC Q13). `dims` stays in the clear because it is shape, and shape is
+/// already the documented leak (THREAT_MODEL §T1).
+pub const SCHEMA_V3: &str = r"
+CREATE TABLE vector (
+    memory_id TEXT PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE,
+    id        TEXT NOT NULL UNIQUE,
+    dims      INTEGER NOT NULL,
+    nonce     BLOB NOT NULL,
+    sealed    BLOB NOT NULL
+) STRICT;
+
+CREATE INDEX vector_dims_idx ON vector(dims);
+";
+
 /// `meta` keys.
 pub mod meta_key {
     /// Schema version, as a decimal string.
@@ -193,6 +212,10 @@ pub mod meta_key {
     pub const IDENTITY_PUBKEY: &str = "identity_pubkey";
     /// The genesis link, hex.
     pub const GENESIS_LINK: &str = "genesis_link";
+    /// The embedding model the vector index was built with.
+    pub const VECTOR_MODEL: &str = "vector_model";
+    /// The vector index's dimensionality, as a decimal string.
+    pub const VECTOR_DIMENSIONS: &str = "vector_dimensions";
     /// The identity's home timezone.
     pub const HOME_TZ: &str = "home_tz";
     /// When the chain was created, as Unix milliseconds.

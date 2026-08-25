@@ -11,6 +11,9 @@
 #[cfg(feature = "local-ollama")]
 pub(crate) mod ollama;
 
+#[cfg(feature = "local-ollama")]
+pub(crate) mod ollama_embed;
+
 #[cfg(feature = "remote")]
 pub(crate) mod anthropic;
 

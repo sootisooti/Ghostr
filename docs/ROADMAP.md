@@ -83,7 +83,8 @@ Stands alone as a private daily-review tool. Still no ghost.
 - `ghostr-ingest` with `markdown`, `journal`, `structlog` adapters.
 - `ghostr-memoria`: the six-stage pipeline (SPEC §6) — highlights, `PersonBeat`s,
   `MoodReading`, threads with stable `ThreadId`s, `unresolved`, amendments.
-- Local entity resolution + `sqlite-vec` index. Local embeddings only.
+- Local entity resolution + an encrypted vector index. Local embeddings only
+  (SPEC Q13, resolved: encrypted exhaustive scan, not `sqlite-vec`).
 - CLI: `source add/list/sync`, `recap [date]`, `thread list`, `egress log`.
 
 **Exit criteria**
