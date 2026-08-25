@@ -775,6 +775,8 @@ dependencies = [
  "ghostr-core",
  "ghostr-llm",
  "ghostr-store",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

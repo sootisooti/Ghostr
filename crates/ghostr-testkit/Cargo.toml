@@ -20,5 +20,9 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 async-trait = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json = { workspace = true }
+
 [lints]
 workspace = true
