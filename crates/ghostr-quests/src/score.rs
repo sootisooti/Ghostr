@@ -20,6 +20,7 @@
 
 use ghostr_core::fidelity::{Calibration, FidelityScore, IntegritySignals, ScoreWindow};
 use ghostr_core::quest::Quest;
+use serde::{Deserialize, Serialize};
 
 /// Computes fidelity scores.
 ///
@@ -117,7 +118,7 @@ pub fn ewma(daily: &[f32], half_life_days: f32) -> f32 {
 /// Config, not constants. These numbers are a starting hypothesis with no
 /// empirical basis yet; the first cohort's data is the calibration study
 /// (SPEC Q9).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ConvergenceThresholds {
     /// Minimum overall score.
     pub min_overall: f32,

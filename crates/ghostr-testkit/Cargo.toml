@@ -1,0 +1,24 @@
+[package]
+name = "ghostr-testkit"
+description = "Ghostr test doubles, fixtures, and deterministic seams. Dev-dependency only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# ARCHITECTURE §3 rule 5: this is a dev-dependency only. A production crate that
+# depends on it fails CI — `cargo xtask lint-deps` checks for it. Shipping fakes
+# in a release binary is how a ScriptedModel ends up answering a real quest.
+[dependencies]
+ghostr-core = { workspace = true }
+ghostr-llm = { workspace = true }
+ghostr-store = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

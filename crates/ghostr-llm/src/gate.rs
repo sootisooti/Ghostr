@@ -15,7 +15,7 @@ use crate::model::{Completion, CompletionRequest, LanguageModel, ModelDescriptor
 use crate::schema::Schema;
 
 /// Configuration for a local model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LocalModelConfig {
     /// Model identifier as the runtime names it.
     pub model: String,
@@ -30,7 +30,7 @@ pub struct LocalModelConfig {
 /// Carries no credential. Secrets are fetched from the keystore at construction
 /// so an API key never sits in a `Debug`-printable configuration struct that
 /// might reach a log or a crash report.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteModelConfig {
     /// Which provider.
     pub provider: String,

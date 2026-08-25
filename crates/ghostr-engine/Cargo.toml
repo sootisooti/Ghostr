@@ -1,0 +1,31 @@
+[package]
+name = "ghostr-engine"
+description = "Ghostr composition root: wiring, scheduling, job queue, and the local API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The only crate that knows which implementations are real. Nothing depends on
+# this one (ARCHITECTURE §3 rule 5).
+[dependencies]
+ghostr-core = { workspace = true }
+ghostr-crypto = { workspace = true }
+ghostr-store = { workspace = true }
+ghostr-llm = { workspace = true }
+ghostr-ingest = { workspace = true }
+ghostr-persona = { workspace = true }
+ghostr-memoria = { workspace = true }
+ghostr-quests = { workspace = true }
+ghostr-anchor = { workspace = true }
+ghostr-nostr = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

@@ -12,6 +12,10 @@ members = [
     "crates/ghostr-persona",
     "crates/ghostr-memoria",
     "crates/ghostr-quests",
+    "crates/ghostr-engine",
+    "crates/ghostr-cli",
+    "crates/ghostr-testkit",
+    "xtask",
 ]
 
 
