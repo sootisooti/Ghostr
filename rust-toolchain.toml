@@ -1,0 +1,7 @@
+# Pinned so every contributor and every CI run compiles with the same rustc.
+# This is NOT the MSRV: that is `rust-version` in the workspace manifest, and it
+# is verified separately by the `msrv` job in .github/workflows/ci.yml.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
