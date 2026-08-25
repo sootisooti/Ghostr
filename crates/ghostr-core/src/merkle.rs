@@ -193,9 +193,25 @@ pub enum Side {
 pub fn verify_inclusion(proof: &MerkleProof, root: Hash32) -> bool {
     // A path longer than the tree can be deep is a padded proof from a smaller
     // tree, replayed against a larger root.
-    let max_depth = usize::try_from(proof.leaf_count)
-        .unwrap_or(usize::MAX)
-        .next_power_of_two();
+    //
+    // The bound is the tree's *depth*, `ceil(log2(n))`, not `n` rounded up to a
+    // power of two — those differ by orders of magnitude (for 1000 leaves: 10
+    // against 1024), and the looser one is barely a bound at all.
+    //
+    // It is an upper bound rather than an equality because a promoted odd node
+    // skips a level, so two leaves in the same tree can have paths of different
+    // lengths. `leaf_count` is therefore a sanity check here, not a binding
+    // one: what actually binds a proof to a day is the caller comparing it
+    // against the `leaf_count` recorded in that day's sealed commitment.
+    let leaf_count = usize::try_from(proof.leaf_count).unwrap_or(usize::MAX);
+    if leaf_count == 0 {
+        return false;
+    }
+    let max_depth = if leaf_count == 1 {
+        0
+    } else {
+        leaf_count.next_power_of_two().trailing_zeros() as usize
+    };
     if proof.siblings.len() > max_depth {
         return false;
     }

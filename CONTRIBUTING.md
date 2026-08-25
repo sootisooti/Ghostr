@@ -181,7 +181,18 @@ A PR without tests is not done. Expectations by layer are in
   change mid-day, an empty day, a missed seal, a late-arriving memory, a
   duplicate `seq`, a shredded memory in an anchored day.
 - **Adversarial fixtures.** `ghostr-testkit::adversarial` is a permanent part of
-  the suite, not a one-off check.
+  the suite, not a one-off check. `InjectionKind::all()` is a table — a defence
+  proven against one attack and assumed for the rest is not proven.
+- **Properties, not only examples**, on anything hashed. A golden vector pins
+  the case somebody thought of; a `proptest` invariant covers the ones nobody
+  did. That distinction is worth more here than almost anywhere, because a
+  commitment bug cannot be migrated away from — the old hashes are already in
+  Bitcoin.
+
+`ghostr-testkit` is where you start. `CorpusGenerator` hands back the ground
+truth it planted, so a test can assert the pipeline *found* something rather
+than merely produced something; `ScriptedModel` makes a model's failure modes
+reachable; `FixedClock` walks a month or a DST boundary in microseconds.
 
 ---
 

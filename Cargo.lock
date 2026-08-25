@@ -609,6 +609,7 @@ dependencies = [
  "chrono-tz",
  "ciborium",
  "hex",
+ "proptest",
  "serde",
  "sha2",
  "thiserror",
@@ -652,6 +653,7 @@ dependencies = [
  "ghostr-llm",
  "ghostr-memoria",
  "ghostr-store",
+ "ghostr-testkit",
  "hex",
  "rusqlite",
  "secp256k1",
@@ -686,6 +688,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "ghostr-core",
+ "ghostr-testkit",
  "insta",
  "serde",
  "serde_json",
@@ -775,6 +778,8 @@ dependencies = [
  "ghostr-core",
  "ghostr-llm",
  "ghostr-store",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1220,6 +1225,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
+dependencies = [
+ "bitflags",
+ "num-traits",
+ "rand",
+ "rand_chacha",
+ "rand_xorshift",
+ "regex-syntax",
+ "unarray",
+]
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1281,6 +1301,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
+dependencies = [
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -1699,6 +1728,12 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "unicase"

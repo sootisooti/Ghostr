@@ -97,11 +97,13 @@ the day its seal.
 
 Everything beyond M1 — the persona model, quests, the fidelity score, relays —
 is defined and documented with `todo!()` bodies, so the shape is reviewable
-before it is built.
+before it is built. `ghostr-testkit` is implemented ahead of them: a synthetic
+corpus generator that hands back its own ground truth, a scripted model, a
+deterministic clock and RNG, and a permanent set of hostile fixtures.
 
 ```console
 $ cargo build --workspace        # 14 crates, compiles clean
-$ cargo test --workspace         # 100+ tests, none touching the network
+$ cargo test --workspace         # 400+ tests, none touching the network
 $ cargo xtask scaffold-status    # what is still unimplemented, per crate
 $ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
 ```
