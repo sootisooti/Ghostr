@@ -40,6 +40,7 @@ llm-local = ["llm", "ghostr-llm/local-ollama"]
 llm-remote = ["llm", "ghostr-llm/remote"]
 
 [dev-dependencies]
+ghostr-testkit = { workspace = true }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

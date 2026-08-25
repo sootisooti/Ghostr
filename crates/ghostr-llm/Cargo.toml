@@ -25,6 +25,11 @@ ureq = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 insta = { workspace = true }
+# A dev-dependency cycle: testkit depends on this crate. Cargo permits it
+# because the edge is dev-only, and it is the right shape — the hostile
+# fixtures belong next to every defence that consumes them, not copied into
+# each one (CLAUDE.md §6).
+ghostr-testkit = { workspace = true }
 
 [features]
 default = ["local-ollama"]

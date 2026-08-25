@@ -286,7 +286,15 @@ fn build(
             source_id: source,
             external_id: Some(format!("{date}-{index}")),
             url: None,
-            raw_hash: tagged_hash(Tag::MemoryLeaf, text.as_bytes()),
+            // Over the date and position as well as the text. A routine note
+            // repeats verbatim across a run, and the store's unique index on
+            // (source, raw_hash) is what makes re-ingest a no-op — a digest
+            // over the text alone would make Tuesday's run collide with
+            // Monday's and the second insert fail.
+            raw_hash: tagged_hash(
+                Tag::MemoryLeaf,
+                format!("{date}\u{0}{index}\u{0}{text}").as_bytes(),
+            ),
         },
         salt,
         supersedes: None,
@@ -524,5 +532,44 @@ mod tests {
                 "a memory at {hour}:00 local is too close to a cutoff"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use crate::time::{FixedClock, SeededRng};
+
+    use super::*;
+
+    /// The store enforces `UNIQUE (source_id, raw_hash)`, which is what makes
+    /// re-ingest a no-op. A routine note repeats verbatim across a run, so a
+    /// digest over the text alone would make the second day's insert fail —
+    /// and it did, the first time this fixture met a real store.
+    #[test]
+    fn repeated_notes_across_days_get_distinct_digests() {
+        let clock = FixedClock::at(Timestamp::new(1_767_000_000_000, 0), chrono_tz::Tz::UTC);
+        let corpus = CorpusGenerator::new(30).generate(&clock, &SeededRng::from_seed(42));
+
+        let digests: std::collections::BTreeSet<_> = corpus
+            .memories
+            .iter()
+            .map(|m| m.provenance.raw_hash)
+            .collect();
+        assert_eq!(
+            digests.len(),
+            corpus.memories.len(),
+            "two memories share a digest and the store would reject one"
+        );
+
+        // And the corpus really does repeat text, or this proves nothing.
+        let texts: std::collections::BTreeSet<&str> = corpus
+            .memories
+            .iter()
+            .map(|m| m.body.text.as_str())
+            .collect();
+        assert!(
+            texts.len() < corpus.memories.len(),
+            "the fixture should contain repeated notes"
+        );
     }
 }
