@@ -98,6 +98,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostr-memoria"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "ghostr-core",
+ "ghostr-llm",
+ "ghostr-store",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "ghostr-nostr"
 version = "0.0.0"
 dependencies = [
@@ -107,6 +121,31 @@ dependencies = [
  "ghostr-crypto",
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "ghostr-persona"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "ghostr-core",
+ "ghostr-llm",
+ "ghostr-store",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "ghostr-quests"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ghostr-core",
+ "ghostr-llm",
+ "ghostr-store",
+ "serde",
  "thiserror",
 ]
 

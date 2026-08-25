@@ -9,6 +9,9 @@ members = [
     "crates/ghostr-anchor",
     "crates/ghostr-nostr",
     "crates/ghostr-ingest",
+    "crates/ghostr-persona",
+    "crates/ghostr-memoria",
+    "crates/ghostr-quests",
 ]
 
 
