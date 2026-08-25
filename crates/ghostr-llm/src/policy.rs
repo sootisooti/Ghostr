@@ -144,8 +144,9 @@ mod tests {
         Sensitivity::Secret,
     ];
 
-    const ALL_TASKS: [TaskKind; 5] = [
+    const ALL_TASKS: [TaskKind; 6] = [
         TaskKind::Extraction,
+        TaskKind::Summarization,
         TaskKind::Distillation,
         TaskKind::QuestGeneration,
         TaskKind::Conversation,

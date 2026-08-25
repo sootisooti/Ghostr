@@ -209,6 +209,12 @@ pub enum Role {
 pub enum TaskKind {
     /// Memoria cluster extraction.
     Extraction,
+    /// Memoria note summarisation.
+    ///
+    /// Distinct from [`TaskKind::Distillation`]: this compresses one note into
+    /// one sentence, while distillation reads the whole corpus for a persona.
+    /// They get different prompts and, in the egress log, different reasons.
+    Summarization,
     /// Persona distillation.
     Distillation,
     /// Quest generation.

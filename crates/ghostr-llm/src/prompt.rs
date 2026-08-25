@@ -99,8 +99,10 @@ pub fn system_prompt(task: TaskKind) -> SystemPrompt {
     let (version, text) = match task {
         TaskKind::Extraction => (1, EXTRACTION_V1),
         TaskKind::Conversation => (1, CONVERSATION_V1),
+        TaskKind::Summarization => (1, SUMMARY_V1),
         // Distillation and quest generation arrive with M2. Summarisation is
-        // the closest honest instruction until then.
+        // the closest honest instruction until then, and `TaskKind` is
+        // non-exhaustive, so the arm has to stay.
         _ => (1, SUMMARY_V1),
     };
     SystemPrompt {
@@ -389,7 +391,11 @@ mod tests {
     /// this test is the reviewable record of the current text.
     #[test]
     fn prompt_versions_and_injection_warnings_are_pinned() {
-        for task in [TaskKind::Extraction, TaskKind::Conversation] {
+        for task in [
+            TaskKind::Extraction,
+            TaskKind::Conversation,
+            TaskKind::Summarization,
+        ] {
             let p = system_prompt(task);
             assert_eq!(p.version, 1, "bump the version when the text changes");
             assert!(

@@ -698,7 +698,9 @@ dependencies = [
  "ghostr-store",
  "ghostr-testkit",
  "serde",
+ "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
