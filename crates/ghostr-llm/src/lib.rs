@@ -43,6 +43,7 @@
 // forgotten.
 #![allow(unused_variables, dead_code, clippy::todo)]
 
+pub mod detect;
 pub mod egress;
 pub mod embed;
 pub mod error;
@@ -50,9 +51,11 @@ pub mod gate;
 pub mod model;
 pub mod policy;
 pub mod prompt;
+pub mod pseudonym;
 pub mod redact;
 pub mod schema;
 
+pub use detect::PatternDetector;
 pub use egress::{EgressDecision, EgressEntry, EgressLog, EgressPolicy, EgressRequest};
 pub use embed::{EmbedInput, Embedder, EmbedderDescriptor, Embedding};
 pub use error::{Error, Result};
@@ -60,4 +63,5 @@ pub use model::{
     Completion, CompletionRequest, LanguageModel, LanguageModelExt, Locality, ModelDescriptor,
 };
 pub use policy::StandardPolicy;
+pub use pseudonym::{EntityRedactor, KnownEntity};
 pub use schema::{Schema, StructuredOutput};
