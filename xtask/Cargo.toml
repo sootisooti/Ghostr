@@ -1,0 +1,19 @@
+[package]
+name = "xtask"
+description = "Ghostr development automation: dependency-direction and scaffold checks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# Reads `cargo metadata` output rather than parsing manifests itself, so it needs
+# no TOML parser and cannot disagree with cargo about what the workspace is.
+[dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

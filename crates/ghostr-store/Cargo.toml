@@ -1,0 +1,23 @@
+[package]
+name = "ghostr-store"
+description = "Ghostr encrypted local persistence: memories, footage, quests, blobs, vectors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# rusqlite arrives with the first implementation (M0). The trait surface is
+# defined first so that ghostr-testkit can provide an in-memory store and the
+# domain crates can be tested without a database at all.
+[dependencies]
+ghostr-core = { workspace = true }
+ghostr-crypto = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

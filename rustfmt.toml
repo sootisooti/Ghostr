@@ -1,0 +1,17 @@
+# Default profile, deliberately (CLAUDE.md §5): no bikeshedding. Only settings
+# that are stable on the pinned toolchain appear here — a config full of ignored
+# options warns on every `cargo fmt` and teaches contributors to skim warnings.
+edition = "2024"
+max_width = 100
+newline_style = "Unix"
+reorder_imports = true
+reorder_modules = true
+use_field_init_shorthand = true
+
+# Wanted but nightly-only as of rustfmt 1.8. Revisit when they stabilise;
+# do not enable them without moving CI's fmt job to nightly:
+#   imports_granularity = "Crate"
+#   group_imports = "StdExternalCrate"
+#   wrap_comments = true
+#   comment_width = 88
+#   format_code_in_doc_comments = true

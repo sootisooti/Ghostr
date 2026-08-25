@@ -1,0 +1,141 @@
+//! The two seams: [`Signer`] and [`Keystore`].
+//!
+//! Both are traits so that the local keystore, a NIP-46 remote signer
+//! ("bunker"), and a hardware device are interchangeable. That matters more than
+//! it looks: it is what lets a user keep the identity key off the machine that
+//! runs the agent, which is the recommended configuration for anyone who
+//! publishes (THREAT_MODEL §T5).
+
+use async_trait::async_trait;
+use ghostr_core::identity::{Account, KeyRef, PublicKey};
+
+use crate::event::{Signature, UnsignedEvent};
+use crate::kdf::Dek;
+use crate::nip44::ConversationKey;
+use crate::secret::SecretString;
+
+/// Anything that can produce a nostr signature.
+///
+/// Note what is absent: no method returns key material. Callers name a key with
+/// a [`KeyRef`] and ask for an operation, which is why a remote signer is a
+/// drop-in rather than a rewrite.
+#[async_trait]
+pub trait Signer: Send + Sync {
+    /// The public key for a reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if the backing keystore
+    /// is locked.
+    fn public_key(&self, key: KeyRef) -> crate::Result<PublicKey>;
+
+    /// Signs an event, computing its id first.
+    ///
+    /// Async because the signer may be a remote process or a hardware device
+    /// waiting on a physical confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked, or
+    /// [`Error::RemoteSigner`](crate::Error::RemoteSigner) if a remote signer is
+    /// unreachable or declined.
+    async fn sign_event(&self, key: KeyRef, event: &UnsignedEvent) -> crate::Result<Signature>;
+
+    /// NIP-44 v2 encryption to `recipient`.
+    ///
+    /// Conversation key derivation stays inside the implementation, because it
+    /// needs the secret key. Pass the signer's own public key as `recipient` for
+    /// self-encryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked, or
+    /// [`Error::InvalidPublicKey`](crate::Error::InvalidPublicKey) if
+    /// `recipient` is not a curve point.
+    async fn nip44_encrypt(
+        &self,
+        key: KeyRef,
+        recipient: &PublicKey,
+        plaintext: &[u8],
+    ) -> crate::Result<String>;
+
+    /// NIP-44 v2 decryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DecryptFailed`](crate::Error::DecryptFailed) for any
+    /// decryption failure, without distinguishing the cause.
+    async fn nip44_decrypt(
+        &self,
+        key: KeyRef,
+        sender: &PublicKey,
+        payload: &str,
+    ) -> crate::Result<Vec<u8>>;
+
+    /// Derives a conversation key without performing an operation.
+    ///
+    /// For callers that encrypt many payloads to one recipient and should not
+    /// redo ECDH per item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
+    async fn conversation_key(
+        &self,
+        key: KeyRef,
+        peer: &PublicKey,
+    ) -> crate::Result<ConversationKey>;
+}
+
+/// Holds wrapped secrets and hands out references to them.
+///
+/// Locking is a first-class state, not an afterthought: the daily loop runs
+/// unattended, and an idle auto-lock is the only thing standing between an
+/// unlocked corpus and whoever sits down at the machine next (THREAT_MODEL §T6).
+pub trait Keystore: Send + Sync {
+    /// Derives the KEK and unwraps the DEK.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BadPassphrase`](crate::Error::BadPassphrase) if the
+    /// passphrase does not unwrap the DEK. Callers must rate-limit: Argon2id
+    /// makes each attempt expensive, which only helps if attempts are serial.
+    fn unlock(&mut self, passphrase: SecretString) -> crate::Result<()>;
+
+    /// Zeroizes the KEK and DEK and returns to the locked state.
+    fn lock(&mut self);
+
+    /// Whether the keystore is currently locked.
+    fn is_locked(&self) -> bool;
+
+    /// A reference to one NIP-06 account's key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
+    fn key_ref(&self, account: Account) -> crate::Result<KeyRef>;
+
+    /// Borrows the data encryption key, for the store to encrypt rows with.
+    ///
+    /// The one place a raw key crosses a crate boundary, and it is deliberate:
+    /// `ghostr-store` encrypts every row it writes and cannot do that through a
+    /// per-operation trait call without a per-row round trip. The DEK is still
+    /// zeroizing and still owned by the keystore; the store borrows it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
+    fn dek(&self) -> crate::Result<&Dek>;
+
+    /// Re-wraps the DEK under a new passphrase.
+    ///
+    /// Cheap by design: the corpus is encrypted under the DEK, which does not
+    /// change, so a passphrase change rewraps 32 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked, or
+    /// [`Error::Backend`](crate::Error::Backend) if the new wrapping cannot be
+    /// persisted.
+    fn change_passphrase(&mut self, new_passphrase: SecretString) -> crate::Result<()>;
+}

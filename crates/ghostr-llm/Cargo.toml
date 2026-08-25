@@ -1,0 +1,32 @@
+[package]
+name = "ghostr-llm"
+description = "Ghostr language model traits, prompt assembly, and the egress gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# ARCHITECTURE §3 rule 3: this is the ONLY crate permitted to depend on a model
+# provider SDK or on an HTTP client for inference. `cargo xtask lint-deps`
+# enforces that, because the rule is worth nothing on good intentions alone.
+#
+# Providers arrive behind features so a default build has no network client at
+# all: `local-ollama` in M1, remote providers opt-in after it.
+[dependencies]
+ghostr-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[features]
+default = []
+## An Ollama-compatible local model over a loopback HTTP socket.
+local-ollama = []
+## Remote providers. Off by default; a build without them cannot egress at all.
+remote = []
+
+[lints]
+workspace = true

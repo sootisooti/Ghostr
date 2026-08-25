@@ -1,0 +1,37 @@
+[package]
+name = "ghostr-ingest"
+description = "Ghostr source adapters: nostr, RSS, social archives, markdown, journal, logs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghostr-core = { workspace = true }
+ghostr-store = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+# Adapters are feature-gated so a build can exclude sources it does not want and
+# shed their dependencies with them. The default set is the offline path: a
+# stock build ingests local files and nothing else.
+[features]
+default = ["markdown", "journal"]
+## A directory of markdown notes.
+markdown = []
+## Entries typed directly into Ghostr.
+journal = []
+## Structured logs: places, people, habits, health.
+structlog = []
+## A nostr feed. THIRD-PARTY CONTENT — see THREAT_MODEL §T7.
+nostr = []
+## RSS and Atom. THIRD-PARTY CONTENT.
+rss = []
+## Exported social archives.
+archive = []
+
+[lints]
+workspace = true

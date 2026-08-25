@@ -1,0 +1,22 @@
+[package]
+name = "ghostr-core"
+description = "Ghostr domain types, canonical serialization, and commitment primitives. Zero I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# ARCHITECTURE §3 rule 1: core is a leaf. serde, thiserror, time, uuid — nothing
+# else. No tokio, no reqwest, no rusqlite. `cargo tree -p ghostr-core` is the
+# test: if it grows an I/O dependency, the design is wrong.
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+
+[lints]
+workspace = true

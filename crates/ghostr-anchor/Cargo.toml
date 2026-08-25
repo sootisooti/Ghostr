@@ -1,0 +1,21 @@
+[package]
+name = "ghostr-anchor"
+description = "Ghostr commitment chain and Bitcoin anchoring via OpenTimestamps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+ghostr-core = { workspace = true }
+ghostr-crypto = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true

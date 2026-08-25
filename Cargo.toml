@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+# Members are added as each crate lands, so every commit builds.
+members = [
+    "crates/ghostr-core",
+    "crates/ghostr-crypto",
+    "crates/ghostr-store",
+    "crates/ghostr-llm",
+    "crates/ghostr-anchor",
+    "crates/ghostr-nostr",
+    "crates/ghostr-ingest",
+    "crates/ghostr-persona",
+    "crates/ghostr-memoria",
+    "crates/ghostr-quests",
+    "crates/ghostr-engine",
+    "crates/ghostr-cli",
+    "crates/ghostr-testkit",
+    "xtask",
+]
+
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = "https://github.com/sootisooti/Ghostr"
+authors = ["The Ghostr contributors"]
+
+[workspace.dependencies]
+# --- internal ---------------------------------------------------------------
+# Paths only, no versions: nothing here is published yet.
+ghostr-core = { path = "crates/ghostr-core" }
+ghostr-crypto = { path = "crates/ghostr-crypto" }
+ghostr-store = { path = "crates/ghostr-store" }
+ghostr-llm = { path = "crates/ghostr-llm" }
+ghostr-ingest = { path = "crates/ghostr-ingest" }
+ghostr-persona = { path = "crates/ghostr-persona" }
+ghostr-memoria = { path = "crates/ghostr-memoria" }
+ghostr-quests = { path = "crates/ghostr-quests" }
+ghostr-anchor = { path = "crates/ghostr-anchor" }
+ghostr-nostr = { path = "crates/ghostr-nostr" }
+ghostr-engine = { path = "crates/ghostr-engine" }
+ghostr-testkit = { path = "crates/ghostr-testkit" }
+
+# --- external ---------------------------------------------------------------
+# Every addition needs a justification in its PR (CLAUDE.md §4.9). Keep this
+# list short: this is a supply-chain-sensitive project (THREAT_MODEL §T8).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+# `default-features = false` and no `v7`: the v7 feature pulls `getrandom`, which
+# would put an OS entropy source inside ghostr-core and contradict both "core has
+# no I/O" and "entropy enters through the Rng trait". Identifier constructors take
+# their timestamp and random bytes as arguments instead (ARCHITECTURE §3, §4.7).
+uuid = { version = "1", default-features = false, features = ["serde"] }
+# `clock` is deliberately NOT enabled: it is what provides `Utc::now()`. Time
+# enters the system only through the `Clock` trait (ARCHITECTURE §4.7), and
+# leaving the feature off makes that a compile error rather than a convention.
+chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
+chrono-tz = { version = "0.10", default-features = false, features = ["serde"] }
+async-trait = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+
+# Lints apply to `cargo build` as well as `cargo clippy`, so a violation cannot
+# survive to CI. Each crate opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# CLAUDE.md §4.11: library code returns errors, it does not panic.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+todo = "deny"
+# Content must never reach a log, an error, or a Debug rendering (SPEC I8).
+print_stdout = "deny"
+print_stderr = "deny"
