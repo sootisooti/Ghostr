@@ -109,6 +109,13 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 
+# --- M1: dev-only -----------------------------------------------------------
+# CLAUDE.md §6 requires snapshot tests on prompts, because a prompt change is a
+# behaviour change to what ends up in a user's permanent, hash-chained memory and
+# should show up in review as a diff. `default-features = false` drops the yaml,
+# glob, and console machinery: the snapshots here are plain text.
+insta = { version = "1", default-features = false }
+
 # Lints apply to `cargo build` as well as `cargo clippy`, so a violation cannot
 # survive to CI. Each crate opts in with `[lints] workspace = true`.
 [workspace.lints.rust]

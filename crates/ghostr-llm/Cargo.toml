@@ -24,6 +24,7 @@ ureq = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+insta = { workspace = true }
 
 [features]
 default = ["local-ollama"]
