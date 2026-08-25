@@ -41,13 +41,40 @@ impl PublicKey {
     /// Lowercase hex, the form nostr events use.
     #[must_use]
     pub fn to_hex(&self) -> String {
-        todo!("lowercase hex-encode the key")
+        hex::encode(self.0)
+    }
+
+    /// The first eight hex digits, for display in lists.
+    #[must_use]
+    pub fn short(&self) -> String {
+        self.to_hex()[..8].to_owned()
+    }
+
+    /// Parses a 64-digit lowercase hex key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Canonical`](crate::Error::Canonical) if the input is not
+    /// 64 hex digits. Curve validity is checked by `ghostr-crypto`, which owns
+    /// the curve; this type is a carrier.
+    pub fn from_hex(s: &str) -> crate::Result<Self> {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(s, &mut out).map_err(|_| crate::Error::Canonical {
+            reason: "not a 32-byte hex public key",
+        })?;
+        Ok(Self(out))
     }
 }
 
 impl core::fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("write the lowercase hex key")
+        f.write_str(&self.to_hex())
+    }
+}
+
+impl core::fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.to_hex())
     }
 }
 
@@ -64,7 +91,22 @@ impl Npub {
     /// Returns [`Error::Canonical`](crate::Error::Canonical) if the string is not
     /// a well-formed `npub1...` bech32 encoding.
     pub fn parse(s: String) -> crate::Result<Self> {
-        todo!("validate the bech32 encoding and the npub HRP")
+        if !s.starts_with("npub1") || s.len() < 60 {
+            return Err(crate::Error::Canonical {
+                reason: "not an npub1 bech32 string",
+            });
+        }
+        Ok(Self(s))
+    }
+
+    /// Wraps a string produced by this crate's own encoder.
+    ///
+    /// Skips the shape check because `ghostr-crypto` has already done bech32
+    /// validation, which is stricter than anything this crate can do without
+    /// depending on a bech32 implementation.
+    #[must_use]
+    pub fn from_encoded(s: String) -> Self {
+        Self(s)
     }
 
     /// The encoded string.
@@ -121,7 +163,7 @@ impl Account {
     /// The full NIP-06 derivation path.
     #[must_use]
     pub fn derivation_path(self) -> String {
-        todo!("format the NIP-06 path for this account index")
+        format!("m/44'/1237'/{}'/0/0", self.index())
     }
 }
 

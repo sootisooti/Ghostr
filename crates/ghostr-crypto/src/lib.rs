@@ -13,6 +13,7 @@
 //! - [`nip19`] — bech32 `npub` / `nsec` / `nprofile` encoding.
 //! - [`nip44`] — v2 payload encryption, including self-encryption for app data.
 //! - [`kdf`] — Argon2id passphrase stretching and the KEK/DEK hierarchy.
+//! - [`keystore`] — the on-disk keystore file and its local implementation.
 //! - [`event`] — the minimal unsigned nostr event that signing operates on.
 //!
 //! # Unsafe
@@ -43,6 +44,7 @@
 pub mod error;
 pub mod event;
 pub mod kdf;
+pub mod keystore;
 pub mod nip06;
 pub mod nip19;
 pub mod nip44;
@@ -50,4 +52,5 @@ pub mod secret;
 pub mod signer;
 
 pub use error::{Error, Result};
+pub use keystore::FileKeystore;
 pub use signer::{Keystore, Signer};
