@@ -42,7 +42,7 @@ ghostr/
 │   ├── ghostr-nostr/           # relay client, event codec for our kinds
 │   ├── ghostr-engine/          # orchestration, scheduling, job queue — the composition root
 │   ├── ghostr-cli/             # `ghostr` binary
-│   └── ghostr-testkit/         # fixtures, fake clock/rng/LLM, proptest strategies (dev only)
+│   └── ghostr-testkit/         # fixtures, fake clock/rng/model, hostile corpora (dev only)
 └── xtask/                      # dev automation (vectors, schema dumps, dep-direction lint)
 ```
 
@@ -467,10 +467,33 @@ never blocks a day from closing.
 relay and OTS interaction lives behind an `#[ignore]`d integration suite run
 manually and nightly.
 
-`ghostr-testkit` provides: `FixedClock`, `SeededRng`, `ScriptedModel` (returns
-canned structured output), `InMemoryStore`, a synthetic 90-day corpus generator,
-and proptest strategies for every core type. It is the first thing a contributor
-should reach for.
+`ghostr-testkit` provides:
+
+- `FixedClock` — moves only when told to; `advance_to_cutoff` lands one second
+  *past* the cutoff, because a half-open window excludes its own end.
+- `SeededRng` — SplitMix64. Reproducible, not unpredictable, which is why this
+  crate cannot be a production dependency.
+- `ScriptedModel` — canned responses in order, including the failures that are
+  hard to provoke against a real model: invalid JSON, truncation, a dead
+  transport. `any_corpus_in_system_prompt()` is the regression guard for the
+  injection boundary.
+- `RecordingEgressLog` — every decision in memory, so a test can assert that a
+  deny was logged and that *nothing went*, not merely that a deny happened.
+- `CorpusGenerator` — a synthetic run of days that hands back its own
+  `GroundTruth`. That is the point of it: a test can ask whether the pipeline
+  *found* the planted people, stances, routines, and threads, rather than only
+  that it produced something.
+- `adversarial` — six injection kinds, a `poisoned_corpus` that scatters them
+  through benign content, and synthetic secret-bearing text.
+
+There is deliberately **no `InMemoryStore`**. The real store opens against a
+temporary directory in milliseconds, and its entire job is encryption at rest —
+which a fake cannot exercise. A second implementation of the store's semantics
+would be one more thing to drift.
+
+Property tests use `proptest` directly in the crate under test rather than
+through shared strategies here, so a property sits next to the invariant it
+protects.
 
 ---
 

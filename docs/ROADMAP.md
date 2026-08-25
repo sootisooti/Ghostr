@@ -116,6 +116,16 @@ Stands alone as a private daily-review tool. Still no ghost.
 
 **Not in M1:** persona, quests, relays.
 
+**Landed after M1, ahead of M2.** `ghostr-testkit` is implemented — the
+deterministic clock and RNG, a scripted model, a recording egress log, a
+synthetic corpus generator that hands back its own ground truth, and the
+adversarial fixtures. M2's first exit criterion is a 30-day run on a synthetic
+corpus, which cannot be written until that crate exists; building it alongside
+M2 would have meant ad-hoc fixtures per test, rewritten once the shape was
+clear. Core also gained the `proptest` invariants CLAUDE.md §6 asks for on
+hashing and Merkle proofs, which found and fixed a loose depth bound in
+`verify_inclusion`.
+
 ---
 
 ## M2 — Ghost & Quests
