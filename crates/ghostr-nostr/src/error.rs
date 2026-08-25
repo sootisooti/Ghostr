@@ -1,0 +1,60 @@
+//! This crate's error type.
+
+/// Result alias for this crate.
+pub type Result<T, E = Error> = core::result::Result<T, E>;
+
+/// Something went wrong talking to a relay or decoding an event.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum Error {
+    /// No relay accepted the event.
+    #[error("no relay accepted the event ({attempted} attempted)")]
+    PublishRejected {
+        /// How many relays were tried.
+        attempted: u32,
+    },
+
+    /// A relay could not be reached.
+    #[error("relay unreachable: {relay}")]
+    Unreachable {
+        /// Which relay.
+        relay: String,
+    },
+
+    /// An event did not decode into the expected Ghostr payload.
+    #[error("event does not decode as kind {kind}")]
+    MalformedPayload {
+        /// The kind that was expected.
+        kind: u16,
+    },
+
+    /// An event's signature or id did not verify.
+    ///
+    /// Relay-supplied events are untrusted input. Verifying before decoding is
+    /// not optional.
+    #[error("event failed signature verification")]
+    BadSignature,
+
+    /// A ghost-authored event was missing its disclosure tags (SPEC I10).
+    ///
+    /// Unreachable through the builder API, which cannot construct one without
+    /// them. The variant exists for events arriving *from* a relay, where a
+    /// third party may have published something claiming to be a ghost without
+    /// disclosing it.
+    #[error("ghost-authored event is missing its disclosure tags")]
+    MissingDisclosure,
+
+    /// A publish was attempted while publishing is disabled.
+    ///
+    /// The default state. Publishing is opt-in per scope and this is what
+    /// enforces it at the last moment before bytes move.
+    #[error("publishing is disabled for scope `{scope}`")]
+    PublishingDisabled {
+        /// Which scope was attempted.
+        scope: String,
+    },
+
+    /// Encryption or signing failed.
+    #[error("crypto error")]
+    Crypto(#[from] ghostr_crypto::Error),
+}

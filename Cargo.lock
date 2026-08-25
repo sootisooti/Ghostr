@@ -87,6 +87,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghostr-nostr"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ghostr-core",
+ "ghostr-crypto",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "ghostr-store"
 version = "0.0.0"
 dependencies = [
