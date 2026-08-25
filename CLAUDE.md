@@ -5,11 +5,12 @@ Read this before touching anything. It is the short version of
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), plus the rules that aren't written
 down anywhere else.
 
-**Current state: M0 and M1 are implemented; M2 onward is scaffolded.** The vault,
+**Current state: M0 and M1 are implemented; M2 is under way.** The vault,
 ingest, the Memoria pipeline, the hash chain, `ghostr verify`, the egress gate,
-and the encrypted vector index all work — and all work with no model at all,
-because every model call falls back to a deterministic path. The next thing to
-be built is M2 ([docs/ROADMAP.md](docs/ROADMAP.md)).
+the encrypted vector index, and persona distillation all work — and all work
+with no model at all, because every model call falls back to a deterministic
+path. What remains of M2 is quests and the fidelity score
+([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.

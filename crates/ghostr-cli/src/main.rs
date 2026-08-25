@@ -97,6 +97,10 @@ enum Command {
     #[command(subcommand)]
     Egress(EgressCommand),
 
+    /// The ghost's model of you.
+    #[command(subcommand)]
+    Persona(PersonaCommand),
+
     /// Inspect sealed footage.
     #[command(subcommand)]
     Footage(FootageCommand),
@@ -156,6 +160,37 @@ enum JournalCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum PersonaCommand {
+    /// Show the current model.
+    Show,
+    /// Propose a new version, without adopting it.
+    Distill {
+        /// Adopt it immediately instead of only proposing it.
+        ///
+        /// Off by default: reading the diff first is the point of the two
+        /// steps, and a substantial change should not take effect because
+        /// nobody looked.
+        #[arg(long)]
+        adopt: bool,
+    },
+    /// Adopt the version a `distill` proposed.
+    Adopt,
+    /// What changed between two versions.
+    Diff {
+        /// The older version's ordinal.
+        from: u32,
+        /// The newer version's ordinal.
+        to: u32,
+    },
+    /// Every version, newest first.
+    History {
+        /// How many to show.
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum EgressCommand {
     /// Every decision the gate made, newest first.
     Log {
@@ -209,6 +244,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Journal(JournalCommand::Add { text }) => cmd_journal_add(&dir, text.as_deref()),
         Command::Journal(JournalCommand::Import { path }) => cmd_journal_import(&dir, &path),
         Command::Egress(EgressCommand::Log { days }) => cmd_egress_log(&dir, days),
+        Command::Persona(PersonaCommand::Show) => cmd_persona_show(&dir),
+        Command::Persona(PersonaCommand::Distill { adopt }) => cmd_persona_distill(&dir, adopt),
+        Command::Persona(PersonaCommand::Adopt) => cmd_persona_adopt(&dir),
+        Command::Persona(PersonaCommand::Diff { from, to }) => cmd_persona_diff(&dir, from, to),
+        Command::Persona(PersonaCommand::History { limit }) => cmd_persona_history(&dir, limit),
         Command::Footage(FootageCommand::List) => cmd_footage_list(&dir),
         Command::Footage(FootageCommand::Show { id }) => cmd_footage_show(&dir, id),
         Command::Anchor => cmd_anchor(&dir),
@@ -586,5 +626,58 @@ fn cmd_egress_log(dir: &std::path::Path, days: Option<u32>) -> Result<()> {
     };
     let records = ops::egress_log(&engine, since).context("reading the egress log")?;
     println!("{}", render::egress_log(&records));
+    Ok(())
+}
+
+fn cmd_persona_show(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    match ops::persona_head(&engine).context("reading the persona")? {
+        Some(model) => println!("{}", render::persona_show(&model)),
+        None => println!(
+            "no persona distilled yet\n  run `ghostr persona distill` once you have \
+             {} memories or so",
+            ghostr_persona::distill::MIN_CORPUS
+        ),
+    }
+    Ok(())
+}
+
+fn cmd_persona_distill(dir: &std::path::Path, adopt: bool) -> Result<()> {
+    let engine = open(dir)?;
+    let candidate = ops::propose_persona(&engine).context("distilling")?;
+    println!("{}", render::persona_candidate(&candidate));
+
+    if adopt {
+        ops::adopt_persona(&engine, &candidate).context("adopting")?;
+        println!("adopted {}", candidate.model.version.display_short());
+    }
+    Ok(())
+}
+
+/// Adopting re-runs the distillation rather than reading a cached candidate.
+///
+/// Distillation is deterministic over the same corpus, so this reproduces what
+/// `distill` printed — and if the corpus changed in between, adopting the
+/// *current* model is the right answer rather than a stale one the user last
+/// looked at.
+fn cmd_persona_adopt(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let candidate = ops::propose_persona(&engine).context("distilling")?;
+    ops::adopt_persona(&engine, &candidate).context("adopting")?;
+    println!("adopted {}", candidate.model.version.display_short());
+    Ok(())
+}
+
+fn cmd_persona_diff(dir: &std::path::Path, from: u32, to: u32) -> Result<()> {
+    let engine = open(dir)?;
+    let diff = ops::persona_diff(&engine, from, to).context("diffing")?;
+    println!("{}", render::persona_diff(&diff));
+    Ok(())
+}
+
+fn cmd_persona_history(dir: &std::path::Path, limit: u32) -> Result<()> {
+    let engine = open(dir)?;
+    let versions = ops::persona_history(&engine, limit).context("reading history")?;
+    println!("{}", render::persona_history(&versions));
     Ok(())
 }

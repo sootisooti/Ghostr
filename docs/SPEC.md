@@ -668,10 +668,35 @@ on a retry schedule.
 ### 6.4 Persona distillation
 
 Runs after sealing, on its own cadence (default: weekly, or when queued deltas
-exceed a threshold). Reads the last N footages plus accumulated `PersonaDelta`s,
-produces a new `PersonaModel` version with a computed `PersonaDiff` against its
-parent. Old versions are never deleted — a quest issued under v12 is scored
-against v12's claim, not v13's.
+exceed a threshold). Reads the last 90 footages plus accumulated
+`PersonaDelta`s, produces a new `PersonaModel` version with a computed
+`PersonaDiff` against its parent. Old versions are never deleted — a quest
+issued under v12 is scored against v12's claim, not v13's.
+
+**Proposing and adopting are separate steps.** A distillation returns a
+candidate with its diff; the version becomes head only when adopted. A
+substantial change should not take effect because nobody looked, and the diff is
+the review surface that catches a poisoned stance before it starts answering
+quests (§11.3).
+
+**Three facets are computed, three need a model.** Voice, relationships, and
+routines are measurements — sentence lengths, punctuation rates, who appears and
+how often, what recurs. A model asked to estimate them would return a plausible
+number instead of the true one. Opinions, boundaries, and lore are not
+countable; without a model they are **empty rather than guessed**, and a
+distillation without one carries forward what an earlier one with a model found.
+An empty facet is honest; a guessed stance is a confident claim with no evidence
+behind it.
+
+**Version identity is a tagged hash over canonically-encoded facets**, so two
+distillations that found the same thing are the same version. Ratios convert to
+fixed point first — canonical CBOR rejects floats — and that conversion *is* the
+identity: personas differing below its resolution are deliberately the same
+version, because a version bump on noise is one nobody reviews.
+
+A routine is a thread title that has been **opened more than once**, not one
+that has stayed open. Counting how many days a thread appears would measure how
+long a single to-do lingered, which is the opposite fact.
 
 ---
 

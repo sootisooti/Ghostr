@@ -20,6 +20,7 @@ ghostr-ingest = { workspace = true }
 ghostr-llm = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 ghostr-memoria = { workspace = true }
+ghostr-persona = { workspace = true }
 serde_json = { workspace = true }
 ghostr-anchor = { workspace = true }
 chrono = { workspace = true }

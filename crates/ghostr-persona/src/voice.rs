@@ -170,41 +170,58 @@ fn word_counts(texts: &[&str]) -> std::collections::BTreeMap<String, u32> {
 /// writes the same way, or the profile would drift as the corpus grew rather
 /// than as the person changed.
 fn register(words: &std::collections::BTreeMap<String, u32>, total: u32) -> Register {
+    /// Words added to the denominator of a density estimate.
+    ///
+    /// A rate measured over twenty words is not a rate, it is an anecdote. Two
+    /// hedges in a two-line note is 8% by division and means nothing; the same
+    /// density sustained over a thousand words is a real habit. Adding a
+    /// notional corpus to the denominator shrinks a small sample toward zero
+    /// and leaves a large one almost untouched, which is exactly the difference
+    /// in confidence between the two.
+    const SMOOTH_WORDS: f32 = 200.0;
+
+    let hits = |list: &[&str]| -> u32 { list.iter().filter_map(|w| words.get(*w)).copied().sum() };
     let rate = |list: &[&str]| -> f32 {
         if total == 0 {
             return 0.0;
         }
-        let hits: u32 = list.iter().filter_map(|w| words.get(*w)).copied().sum();
-        hits as f32 / total as f32
+        hits(list) as f32 / total as f32
+    };
+    let density = |list: &[&str], scale: f32| -> f32 {
+        (hits(list) as f32 / (total as f32 + SMOOTH_WORDS) * scale).clamp(0.0, 1.0)
     };
 
-    let formal = rate(FORMAL);
-    let casual = rate(CASUAL);
     Register {
         // Midpoint when neither register shows: 0.5 means "no signal", not
         // "exactly balanced". `hedging` and `profanity` start at zero instead,
         // because those genuinely are absences rather than midpoints.
-        formality: axis(formal, casual),
+        formality: axis(rate(FORMAL), rate(CASUAL)),
         warmth: axis(rate(WARM), rate(COOL)),
-        // Scaled so a plausible rate reaches a readable fraction: hedging every
-        // fiftieth word is heavy hedging, not 2% of the scale.
-        hedging: (rate(HEDGES) * 50.0).clamp(0.0, 1.0),
-        profanity: (rate(PROFANITY) * 200.0).clamp(0.0, 1.0),
+        // Scaled so a sustained heavy hedger lands around 0.4 rather than
+        // saturating. An axis that reads 1.00 for everyone measures nothing.
+        hedging: density(HEDGES, 25.0),
+        profanity: density(PROFANITY, 200.0),
     }
 }
 
-/// Places two competing rates on a `0.0..=1.0` axis.
+/// Places two competing rates on a `0.0..=1.0` axis, smoothed toward the middle.
 ///
-/// Returns the midpoint when neither side shows, which is the honest answer for
-/// a corpus that gives no signal — as distinct from one that is genuinely
-/// balanced, which lands there too. The difference is not recoverable from one
-/// number, and the alternative (an `Option` on every axis) pushes the case onto
-/// every reader for little gain.
+/// The smoothing is the important part. Without it, a corpus containing one warm
+/// word and no cool ones reads as *maximally* warm — a confident claim from a
+/// single observation. The pseudocount pulls a one-sided result toward the
+/// midpoint in proportion to how little evidence supports it, so an axis
+/// approaches its extreme only when the corpus genuinely insists.
+///
+/// The midpoint is also what an absent signal returns, which does conflate "no
+/// evidence" with "evenly balanced". The two are not separable in one number,
+/// and an `Option` on every axis would push that case onto every reader for
+/// little gain.
 fn axis(a: f32, b: f32) -> f32 {
-    if a + b <= f32::EPSILON {
-        return 0.5;
-    }
-    (a / (a + b)).clamp(0.0, 1.0)
+    /// Comparable to a low-but-real word rate, so a *single* occurrence cannot
+    /// dominate the axis while a sustained one still moves it.
+    const PRIOR: f32 = 0.003;
+
+    ((a + PRIOR) / (a + b + 2.0 * PRIOR)).clamp(0.0, 1.0)
 }
 
 /// The most distinctive words, by rate against the stopword baseline.
@@ -384,6 +401,11 @@ fn exemplars(corpus: &[&Memory]) -> Vec<MemoryId> {
 }
 
 #[cfg(test)]
+mod tests_support {
+    pub(super) use super::tests::profile_of;
+}
+
+#[cfg(test)]
 mod tests {
     use ghostr_core::hash::{Tag, tagged_hash};
     use ghostr_core::ids::SourceId;
@@ -421,7 +443,7 @@ mod tests {
         }
     }
 
-    fn profile_of(texts: &[&str]) -> VoiceProfile {
+    pub(super) fn profile_of(texts: &[&str]) -> VoiceProfile {
         let memories: Vec<Memory> = texts
             .iter()
             .enumerate()
@@ -613,5 +635,49 @@ mod tests {
                 assert!((0.0..=1.0).contains(&tic.distinctiveness));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod smoothing_tests {
+    use super::tests_support::profile_of;
+
+    /// The bug the prior fixes: one warm word and no cool ones read as
+    /// *maximally* warm — a confident claim from a single observation.
+    #[test]
+    fn a_single_observation_does_not_saturate_an_axis() {
+        let mostly_neutral = format!(
+            "I appreciate that. {}",
+            "The parser handles the third case now. ".repeat(60)
+        );
+        let p = profile_of(&[&mostly_neutral]);
+        assert!(
+            p.register.warmth < 0.8,
+            "one warm word in a long corpus gave warmth {}",
+            p.register.warmth
+        );
+        assert!(p.register.warmth > 0.5, "but it should still lean warm");
+    }
+
+    /// A corpus that genuinely insists still reaches the extreme.
+    #[test]
+    fn sustained_evidence_still_moves_the_axis() {
+        let warm = "love thanks grateful lovely glad kind sweet happy wonderful appreciate";
+        let p = profile_of(&[warm]);
+        assert!(p.register.warmth > 0.9, "got {}", p.register.warmth);
+    }
+
+    /// An axis that reads 1.00 for everyone measures nothing.
+    #[test]
+    fn hedging_does_not_saturate_on_an_ordinary_corpus() {
+        let ordinary = "I think this is probably the right call, though I might be wrong. \
+                        Worked on the parser again today and it behaved itself.";
+        let p = profile_of(&[ordinary]);
+        assert!(
+            p.register.hedging < 1.0,
+            "an ordinary corpus saturated hedging at {}",
+            p.register.hedging
+        );
+        assert!(p.register.hedging > 0.0, "but hedging is present");
     }
 }

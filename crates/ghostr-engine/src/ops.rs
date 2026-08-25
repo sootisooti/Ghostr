@@ -10,12 +10,14 @@ use ghostr_core::footage::{Amendment, AmendmentReason, Commitment, Footage, Thre
 use ghostr_core::hash::Hash32;
 use ghostr_core::ids::{EntityId, MemoryId, PersonaVersion, SourceId, ThreadId};
 use ghostr_core::memory::Memory;
+use ghostr_core::persona::PersonaModel;
 use ghostr_core::time::Timestamp;
 use ghostr_ingest::markdown;
 use ghostr_memoria::compose::{self, NoteExtraction};
 use ghostr_memoria::extract;
 use ghostr_memoria::pipeline::DraftFootage;
 use ghostr_memoria::summarize::{NaiveSummarizer, Summarizer};
+pub use ghostr_persona::CandidateVersion;
 use ghostr_store::memory::TimeRange;
 use ghostr_store::sqlite::{AnchorRecord, AnchorRecordState};
 
@@ -854,4 +856,142 @@ pub fn dry_run_remote(
         out.notes.push(gated.dry_run(&request)?);
     }
     Ok(out)
+}
+
+/// How many sealed days a distillation reads.
+///
+/// A season. Long enough that a routine is visible and a stance has repeated
+/// evidence; short enough that the ghost tracks who the user is now rather than
+/// who they were two years ago.
+const DISTILL_WINDOW_DAYS: usize = 90;
+
+/// Distils a persona version without adopting it.
+///
+/// Proposing and adopting are separate steps, so a user reads the diff before
+/// the ghost starts speaking from a new model. A large change taking effect
+/// silently is exactly what the symbolic model exists to prevent (SPEC §3.6).
+///
+/// # Errors
+///
+/// Returns [`Error::Persona`](crate::Error::Persona) if there is not enough
+/// corpus, if a held-out correction reached the queue, or if a claim carries no
+/// evidence.
+pub fn propose_persona(engine: &Engine) -> crate::Result<CandidateVersion> {
+    use ghostr_persona::{DeterministicBuilder, DistillInput};
+
+    let dek = engine.dek()?;
+    let head = engine.store().persona_head(dek)?;
+
+    let mut footage = engine.store().all_footage(dek)?;
+    footage.sort_by_key(|f| f.seq);
+    let recent: Vec<_> = footage
+        .iter()
+        .rev()
+        .take(DISTILL_WINDOW_DAYS)
+        .rev()
+        .cloned()
+        .collect();
+
+    // First-party only. Voice exemplars are drawn from this slice, and a feed
+    // item becoming an exemplar is how a stranger's voice ends up in the
+    // ghost's mouth (THREAT_MODEL §T7).
+    let all = engine.store().all_memories(dek)?;
+    let trusted = first_party_sources(engine)?;
+    let first_party: Vec<&Memory> = all
+        .iter()
+        .filter(|m| trusted.contains(&m.source_id))
+        .collect();
+
+    let next_ordinal = head.as_ref().map_or(1, |h| h.version.ordinal + 1);
+    ghostr_persona::propose(
+        &DeterministicBuilder,
+        head.as_ref(),
+        DistillInput {
+            footage: &recent,
+            first_party: &first_party,
+            // Deltas arrive with the quest loop. Empty rather than absent, so
+            // the holdout check runs on every distillation from the start
+            // rather than being switched on later (I7).
+            deltas: &[],
+            now: engine.now(),
+            next_ordinal,
+        },
+    )
+    .map_err(crate::Error::Persona)
+}
+
+/// Adopts a proposed version, making it head.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the write fails.
+pub fn adopt_persona(engine: &Engine, candidate: &CandidateVersion) -> crate::Result<()> {
+    let dek = engine.dek()?;
+    engine
+        .store()
+        .put_persona(dek, &candidate.model, engine.nonce())?;
+    Ok(())
+}
+
+/// The current persona, if one has been distilled.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the read fails.
+pub fn persona_head(engine: &Engine) -> crate::Result<Option<PersonaModel>> {
+    Ok(engine.store().persona_head(engine.dek()?)?)
+}
+
+/// The diff between two stored versions.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if either version is absent.
+pub fn persona_diff(
+    engine: &Engine,
+    from: u32,
+    to: u32,
+) -> crate::Result<ghostr_core::persona::PersonaDiff> {
+    let dek = engine.dek()?;
+    let missing = |ordinal: u32| crate::Error::Config {
+        detail: format!("no persona version {ordinal}"),
+    };
+    let a = engine
+        .store()
+        .get_persona(dek, from)?
+        .ok_or_else(|| missing(from))?;
+    let b = engine
+        .store()
+        .get_persona(dek, to)?
+        .ok_or_else(|| missing(to))?;
+    Ok(ghostr_persona::diff::diff(&a, &b))
+}
+
+/// Every persona version, newest first.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the read fails.
+pub fn persona_history(
+    engine: &Engine,
+    limit: u32,
+) -> crate::Result<Vec<ghostr_store::sqlite::PersonaSummary>> {
+    Ok(engine.store().persona_history(limit)?)
+}
+
+/// The sources whose content counts as the user's own voice.
+///
+/// Read from the store rather than assumed: a markdown vault is first-party, a
+/// health export is self-reported, and a feed is neither. Getting this wrong in
+/// the permissive direction is a vulnerability, not a bug (THREAT_MODEL §T7).
+fn first_party_sources(engine: &Engine) -> crate::Result<std::collections::BTreeSet<SourceId>> {
+    use ghostr_core::sensitivity::TrustLevel;
+
+    Ok(engine
+        .store()
+        .all_sources(engine.dek()?)?
+        .into_iter()
+        .filter(|s| s.trust == TrustLevel::FirstParty)
+        .map(|s| s.id)
+        .collect())
 }

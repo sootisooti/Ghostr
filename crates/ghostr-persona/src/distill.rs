@@ -359,14 +359,27 @@ fn relationships(footage: &[Footage]) -> Vec<Relation> {
     out
 }
 
-/// What repeats, from threads that recur across days.
+/// What recurs.
+///
+/// A routine is a thread title that has been *opened more than once* — the
+/// groceries, the weekly review, the thing that keeps coming back. Counting how
+/// many days a thread appears in `open_threads` would instead measure how long a
+/// single to-do stayed open, which is the opposite fact: one lease renewal
+/// carried forward for a month would read as the strongest routine in the
+/// corpus, and a genuine weekly habit would read as weaker.
+///
+/// Distinct thread ids under one title is the signal, because `compose::threads`
+/// allocates a new id when a closed title reopens.
 fn routines(footage: &[Footage]) -> Vec<Routine> {
-    let mut by_title: BTreeMap<String, (u32, Vec<MemoryId>)> = BTreeMap::new();
+    use ghostr_core::ids::ThreadId;
+    use std::collections::BTreeSet;
+
+    let mut by_title: BTreeMap<String, (BTreeSet<ThreadId>, Vec<MemoryId>)> = BTreeMap::new();
 
     for day in footage {
         for thread in &day.open_threads {
             let entry = by_title.entry(thread.title.clone()).or_default();
-            entry.0 += 1;
+            entry.0.insert(thread.id);
             entry.1.extend(thread.memory_ids.iter().copied());
         }
     }
@@ -374,16 +387,19 @@ fn routines(footage: &[Footage]) -> Vec<Routine> {
     let total_days = footage.len().max(1) as f32;
     let mut out: Vec<Routine> = by_title
         .into_iter()
-        // A pattern seen once is an event, not a routine. Three is the point at
-        // which "this keeps happening" is supportable from the evidence.
-        .filter(|(_, (count, evidence))| *count >= 3 && !evidence.is_empty())
-        .map(|(pattern, (count, evidence))| Routine {
-            pattern,
-            // A human-readable schedule needs a model. The observed frequency
-            // is what the corpus actually supports.
-            schedule: format!("seen on {count} of {} day(s)", footage.len()),
-            confidence: (count as f32 / total_days).clamp(0.0, 1.0),
-            evidence: dedup(evidence),
+        // Opened once is an event, not a routine. Three is the point at which
+        // "this keeps happening" is supportable from the evidence.
+        .filter(|(_, (ids, evidence))| ids.len() >= 3 && !evidence.is_empty())
+        .map(|(pattern, (ids, evidence))| {
+            let occurrences = ids.len();
+            Routine {
+                pattern,
+                // A human-readable schedule needs a model. How often it came
+                // back is what the corpus actually supports.
+                schedule: format!("came back {occurrences} times in {} day(s)", footage.len()),
+                confidence: (occurrences as f32 / total_days).clamp(0.0, 1.0),
+                evidence: dedup(evidence),
+            }
         })
         .collect();
 
@@ -711,20 +727,27 @@ mod tests {
         assert!((cadence - 3.0).abs() < 0.5, "got {cadence}");
     }
 
-    /// A pattern seen once is an event, not a routine.
+    /// A pattern opened once is an event, not a routine.
     #[test]
     fn a_pattern_needs_repetition_to_be_a_routine() {
         use ghostr_core::ids::ThreadId;
 
         let memories = corpus_memories(30);
-        let once = ThreadId::new(1, [1u8; 10]);
-        let often = ThreadId::new(2, [2u8; 10]);
-
         let footage: Vec<Footage> = (0..6)
             .map(|seq| {
-                let mut threads = vec![thread(often, "the weekly review", memories[0].id)];
+                // A fresh id each time: the title keeps coming back.
+                let recurring = ThreadId::new(seq + 10, [seq as u8 + 10; 10]);
+                let mut threads = vec![thread(
+                    recurring,
+                    "the weekly review",
+                    memories[seq as usize].id,
+                )];
                 if seq == 0 {
-                    threads.push(thread(once, "a one-off errand", memories[1].id));
+                    threads.push(thread(
+                        ThreadId::new(1, [1u8; 10]),
+                        "a one-off errand",
+                        memories[1].id,
+                    ));
                 }
                 day(seq + 1, Vec::new(), threads)
             })
@@ -741,6 +764,34 @@ mod tests {
         assert!(!patterns.contains(&"a one-off errand"));
     }
 
+    /// The bug this signal replaced. A single to-do carried forward for a month
+    /// is one open item, not the strongest routine in the corpus — counting
+    /// day-appearances measured how long something stayed open, which is the
+    /// opposite fact.
+    #[test]
+    fn a_single_thread_carried_forward_is_not_a_routine() {
+        use ghostr_core::ids::ThreadId;
+
+        let memories = corpus_memories(30);
+        let lease = ThreadId::new(1, [1u8; 10]);
+        let footage: Vec<Footage> = (0..29)
+            .map(|seq| {
+                day(
+                    seq + 1,
+                    Vec::new(),
+                    vec![thread(lease, "renew the lease", memories[0].id)],
+                )
+            })
+            .collect();
+
+        let model = distil(&footage, &memories).expect("distil");
+        assert!(
+            model.facets.routines.is_empty(),
+            "one carried-forward to-do became {:?}",
+            model.facets.routines
+        );
+    }
+
     /// SPEC §3.6. Every claim traces to a memory; one that does not is a
     /// hallucination, and admitting it breaks the audit trail the symbolic
     /// model exists to provide.
@@ -753,7 +804,9 @@ mod tests {
                     seq + 1,
                     vec![beat(entity(1), memories[seq as usize].id)],
                     vec![thread(
-                        ghostr_core::ids::ThreadId::new(1, [1u8; 10]),
+                        // A new id each day: the title recurs, which is what
+                        // makes it a routine rather than one open item.
+                        ghostr_core::ids::ThreadId::new(seq + 1, [seq as u8 + 1; 10]),
                         "a repeating thing",
                         memories[seq as usize].id,
                     )],

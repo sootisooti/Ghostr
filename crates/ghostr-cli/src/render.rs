@@ -5,12 +5,14 @@
 //! and this project's whole claim rests on its numbers being trustworthy.
 
 use ghostr_core::footage::Thread;
+use ghostr_core::persona::{ChangeKind, PersonaDiff, PersonaModel};
 use ghostr_core::sensitivity::Sensitivity;
 use ghostr_engine::engine::{Engine, InitOutcome};
+use ghostr_engine::ops::CandidateVersion;
 use ghostr_engine::ops::{IngestReport, Recap, VerifyReport};
 use ghostr_engine::sources::{SourcePlan, SyncReport};
 use ghostr_engine::types::{AnchorRecord, AnchorRecordState, Footage};
-use ghostr_store::sqlite::{EgressRecord, StoredSource};
+use ghostr_store::sqlite::{EgressRecord, PersonaSummary, StoredSource};
 
 /// Renders the result of `init`.
 ///
@@ -466,5 +468,181 @@ const fn sensitivity_word(s: Sensitivity) -> &'static str {
         Sensitivity::Public => "public",
         Sensitivity::Private => "private",
         Sensitivity::Secret => "secret",
+    }
+}
+
+/// Renders a persona.
+///
+/// Numbers come with what qualifies them, and every claim shows how many
+/// memories back it — a stance supported by two notes and one supported by
+/// fifty deserve different weight, and a bare position hides that.
+pub(crate) fn persona_show(model: &PersonaModel) -> String {
+    let v = &model.facets.voice;
+    let mut out = format!(
+        "{}  distilled from {} memory(ies)\n",
+        model.version.display_short(),
+        model.derived_from.len()
+    );
+    if let Some(parent) = model.parent {
+        out.push_str(&format!("parent {}\n", parent.display_short()));
+    }
+
+    out.push_str("\nVOICE\n");
+    out.push_str(&format!(
+        "  formality {:.2}  warmth {:.2}  hedging {:.2}  profanity {:.2}\n",
+        v.register.formality, v.register.warmth, v.register.hedging, v.register.profanity
+    ));
+    out.push_str(&format!(
+        "  sentences {:.1} words (sd {:.1}), {:.0}% fragments\n",
+        v.syntax.mean_sentence_words,
+        v.syntax.sentence_words_stddev,
+        v.syntax.fragment_rate * 100.0
+    ));
+    if !v.lexicon.is_empty() {
+        let phrases: Vec<&str> = v
+            .lexicon
+            .iter()
+            .take(8)
+            .map(|t| t.phrase.as_str())
+            .collect();
+        out.push_str(&format!("  characteristic words: {}\n", phrases.join(", ")));
+    }
+    out.push_str(&format!("  {} exemplar(s)\n", v.exemplars.len()));
+
+    if model.facets.opinions.is_empty() {
+        // Said out loud rather than left as an empty heading. "No model
+        // configured" and "this person holds no views" are different facts.
+        out.push_str(
+            "\nOPINIONS\n  none recorded (these need a model; run with --features llm-local)\n",
+        );
+    } else {
+        out.push_str("\nOPINIONS\n");
+        for s in &model.facets.opinions {
+            out.push_str(&format!(
+                "  - {}: {} (strength {:.2}, {} memory(ies)",
+                s.topic,
+                s.position,
+                s.strength,
+                s.evidence.len()
+            ));
+            if !s.contradicted_by.is_empty() {
+                out.push_str(&format!(", {} contradicting", s.contradicted_by.len()));
+            }
+            out.push_str(")\n");
+        }
+    }
+
+    if !model.facets.relationships.is_empty() {
+        out.push_str("\nPEOPLE\n");
+        for r in model.facets.relationships.iter().take(10) {
+            out.push_str(&format!(
+                "  - {}  closeness {:.2}, {} memory(ies)",
+                r.entity.display_short(),
+                r.closeness,
+                r.evidence.len()
+            ));
+            if let Some(days) = r.cadence_days {
+                out.push_str(&format!(", about every {days:.0} day(s)"));
+            }
+            out.push('\n');
+        }
+    }
+
+    if !model.facets.routines.is_empty() {
+        out.push_str("\nROUTINES\n");
+        for r in &model.facets.routines {
+            out.push_str(&format!(
+                "  - {} — {} (confidence {:.2})\n",
+                r.pattern, r.schedule, r.confidence
+            ));
+        }
+    }
+    out
+}
+
+/// Renders a proposed version and whether it needs reading.
+pub(crate) fn persona_candidate(candidate: &CandidateVersion) -> String {
+    let mut out = format!("proposed {}\n", candidate.model.version.display_short());
+    if let Some(replaces) = candidate.replaces {
+        out.push_str(&format!("replaces {}\n", replaces.display_short()));
+    }
+    out.push('\n');
+    out.push_str(&persona_diff(&candidate.diff));
+
+    if candidate.warrants_review {
+        // The whole point of separating proposal from adoption: a large change
+        // should not take effect because nobody looked.
+        out.push_str("\nthis is a substantial change — read it before adopting\n");
+    }
+    out.push_str("\nadopt with `ghostr persona adopt`\n");
+    out
+}
+
+/// Renders a diff.
+pub(crate) fn persona_diff(diff: &PersonaDiff) -> String {
+    if diff.changes.is_empty() {
+        return format!(
+            "{} → {}: nothing changed\n",
+            diff.from.display_short(),
+            diff.to.display_short()
+        );
+    }
+    let mut out = format!(
+        "{} → {}: {} change(s)\n",
+        diff.from.display_short(),
+        diff.to.display_short(),
+        diff.changes.len()
+    );
+    for change in &diff.changes {
+        out.push_str(&format!(
+            "  [{}] {}\n",
+            change_word(change.kind),
+            change.description
+        ));
+        if !change.caused_by.is_empty() {
+            // The audit trail: which note caused this. It is what makes a
+            // poisoned belief traceable rather than merely present.
+            out.push_str(&format!(
+                "      because of {}\n",
+                change
+                    .caused_by
+                    .iter()
+                    .take(4)
+                    .map(ghostr_core::ids::MemoryId::display_short)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    out
+}
+
+/// Renders the version history.
+pub(crate) fn persona_history(versions: &[PersonaSummary]) -> String {
+    if versions.is_empty() {
+        return "no persona distilled yet\n  run `ghostr persona distill`\n".to_owned();
+    }
+    let mut out = format!("{} version(s), newest first\n", versions.len());
+    for v in versions {
+        out.push_str(&format!(
+            "  v{:<4} {}  {}{}\n",
+            v.ordinal,
+            &v.content[..8.min(v.content.len())],
+            v.created_at.to_utc().format("%Y-%m-%d %H:%M"),
+            if v.is_head { "  (head)" } else { "" }
+        ));
+    }
+    out
+}
+
+/// The word for a change kind.
+const fn change_word(kind: ChangeKind) -> &'static str {
+    match kind {
+        ChangeKind::Added => "added",
+        ChangeKind::Removed => "removed",
+        ChangeKind::Adjusted => "adjusted",
+        ChangeKind::Reversed => "reversed",
+        ChangeKind::Contradicted => "contradicted",
+        _ => "changed",
     }
 }

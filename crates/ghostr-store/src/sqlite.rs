@@ -20,13 +20,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, meta_key};
+use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, meta_key};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -167,6 +167,7 @@ impl SqliteStore {
             (1, SCHEMA_V2),
             (2, SCHEMA_V3),
             (3, SCHEMA_V4),
+            (4, SCHEMA_V5),
         ] {
             if current <= from {
                 self.conn
@@ -2271,6 +2272,8 @@ mod tests {
         assert_eq!(s.egress_count().expect("count"), 1);
         use crate::vector::VectorIndex as _;
         assert_eq!(s.descriptor().expect("vector descriptor").count, 0);
+        // v5: the persona table exists.
+        assert!(s.persona_history(10).expect("history").is_empty());
         // v4: two vaults at different paths are two sources.
         let d = dek();
         let a = s
@@ -2803,6 +2806,187 @@ impl SqliteStore {
     }
 }
 
+/// Persona versions.
+impl SqliteStore {
+    /// Writes a version and makes it head.
+    ///
+    /// The previous head stays stored: a quest issued under v12 is scored
+    /// against v12's claim, not v13's, so old versions are never deleted
+    /// (SPEC §6.4).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendOnlyViolation`](crate::Error::AppendOnlyViolation)
+    /// if the ordinal or content hash already exists.
+    pub fn put_persona(
+        &self,
+        dek: &Dek,
+        model: &ghostr_core::persona::PersonaModel,
+        nonce: [u8; 24],
+    ) -> crate::Result<()> {
+        let plaintext = encode_row(model)?;
+        let aad = format!("persona:{}", model.version.ordinal);
+        let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute("UPDATE persona SET is_head = 0 WHERE is_head = 1", [])
+            .map_err(|_| crate::Error::Backend {
+                operation: "clear persona head",
+            })?;
+        self.conn
+            .execute(
+                "INSERT INTO persona
+                 (ordinal, content_hash, parent_ordinal, created_at, is_head,
+                  body_nonce, body_sealed)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)",
+                params![
+                    i64::from(model.version.ordinal),
+                    model.version.content.to_hex(),
+                    model.parent.map(|p| i64::from(p.ordinal)),
+                    model.created_at.utc_millis(),
+                    nonce.to_vec(),
+                    sealed
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    crate::Error::AppendOnlyViolation { table: "persona" }
+                }
+                _ => crate::Error::Backend {
+                    operation: "insert persona",
+                },
+            })?;
+        Ok(())
+    }
+
+    /// The current persona version, if one has been distilled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn persona_head(
+        &self,
+        dek: &Dek,
+    ) -> crate::Result<Option<ghostr_core::persona::PersonaModel>> {
+        self.persona_row(
+            dek,
+            "SELECT ordinal, body_nonce, body_sealed FROM persona WHERE is_head = 1 LIMIT 1",
+            None,
+        )
+    }
+
+    /// One version by ordinal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn get_persona(
+        &self,
+        dek: &Dek,
+        ordinal: u32,
+    ) -> crate::Result<Option<ghostr_core::persona::PersonaModel>> {
+        self.persona_row(
+            dek,
+            "SELECT ordinal, body_nonce, body_sealed FROM persona WHERE ordinal = ?1",
+            Some(i64::from(ordinal)),
+        )
+    }
+
+    /// Reads one persona row.
+    fn persona_row(
+        &self,
+        dek: &Dek,
+        sql: &str,
+        ordinal: Option<i64>,
+    ) -> crate::Result<Option<ghostr_core::persona::PersonaModel>> {
+        let read = |r: &rusqlite::Row<'_>| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+            ))
+        };
+        let row = match ordinal {
+            Some(o) => self.conn.query_row(sql, [o], read).optional(),
+            None => self.conn.query_row(sql, [], read).optional(),
+        }
+        .map_err(|_| crate::Error::Backend {
+            operation: "read persona",
+        })?;
+
+        let Some((ordinal, nonce, sealed)) = row else {
+            return Ok(None);
+        };
+        let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+            operation: "persona nonce length",
+        })?;
+        let aad = format!("persona:{ordinal}");
+        let plaintext = open_row(dek, &sealed, &nonce, aad.as_bytes())
+            .map_err(|_| crate::Error::RowDecryptFailed { table: "persona" })?;
+        Ok(Some(decode_row(&plaintext, "persona")?))
+    }
+
+    /// Every version, newest first, without decrypting their facets.
+    ///
+    /// A history listing does not need the content, and not decrypting it is
+    /// one fewer place for a persona to be in memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn persona_history(&self, limit: u32) -> crate::Result<Vec<PersonaSummary>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT ordinal, content_hash, parent_ordinal, created_at, is_head
+                 FROM persona ORDER BY ordinal DESC LIMIT ?1",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare persona history",
+            })?;
+        let rows = stmt
+            .query_map([i64::from(limit)], |r| {
+                Ok(PersonaSummary {
+                    ordinal: r.get::<_, i64>(0)?.max(0).unsigned_abs() as u32,
+                    content: r.get::<_, String>(1)?,
+                    parent_ordinal: r
+                        .get::<_, Option<i64>>(2)?
+                        .map(|p| p.max(0).unsigned_abs() as u32),
+                    created_at: Timestamp::new(r.get::<_, i64>(3)?, 0),
+                    is_head: r.get::<_, i64>(4)? != 0,
+                })
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "query persona history",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|_| crate::Error::Backend {
+                operation: "read persona history row",
+            })?);
+        }
+        Ok(out)
+    }
+}
+
+/// One persona version, without its facets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersonaSummary {
+    /// Monotonic ordinal.
+    pub ordinal: u32,
+    /// Content hash, hex.
+    pub content: String,
+    /// The ordinal this was distilled from.
+    pub parent_ordinal: Option<u32>,
+    /// When it was distilled.
+    pub created_at: Timestamp,
+    /// Whether this is the current head.
+    pub is_head: bool,
+}
+
 #[cfg(test)]
 mod vector_tests {
     use ghostr_core::ids::VectorId;
@@ -3205,5 +3389,201 @@ mod source_tests {
         let listed = s.all_sources(&d).expect("list");
         let found = listed.iter().find(|x| x.id == id).expect("present");
         assert!(found.cursor_json.contains("timestamp"));
+    }
+}
+
+#[cfg(test)]
+mod persona_tests {
+    use ghostr_core::hash::{Tag, tagged_hash};
+    use ghostr_core::ids::PersonaVersion;
+    use ghostr_core::persona::{
+        Facets, PersonaModel, PunctuationHabits, Register, SyntaxStats, VoiceProfile,
+    };
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, store};
+    use super::*;
+
+    fn model(ordinal: u32, marker: &str, parent: Option<PersonaVersion>) -> PersonaModel {
+        PersonaModel {
+            version: PersonaVersion {
+                ordinal,
+                content: tagged_hash(Tag::Persona, marker.as_bytes()),
+            },
+            parent,
+            created_at: Timestamp::new(i64::from(ordinal) * 1_000, 0),
+            facets: Facets {
+                voice: VoiceProfile {
+                    register: Register {
+                        formality: 0.5,
+                        warmth: 0.5,
+                        hedging: 0.1,
+                        profanity: 0.0,
+                    },
+                    lexicon: Vec::new(),
+                    syntax: SyntaxStats {
+                        mean_sentence_words: 12.0,
+                        sentence_words_stddev: 3.0,
+                        mean_clause_depth: 1.0,
+                        fragment_rate: 0.1,
+                    },
+                    punctuation: PunctuationHabits {
+                        em_dash_rate: 0.0,
+                        lowercase_start_rate: 0.0,
+                        emoji_rate: 0.0,
+                        ellipsis_rate: 0.0,
+                        unterminated_rate: 0.0,
+                    },
+                    exemplars: Vec::new(),
+                },
+                opinions: Vec::new(),
+                relationships: Vec::new(),
+                routines: Vec::new(),
+                boundaries: Vec::new(),
+                lore: Vec::new(),
+            },
+            derived_from: Vec::new(),
+            diff: None,
+        }
+    }
+
+    #[test]
+    fn a_version_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let m = model(1, "first", None);
+        s.put_persona(&d, &m, [1u8; 24]).expect("put");
+
+        let back = s.persona_head(&d).expect("head").expect("present");
+        assert_eq!(back.version, m.version);
+        assert_eq!(back.facets.voice.syntax.mean_sentence_words, 12.0);
+    }
+
+    /// A quest issued under v12 is scored against v12's claim, not v13's, so
+    /// old versions are never deleted (SPEC §6.4).
+    #[test]
+    fn an_older_version_survives_a_new_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let first = model(1, "first", None);
+        s.put_persona(&d, &first, [1u8; 24]).expect("v1");
+        s.put_persona(&d, &model(2, "second", Some(first.version)), [2u8; 24])
+            .expect("v2");
+
+        assert_eq!(
+            s.persona_head(&d)
+                .expect("head")
+                .expect("some")
+                .version
+                .ordinal,
+            2
+        );
+        let old = s.get_persona(&d, 1).expect("read").expect("still there");
+        assert_eq!(old.version, first.version);
+    }
+
+    /// A persona version is a claim the ghost has already answered quests
+    /// under. Editing one would rewrite what it said after the fact.
+    #[test]
+    fn a_stored_version_cannot_be_edited_or_deleted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        s.put_persona(&dek(), &model(1, "first", None), [1u8; 24])
+            .expect("put");
+
+        assert!(
+            s.conn
+                .execute(
+                    "UPDATE persona SET body_sealed = X'00' WHERE ordinal = 1",
+                    []
+                )
+                .is_err()
+        );
+        assert!(
+            s.conn
+                .execute("DELETE FROM persona WHERE ordinal = 1", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_duplicate_ordinal_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        s.put_persona(&d, &model(1, "first", None), [1u8; 24])
+            .expect("put");
+        let err = s
+            .put_persona(&d, &model(1, "different", None), [2u8; 24])
+            .expect_err("must refuse");
+        assert!(matches!(
+            err,
+            crate::Error::AppendOnlyViolation { table: "persona" }
+        ));
+    }
+
+    /// I1. A persona is the most concentrated description of a person in the
+    /// vault, so it is sealed like any other content.
+    #[test]
+    fn no_facet_content_appears_in_the_raw_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let mut m = model(1, "first", None);
+        m.facets.lore.push(ghostr_core::persona::LoreFact {
+            statement: "the user lives in a lighthouse in Aberdeen".to_owned(),
+            confidence: 0.9,
+            evidence: vec![MemoryId::new(1, [1u8; 10])],
+        });
+        s.put_persona(&dek(), &m, [1u8; 24]).expect("put");
+        drop(s);
+
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
+        for fragment in [b"lighthouse".as_slice(), b"Aberdeen".as_slice()] {
+            assert!(
+                !raw.windows(fragment.len()).any(|w| w == fragment),
+                "a lore fact is on disk in the clear"
+            );
+        }
+    }
+
+    #[test]
+    fn history_lists_newest_first_and_marks_the_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let first = model(1, "first", None);
+        s.put_persona(&d, &first, [1u8; 24]).expect("v1");
+        s.put_persona(&d, &model(2, "second", Some(first.version)), [2u8; 24])
+            .expect("v2");
+
+        let history = s.persona_history(10).expect("history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].ordinal, 2);
+        assert!(history[0].is_head);
+        assert!(!history[1].is_head);
+        assert_eq!(history[1].parent_ordinal, None);
+        assert_eq!(history[0].parent_ordinal, Some(1));
+    }
+
+    #[test]
+    fn the_wrong_key_cannot_read_a_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        s.put_persona(&dek(), &model(1, "first", None), [1u8; 24])
+            .expect("put");
+        let wrong = derive_dek(&[7u8; 32]);
+        assert!(matches!(
+            s.persona_head(&wrong),
+            Err(crate::Error::RowDecryptFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn an_empty_vault_has_no_head() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        assert!(s.persona_head(&dek()).expect("head").is_none());
     }
 }
