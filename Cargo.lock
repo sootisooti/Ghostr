@@ -732,6 +732,8 @@ name = "ghostr-persona"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "chrono-tz",
  "ghostr-core",
  "ghostr-llm",
  "ghostr-store",

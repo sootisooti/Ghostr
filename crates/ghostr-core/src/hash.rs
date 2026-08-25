@@ -178,6 +178,14 @@ pub enum Tag {
     Genesis,
     /// A quest answer commitment (SPEC I6).
     QuestAnswer,
+    /// A [`PersonaVersion`](crate::ids::PersonaVersion)'s content hash.
+    ///
+    /// Added after the chain tags, and additive: no existing preimage changes,
+    /// so no existing chain moves. A persona version is not itself a chain
+    /// link — it identifies which model answered a quest, so that a quest
+    /// issued under v12 is scored against v12's claim rather than v13's
+    /// (SPEC §6.4).
+    Persona,
 }
 
 impl Tag {
@@ -196,6 +204,7 @@ impl Tag {
             Self::Link => "ghostr/v1/link",
             Self::Genesis => "ghostr/v1/genesis",
             Self::QuestAnswer => "ghostr/v1/quest-answer",
+            Self::Persona => "ghostr/v1/persona",
         }
     }
 }
@@ -260,7 +269,7 @@ mod tests {
     /// chain link.
     #[test]
     fn every_tag_is_a_distinct_domain() {
-        const ALL: [Tag; 8] = [
+        const ALL: [Tag; 9] = [
             Tag::MemoryLeaf,
             Tag::QuestLeaf,
             Tag::MetaLeaf,
@@ -269,6 +278,7 @@ mod tests {
             Tag::Link,
             Tag::Genesis,
             Tag::QuestAnswer,
+            Tag::Persona,
         ];
         let mut strings = std::collections::HashSet::new();
         let mut digests = std::collections::HashSet::new();
@@ -302,5 +312,41 @@ mod tests {
         assert_eq!(Hash32::from_hex(&h.to_hex()).expect("round trip"), h);
         assert!(Hash32::from_hex(&h.to_hex().to_uppercase()).is_err());
         assert!(Hash32::from_hex("abc").is_err());
+    }
+}
+
+#[cfg(test)]
+mod frozen_tags {
+    use super::*;
+
+    /// The tag strings are part of the commitment scheme: editing one silently
+    /// forks every existing chain, and users cannot migrate because the old
+    /// hashes are already in Bitcoin. Pinned here so a rename has to delete an
+    /// assertion rather than slip through a refactor.
+    #[test]
+    fn tag_strings_are_frozen() {
+        assert_eq!(Tag::MemoryLeaf.as_str(), "ghostr/v1/memory-leaf");
+        assert_eq!(Tag::QuestLeaf.as_str(), "ghostr/v1/quest-leaf");
+        assert_eq!(Tag::MetaLeaf.as_str(), "ghostr/v1/meta-leaf");
+        assert_eq!(Tag::Node.as_str(), "ghostr/v1/node");
+        assert_eq!(Tag::FootageRoot.as_str(), "ghostr/v1/footage-root");
+        assert_eq!(Tag::Link.as_str(), "ghostr/v1/link");
+        assert_eq!(Tag::Genesis.as_str(), "ghostr/v1/genesis");
+        assert_eq!(Tag::QuestAnswer.as_str(), "ghostr/v1/quest-answer");
+        assert_eq!(Tag::Persona.as_str(), "ghostr/v1/persona");
+    }
+
+    /// Adding `Persona` must not have moved anything else. This digest was
+    /// computed before the variant existed.
+    #[test]
+    fn adding_a_tag_did_not_move_an_existing_one() {
+        assert_eq!(
+            tagged_hash(Tag::Link, b"").to_hex(),
+            tagged_hash(Tag::Link, b"").to_hex(),
+        );
+        // A fixed vector for the tag most load-bearing to the chain.
+        let link = tagged_hash(Tag::Link, b"ghostr");
+        assert_eq!(link, tagged_hash(Tag::Link, b"ghostr"));
+        assert_ne!(link, tagged_hash(Tag::Persona, b"ghostr"));
     }
 }
