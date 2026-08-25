@@ -3,6 +3,7 @@ resolver = "3"
 # Members are added as each crate lands, so every commit builds.
 members = [
     "crates/ghostr-core",
+    "crates/ghostr-crypto",
 ]
 
 

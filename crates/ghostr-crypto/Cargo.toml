@@ -1,0 +1,27 @@
+[package]
+name = "ghostr-crypto"
+description = "Ghostr key derivation, signing, and NIP-06/19/44 primitives."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# ARCHITECTURE §3 rule 4: this is the only crate that touches secret key bytes.
+# It is also the only crate permitted `unsafe`, and then only for mlock, and then
+# only with a safety comment and a second reviewer (CLAUDE.md §4.10).
+#
+# No cryptographic primitive is implemented here. The curve, the AEAD, the KDF,
+# and the hash all come from audited crates; what this crate owns is their
+# *composition*, which is where the bugs actually live — so that is where the
+# test vectors go (THREAT_MODEL §5).
+[dependencies]
+ghostr-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

@@ -31,7 +31,10 @@ impl Timestamp {
     /// Builds a timestamp from a UTC instant and the local offset it was seen at.
     #[must_use]
     pub fn new(utc_millis: i64, offset_seconds: i32) -> Self {
-        Self { utc_millis, offset_seconds }
+        Self {
+            utc_millis,
+            offset_seconds,
+        }
     }
 
     /// Milliseconds since the Unix epoch, UTC.

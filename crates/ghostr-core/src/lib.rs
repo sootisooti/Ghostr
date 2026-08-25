@@ -22,22 +22,23 @@
 //! Scaffold. Types and signatures are defined; bodies are [`todo!`].
 
 #![forbid(unsafe_code)]
-// SCAFFOLD: every function body in this crate is `todo!()`. These two allows
-// exist only for the scaffold phase and are removed per-crate as bodies land.
-// `unused_variables` fires because a diverging body never reads its arguments,
-// and parameters are left named rather than `_`-prefixed so the signatures stay
-// readable. `clippy::todo` is denied workspace-wide by CLAUDE.md §5; this is the
-// documented exception. `cargo xtask scaffold-status` counts these markers so
-// they cannot be quietly forgotten.
-#![allow(unused_variables, clippy::todo)]
+// SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
+// only for the scaffold phase and are removed crate-by-crate as bodies land.
+// `unused_variables` and `dead_code` fire because a diverging body never reads
+// its arguments and never calls its helpers; parameters keep real names rather
+// than `_` prefixes so the signatures stay readable. `clippy::todo` is denied
+// workspace-wide by CLAUDE.md §5 and this is the documented exception.
+// `cargo xtask scaffold-status` counts these markers so they cannot be quietly
+// forgotten.
+#![allow(unused_variables, dead_code, clippy::todo)]
 
 pub mod canonical;
 pub mod error;
 pub mod fidelity;
 pub mod footage;
 pub mod hash;
-pub mod ids;
 pub mod identity;
+pub mod ids;
 pub mod memory;
 pub mod merkle;
 pub mod persona;
