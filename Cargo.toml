@@ -115,6 +115,13 @@ predicates = "3"
 # should show up in review as a diff. `default-features = false` drops the yaml,
 # glob, and console machinery: the snapshots here are plain text.
 insta = { version = "1", default-features = false }
+# CLAUDE.md §6 requires proptest invariants alongside golden vectors on
+# hashing, the chain, and Merkle proofs — the layers where a bug is
+# unrecoverable because the old hashes are already in Bitcoin. Golden vectors
+# pin the cases someone thought of; properties cover the ones nobody did.
+# `default-features = false` drops the fork-based timeout harness, which needs
+# a process spawn per case.
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 # Lints apply to `cargo build` as well as `cargo clippy`, so a violation cannot
 # survive to CI. Each crate opts in with `[lints] workspace = true`.
