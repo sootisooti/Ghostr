@@ -48,6 +48,7 @@ pub mod embed;
 pub mod error;
 pub mod gate;
 pub mod model;
+pub mod policy;
 pub mod prompt;
 pub mod redact;
 pub mod schema;
@@ -58,4 +59,5 @@ pub use error::{Error, Result};
 pub use model::{
     Completion, CompletionRequest, LanguageModel, LanguageModelExt, Locality, ModelDescriptor,
 };
+pub use policy::StandardPolicy;
 pub use schema::{Schema, StructuredOutput};
