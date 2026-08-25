@@ -50,6 +50,8 @@ pub mod memory;
 pub mod migration;
 pub mod persona;
 pub mod quest;
+pub mod schema;
+pub mod sqlite;
 pub mod vector;
 
 pub use blob::BlobStore;
@@ -59,4 +61,5 @@ pub use footage::FootageStore;
 pub use memory::MemoryStore;
 pub use persona::PersonaStore;
 pub use quest::QuestStore;
+pub use sqlite::{DB_FILENAME, SqliteStore};
 pub use vector::VectorIndex;
