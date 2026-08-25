@@ -100,7 +100,7 @@ opentimestamps = "0.2"
 # bundled webpki roots. Without it, anyone behind a TLS-inspecting proxy — which
 # is most corporate networks — cannot anchor, and the failure looks like a
 # calendar outage rather than a trust-store problem.
-ureq = { version = "2", default-features = false, features = ["tls", "native-certs"] }
+ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "json"] }
 
 # --- M0: dev-only -----------------------------------------------------------
 tempfile = "3"

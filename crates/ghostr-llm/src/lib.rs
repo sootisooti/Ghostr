@@ -51,6 +51,7 @@ pub mod gate;
 pub mod model;
 pub mod policy;
 pub mod prompt;
+mod provider;
 pub mod pseudonym;
 pub mod redact;
 pub mod schema;

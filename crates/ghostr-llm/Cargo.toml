@@ -15,14 +15,18 @@ authors.workspace = true
 # Providers arrive behind features so a default build has no network client at
 # all: `local-ollama` in M1, remote providers opt-in after it.
 [dependencies]
-ghostr-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+ghostr-core = { workspace = true }
+ureq = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 
 [features]
-default = []
+default = ["local-ollama"]
 ## An Ollama-compatible local model over a loopback HTTP socket.
 local-ollama = []
 ## Remote providers. Off by default; a build without them cannot egress at all.
