@@ -67,14 +67,25 @@ chained, anchored. Corrections are amendments, never rewrites.
 
 ## Status
 
-**Pre-alpha. Milestone M0 is implemented; M1 onward is scaffolded.**
+**Pre-alpha. Milestones M0 and M1 are implemented; M2 onward is scaffolded.**
 
 M0 works end to end: an encrypted local vault, markdown ingest, deterministic
-daily footage, a Bitcoin-anchored hash chain, and `ghostr verify`. No LLM is
-compiled into the binary at all — `cargo tree -p ghostr-cli` has no model path in
-it, which makes "works offline" checkable rather than claimed.
+daily footage, a Bitcoin-anchored hash chain, and `ghostr verify`.
 
-Everything beyond M0 — the persona model, quests, the fidelity score, relays —
+M1 adds the daily recap: journal and structured-log sources, the six-stage
+Memoria pipeline with threads and amendments, local embeddings over an encrypted
+vector index, and — before any remote provider existed — the egress gate, its
+policy, its pseudonymising redactor, and its append-only audit log.
+
+**No model is compiled into a default build.** `cargo tree -p ghostr-cli` has no
+model path in it at all, which makes "works offline" checkable rather than
+claimed; `--features llm-local` adds an Ollama-compatible runtime on loopback,
+and `--features llm-remote` adds providers that can only be reached through the
+gate. Either way the pipeline falls back to its deterministic path when a model
+is absent, so a runtime being down costs the recap its polish and never costs
+the day its seal.
+
+Everything beyond M1 — the persona model, quests, the fidelity score, relays —
 is defined and documented with `todo!()` bodies, so the shape is reviewable
 before it is built.
 
@@ -94,13 +105,12 @@ $ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
 | [CLAUDE.md](CLAUDE.md) | Working conventions for this repo |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, CI, commit format, good first contributions |
 
-Milestone **M0** (encrypted local journal with an anchored, verifiable history —
-no LLM involved) is the next thing to be built. See the
-[roadmap](docs/ROADMAP.md).
+Milestone **M2** (the persona model, quests, and the fidelity score) is the next
+thing to be built. See the [roadmap](docs/ROADMAP.md).
 
 ## Quickstart
 
-M0 is implemented and runs **entirely offline with no LLM**. `anchor` is the one
+A default build runs **entirely offline with no model**. `anchor` is the one
 command that touches the network, and it degrades to a recorded failure rather
 than blocking anything.
 
@@ -109,12 +119,44 @@ $ cargo build --release                    # not yet published to crates.io
 $ alias ghostr=./target/release/ghostr
 
 $ ghostr init --tz Asia/Bangkok            # generate a nostr keypair, encrypt to disk
-$ ghostr ingest ./notes/                   # ingest a folder of markdown notes
+$ ghostr source add markdown ./notes/      # says what you are agreeing to, first
+$ ghostr source add structlog ./health/ --schema health
+$ ghostr source sync                       # pull from every enabled source
+$ ghostr journal add "shipped the parser"  # straight into the encrypted vault
+$ ghostr recap today                       # today's recap, sealing nothing
 $ ghostr memoria --date today              # compile and seal today's footage
+$ ghostr thread list                       # what is still open
 $ ghostr footage list                      # sealed days, with their chain links
 $ ghostr footage show 1                    # highlights, people, mood, open threads
+$ ghostr egress log                        # everything that has left this device
 $ ghostr anchor                            # stamp the chain tip via OpenTimestamps
 $ ghostr verify                            # re-derive the chain from genesis
+```
+
+Health and location logs are added as `Secret`, which means they never leave the
+device under any policy — and `source add` says so where you will read it:
+
+```console
+$ ghostr source add structlog ./health/ --schema health
+added src:9f21ab04  structured_log
+  trust        self-reported
+  sensitivity  secret  (never leaves this device)
+  network      no
+```
+
+Before anything can go to a remote model, you can see exactly what would:
+
+```console
+$ ghostr memoria --date today --dry-run --remote
+dry run for 2026-08-24 — nothing was sent
+  5 memory(ies) in the window
+  2 withheld as Secret (never offered to the gate at all)
+
+  [0] would send 521 byte(s), 2 name(s) pseudonymised
+      ...
+      <corpus trust="first-party">
+      Dinner with @Person A and @Person B about #moving.
+      </corpus>
 ```
 
 `ghostr verify` exits non-zero on a broken chain, so it composes:

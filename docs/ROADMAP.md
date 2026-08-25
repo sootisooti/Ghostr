@@ -1,6 +1,6 @@
 # Ghostr — Roadmap
 
-**Status:** Draft v0.2 · M0 shipped, M1 next
+**Status:** Draft v0.3 · M0 and M1 shipped, M2 next
 
 Five milestones. The rule for all of them: **each one ships something a person
 would actually use, on its own, with no promise of the next.** If a milestone's
@@ -58,8 +58,9 @@ harassment — can use this and stop here.
       *Submission works and produces a valid `.ots`; upgrading a pending proof
       to a Bitcoin attestation is the one M0 criterion carried into M1.*
 - [ ] Missed cutoff (machine asleep) seals on wake.
-      *Deferred with the job queue: M0 seals the day you name, so catching up
-      is `ghostr memoria --date` per missed day rather than automatic.*
+      *Half-done in M1: `cutoff::pending_windows` computes every window a
+      sleeping machine missed, in order and gapless. What is still absent is the
+      scheduler that runs them, which arrives with the job queue.*
 
 **Explicitly not in M0:** any LLM, any relay, persona, quests, entities.
 
@@ -85,19 +86,33 @@ Stands alone as a private daily-review tool. Still no ghost.
   `MoodReading`, threads with stable `ThreadId`s, `unresolved`, amendments.
 - Local entity resolution + an encrypted vector index. Local embeddings only
   (SPEC Q13, resolved: encrypted exhaustive scan, not `sqlite-vec`).
-- CLI: `source add/list/sync`, `recap [date]`, `thread list`, `egress log`.
+- CLI: `source add/list/sync`, `recap [date]`, `thread list`, `egress log`,
+  `journal add/import`, `memoria --dry-run --remote`.
 
 **Exit criteria**
-- [ ] Full pipeline runs offline with an ~8B-class local model, no network except
-      OTS.
-- [ ] Every highlight cites ≥ 1 `memory_id`; validation drops those that don't.
-- [ ] A thread opened on day 3 and resolved on day 9 shows as a closed loop.
-- [ ] `Sensitivity::Secret` is denied to every remote provider under every policy
+- [x] Full pipeline runs offline with an ~8B-class local model, no network except
+      OTS. *Also runs with no model at all: every model call falls back to the
+      deterministic path, so a runtime being down costs the recap its polish and
+      never costs the day its seal (I3).*
+- [x] Every highlight cites ≥ 1 `memory_id`; validation drops those that don't.
+      *`drop_unevidenced` is the filter, `validate_draft` the backstop, and the
+      count of what was dropped is printed rather than swallowed.*
+- [x] A thread opened on day 3 and resolved on day 9 shows as a closed loop.
+- [x] `Sensitivity::Secret` is denied to every remote provider under every policy
       configuration — table test, all branches.
-- [ ] `ghostr egress log` shows a complete record after a remote run; a
+- [x] `ghostr egress log` shows a complete record after a remote run; a
       `--dry-run --remote` prints exactly what *would* leave, before it leaves.
-- [ ] Late-arriving memories become amendments, never retro-edits (SPEC I2).
-- [ ] Snapshot tests on prompts; a prompt change shows as a reviewable diff.
+- [x] Late-arriving memories become amendments, never retro-edits (SPEC I2).
+- [x] Snapshot tests on prompts; a prompt change shows as a reviewable diff.
+
+**Carried into M2**
+- A *remote* memoria run. `--dry-run --remote` shows exactly what would leave
+  and the gate is complete behind it, but routing a real run at a remote
+  provider is not wired up — M1's claim is the offline pipeline, and shipping a
+  remote path nobody had a reason to use yet would be scope for its own sake.
+- Retrieval. The vector index and the local embedder are implemented and
+  tested, but nothing queries them yet: retrieval is what persona and quests
+  need, and they arrive in M2.
 
 **Not in M1:** persona, quests, relays.
 

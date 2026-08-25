@@ -1036,6 +1036,34 @@ with the provider, task, byte count, redaction plan, and a hash of the exact
 payload sent. `ghostr egress log` prints it. If a user cannot audit what left their
 machine, the privacy claim is unverifiable, which makes it worthless.
 
+Append-only is enforced by triggers in the schema rather than by application
+code, so "this record was written and cannot be edited" is a database fact. The
+payload itself is never stored — that would make the audit log a second copy of
+the corpus — only its digest, which is enough to prove what was sent to anyone
+who kept the redacted copy.
+
+**Configuration.** Two settings, deliberately separate:
+
+```toml
+egress_enabled = false                     # the master switch
+egress_allow   = anthropic:summarization   # provider:task pairs
+```
+
+Per task, not per provider: enabling a provider for conversation must not
+silently enable it for bulk extraction over the whole corpus. With
+`egress_enabled = false` no allow entry does anything, so turning it all off
+never means editing a list. `embedding` cannot be named in `egress_allow` at
+all — there is no remote embedding path and configuration must not be able to
+invent one (Q13).
+
+**Seeing it before it happens.** `ghostr memoria --dry-run --remote` prints the
+exact bytes that would leave, after redaction, along with the decision for each.
+The payload and the decision come from the same code path a real call takes, so
+a dry run cannot drift from what actually happens — a preview showing something
+other than the truth would be worse than no preview. `Secret` content does not
+even reach the gate on that path: it is counted and dropped before a prompt is
+built, which is one fewer place for it to go wrong.
+
 ### 11.3 Prompt construction
 
 - Corpus text is **data**, never instruction. It is delimited and typed, and the

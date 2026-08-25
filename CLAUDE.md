@@ -5,9 +5,11 @@ Read this before touching anything. It is the short version of
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), plus the rules that aren't written
 down anywhere else.
 
-**Current state: M0 is implemented; M1 onward is scaffolded.** The vault, ingest,
-Memoria, the hash chain, and `ghostr verify` all work offline with no LLM. The
-next thing to be built is M1 ([docs/ROADMAP.md](docs/ROADMAP.md)).
+**Current state: M0 and M1 are implemented; M2 onward is scaffolded.** The vault,
+ingest, the Memoria pipeline, the hash chain, `ghostr verify`, the egress gate,
+and the encrypted vector index all work — and all work with no model at all,
+because every model call falls back to a deterministic path. The next thing to
+be built is M2 ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.
@@ -103,7 +105,9 @@ Ordered by how much damage they cause.
    `ghostr-llm`, no "quick test call", no `reqwest` in another crate's
    `Cargo.toml`. (I4, I5)
 5. **Never send `Sensitivity::Secret` to a remote provider.** There is no
-   override flag and there must never be one.
+   override flag and there must never be one. `egress_allow` in a vault's
+   config cannot name `embedding` either — there is no remote embedding path
+   and configuration must not be able to invent one.
 6. **Never put a secret key, seed, or passphrase in a domain type.** Use `KeyRef`
    and go through `Signer`.
 7. **Never change canonical serialization or a hash tag without a migration plan
