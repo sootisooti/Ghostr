@@ -20,13 +20,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, meta_key};
+use crate::schema::{SCHEMA_V1, SCHEMA_V2, meta_key};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -145,26 +145,36 @@ impl SqliteStore {
             .optional()
             .unwrap_or(None);
 
-        match existing.as_deref().map(str::parse::<u32>) {
+        // 0 means "no schema at all yet". Every pending migration is applied in
+        // order from whatever version is on disk, so a v1 vault created by M0
+        // upgrades rather than failing to open.
+        let current = match existing.as_deref().map(str::parse::<u32>) {
             Some(Ok(v)) if v > SCHEMA_VERSION => {
                 // Refuse rather than guess. A downgrade that writes with an older
                 // understanding of the schema can corrupt a chain beyond repair.
-                Err(crate::Error::SchemaTooNew {
+                return Err(crate::Error::SchemaTooNew {
                     found: v,
                     supported: SCHEMA_VERSION,
-                })
+                });
             }
-            Some(Ok(_)) => Ok(()),
-            _ => {
+            Some(Ok(v)) => v,
+            _ => 0,
+        };
+
+        // (applies_when_current_is_at_most, sql)
+        for (from, sql) in [(0u32, SCHEMA_V1), (1, SCHEMA_V2)] {
+            if current <= from {
                 self.conn
-                    .execute_batch(SCHEMA_V1)
+                    .execute_batch(sql)
                     .map_err(|_| crate::Error::Backend {
-                        operation: "apply schema",
+                        operation: "apply migration",
                     })?;
-                self.set_meta(meta_key::SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
-                Ok(())
             }
         }
+        if current != SCHEMA_VERSION {
+            self.set_meta(meta_key::SCHEMA_VERSION, &SCHEMA_VERSION.to_string())?;
+        }
+        Ok(())
     }
 
     /// Writes a `meta` key.
@@ -1598,6 +1608,117 @@ mod tests {
         assert_eq!(spreadsheet_label(51), "AZ");
     }
 
+    // --- egress log + migration (M1) ---------------------------------------
+
+    fn record(provider: &str, decision: &str) -> EgressRecord {
+        EgressRecord {
+            at: Timestamp::new(1_000, 0),
+            provider: provider.to_owned(),
+            task: "extraction".to_owned(),
+            decision: decision.to_owned(),
+            deny_reason: (decision == "deny").then(|| "secret_content".to_owned()),
+            policy_id: "standard/v1".to_owned(),
+            bytes_sent: if decision == "deny" { 0 } else { 128 },
+            payload_digest: (decision != "deny").then(|| "ab".repeat(32)),
+            entities: 2,
+        }
+    }
+
+    #[test]
+    fn egress_records_round_trip_in_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append");
+        s.append_egress(&record("acme", "deny")).expect("append");
+
+        let all = s.egress_since(Timestamp::new(0, 0)).expect("read");
+        assert_eq!(all.len(), 2);
+        // Denials are recorded too: a log of only the allows cannot show that
+        // the system refused anything (SPEC I5).
+        assert_eq!(all[1].decision, "deny");
+        assert_eq!(all[1].deny_reason.as_deref(), Some("secret_content"));
+        assert_eq!(all[1].bytes_sent, 0);
+    }
+
+    /// An audit record that can be edited is not an audit record.
+    #[test]
+    fn the_egress_log_is_append_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append");
+        assert!(
+            s.conn
+                .execute("UPDATE egress_log SET bytes_sent = 0", [])
+                .is_err()
+        );
+        assert!(s.conn.execute("DELETE FROM egress_log", []).is_err());
+    }
+
+    /// The log must not become a second copy of the corpus.
+    #[test]
+    fn the_egress_log_stores_a_digest_not_a_payload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append");
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
+        assert!(!raw.windows(3).any(|w| w == b"Nan"));
+        // The digest is present and is what a user would compare against.
+        let back = s.egress_since(Timestamp::new(0, 0)).expect("read");
+        assert_eq!(
+            back[0].payload_digest.as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+    }
+
+    /// A vault created by M0 at schema v1 must upgrade, not fail to open.
+    #[test]
+    fn a_v1_vault_migrates_to_v2() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            // Build a v1 database by hand: schema v1 only, version stamped 1.
+            let conn = rusqlite::Connection::open(dir.path().join(DB_FILENAME)).expect("open");
+            conn.execute_batch(crate::schema::SCHEMA_V1)
+                .expect("v1 schema");
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '1')",
+                [crate::schema::meta_key::SCHEMA_VERSION],
+            )
+            .expect("stamp");
+        }
+
+        let s = SqliteStore::open(dir.path()).expect("migrate on open");
+        assert_eq!(
+            s.meta(crate::schema::meta_key::SCHEMA_VERSION)
+                .expect("meta")
+                .as_deref(),
+            Some("2")
+        );
+        // The v2 table exists and works.
+        s.append_egress(&record("acme", "allow_redacted"))
+            .expect("append after migration");
+        assert_eq!(s.egress_count().expect("count"), 1);
+    }
+
+    #[test]
+    fn migration_is_idempotent_across_reopens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for _ in 0..3 {
+            let s = SqliteStore::open(dir.path()).expect("open");
+            s.append_egress(&record("acme", "allow_redacted"))
+                .expect("append");
+        }
+        assert_eq!(
+            SqliteStore::open(dir.path())
+                .expect("open")
+                .egress_count()
+                .expect("count"),
+            3
+        );
+    }
+
     #[test]
     fn a_newer_schema_is_refused_rather_than_guessed_at() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1968,5 +2089,124 @@ fn entity_kind_from_str(s: &str) -> crate::entity::EntityKind {
         "project" => crate::entity::EntityKind::Project,
         "organisation" => crate::entity::EntityKind::Organisation,
         _ => crate::entity::EntityKind::Person,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The egress audit log (M1)
+// ---------------------------------------------------------------------------
+
+/// One recorded egress decision.
+///
+/// Holds no content: a provider, a task, a decision, a byte count, and a digest.
+/// Storing the payload would recreate the corpus inside the audit log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressRecord {
+    /// When.
+    pub at: Timestamp,
+    /// Where to.
+    pub provider: String,
+    /// What for.
+    pub task: String,
+    /// `allow`, `allow_redacted`, or `deny`.
+    pub decision: String,
+    /// Why, when the decision was a deny.
+    pub deny_reason: Option<String>,
+    /// Which policy decided.
+    pub policy_id: String,
+    /// Bytes actually transmitted. Zero for a deny.
+    pub bytes_sent: u32,
+    /// Digest of the exact bytes sent, after redaction.
+    pub payload_digest: Option<String>,
+    /// How many entity names were pseudonymised.
+    pub entities: u32,
+}
+
+impl SqliteStore {
+    /// Appends an egress record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    /// Callers must treat that as fatal to the request: an egress that could not
+    /// be recorded is the thing the user was told could not happen (SPEC I5).
+    pub fn append_egress(&self, record: &EgressRecord) -> crate::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO egress_log
+                 (at, provider, task, decision, deny_reason, policy_id, bytes_sent,
+                  payload_digest, entities)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    record.at.utc_millis(),
+                    record.provider,
+                    record.task,
+                    record.decision,
+                    record.deny_reason,
+                    record.policy_id,
+                    i64::from(record.bytes_sent),
+                    record.payload_digest,
+                    i64::from(record.entities),
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "append egress record",
+            })?;
+        Ok(())
+    }
+
+    /// Records at or after `from`, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn egress_since(&self, from: Timestamp) -> crate::Result<Vec<EgressRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT at, provider, task, decision, deny_reason, policy_id, bytes_sent,
+                        payload_digest, entities
+                 FROM egress_log WHERE at >= ?1 ORDER BY at, id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare egress query",
+            })?;
+        let rows = stmt
+            .query_map([from.utc_millis()], |r| {
+                Ok(EgressRecord {
+                    at: Timestamp::new(r.get::<_, i64>(0)?, 0),
+                    provider: r.get(1)?,
+                    task: r.get(2)?,
+                    decision: r.get(3)?,
+                    deny_reason: r.get(4)?,
+                    policy_id: r.get(5)?,
+                    bytes_sent: u32::try_from(r.get::<_, i64>(6)?).unwrap_or(0),
+                    payload_digest: r.get(7)?,
+                    entities: u32::try_from(r.get::<_, i64>(8)?).unwrap_or(0),
+                })
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "read egress log",
+            })?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|_| crate::Error::Backend {
+                operation: "collect egress records",
+            })
+    }
+
+    /// How many records the log holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn egress_count(&self) -> crate::Result<u64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM egress_log", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| n.max(0).unsigned_abs())
+            .map_err(|_| crate::Error::Backend {
+                operation: "count egress records",
+            })
     }
 }

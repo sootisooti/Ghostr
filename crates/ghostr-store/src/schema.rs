@@ -140,6 +140,49 @@ CREATE TABLE anchor (
 ) STRICT;
 ";
 
+/// Schema v2: the egress audit log.
+///
+/// A separate migration rather than an edit to [`SCHEMA_V1`], because M0 vaults
+/// already exist and a schema change that silently assumes a fresh database is
+/// how someone's journal stops opening (CLAUDE.md: migrations are written before
+/// the change that needs them).
+///
+/// The log is **append-only and unencrypted**. Unencrypted because its whole
+/// purpose is to be readable as evidence of what left the device — a log the
+/// user cannot read without unlocking the vault is a worse audit trail — and it
+/// deliberately holds no content: a provider name, a task, a decision, a byte
+/// count, and a *digest* of the payload. Storing the payload would recreate the
+/// corpus inside the audit log.
+pub const SCHEMA_V2: &str = r"
+CREATE TABLE egress_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    at             INTEGER NOT NULL,
+    provider       TEXT NOT NULL,
+    task           TEXT NOT NULL,
+    decision       TEXT NOT NULL,
+    deny_reason    TEXT,
+    policy_id      TEXT NOT NULL,
+    bytes_sent     INTEGER NOT NULL,
+    payload_digest TEXT,
+    entities       INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX egress_log_at_idx ON egress_log(at);
+
+-- An audit record that can be edited is not an audit record.
+CREATE TRIGGER egress_log_is_append_only
+BEFORE UPDATE ON egress_log
+BEGIN
+    SELECT RAISE(ABORT, 'the egress log is append-only');
+END;
+
+CREATE TRIGGER egress_log_is_permanent
+BEFORE DELETE ON egress_log
+BEGIN
+    SELECT RAISE(ABORT, 'the egress log cannot be deleted');
+END;
+";
+
 /// `meta` keys.
 pub mod meta_key {
     /// Schema version, as a decimal string.
