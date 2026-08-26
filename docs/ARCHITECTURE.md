@@ -364,9 +364,22 @@ The only crate that knows which implementations are real. It owns:
 - **The job queue.** Durable, resumable, at-least-once, persisted in the store.
   A machine that sleeps through its cutoff must seal on wake, not skip a day —
   gapless chains (SPEC I3) depend on this.
-- **The local API.** A JSON-RPC surface over a Unix domain socket (named pipe on
-  Windows), so the CLI, a future Tauri UI, and scripts all speak the same thing.
-  Never a TCP listener by default.
+- **The local API.** A JSON surface over a Unix domain socket (named pipe on
+  Windows), so the CLI, a future desktop shell, and scripts all speak the same
+  thing. Never a TCP listener by default.
+
+  `ghostr serve --http` opts into a loopback listener as well, because the
+  daily loop needs a screen and the screen people actually have is a phone; a
+  phone cannot reach a Unix socket. Binding a non-loopback address needs
+  `--lan` on top of that. The default is still the socket, and the exception is
+  still something the user asks for rather than inherits (THREAT_MODEL §T11).
+
+  It is hand-written over `std::net`: about three hundred lines for one page and
+  six endpoints, against a framework that would roughly double the dependency
+  tree (THREAT_MODEL §T8). What makes that defensible is the shape of the
+  surface — one request per connection, no keep-alive, no chunked encoding,
+  everything bounded before it allocates — and that parsing is a pure function
+  over bytes, so every refusal is a unit test with no socket and no port.
 
 Engine holds *no* domain logic. If a rule about persona, scoring, or footage is
 being written in `ghostr-engine`, it belongs in the domain crate that owns it.
@@ -507,9 +520,14 @@ protects.
 - **No plugin system / dynamic loading.** Adapters are compile-time traits.
   Dynamic plugins in a process holding decrypted memories is a threat surface
   with no matching benefit at this stage.
-- **No GUI crate yet.** A Tauri shell arrives at M4 and talks to `ghostr-engine`
-  over the same local API the CLI uses. Building the UI before the loop is proven
-  would freeze the wrong abstractions.
+- **No GUI crate.** There is a web page, served by `ghostr-engine` and compiled
+  into the binary — one self-contained file, no build step, no framework, no
+  npm. A native shell still arrives at M4 and will talk to the same local API.
+
+  The page moved ahead of its milestone deliberately: the loop it drives is
+  proven now, and the argument for waiting ("building the UI before the loop is
+  proven freezes the wrong abstractions") had expired. A page that fetches JSON
+  freezes nothing — it is deleted by deleting one file.
 - **No sync server.** Multi-device sync rides on encrypted nostr events (SPEC §9).
 - **No ORM.** Hand-written SQL with `rusqlite` and versioned migrations. The
   schema encodes invariants (unique `seq`, append-only triggers) that an ORM

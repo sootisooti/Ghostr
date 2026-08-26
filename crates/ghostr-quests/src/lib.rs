@@ -40,6 +40,7 @@ pub mod error;
 pub mod generate;
 pub mod score;
 pub mod verdict;
+pub mod view;
 
 pub use error::{Error, Result};
 pub use generate::{
@@ -47,3 +48,4 @@ pub use generate::{
 };
 pub use score::{ScoredQuest, Scorer, StandardScorer};
 pub use verdict::{CorrectionSlot, StandardIntake, VerdictIntake, VerdictOutcome};
+pub use view::{Presented, present};

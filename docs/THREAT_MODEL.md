@@ -357,6 +357,74 @@ belongs in user-facing documentation rather than buried here.
 
 ---
 
+### T11 — The local API, and the moment it leaves the machine
+
+*New in M2, and the first thing in this project that opens a port.*
+
+The daily loop needs a screen, and the screen people actually have is the phone
+in their pocket. That means the vault has to be reachable from somewhere other
+than the process that holds the key — and every way of doing that is a hole
+that did not exist before.
+
+**The default is not a port.** `ghostr serve` binds a Unix domain socket inside
+the vault directory, `0600`. No network stack, no port to scan, and access
+control the kernel already enforces. A CLI, a script, or a desktop shell reaches
+it and nothing else can.
+
+**TCP is opt-in, twice.** `--http` adds a loopback listener. Binding anything
+else additionally requires `--lan`, whose only function is to make the user say
+out loud that they are putting their journal on a network. The refusal names
+what becomes readable, at the moment of the decision rather than in a footnote.
+
+| Exposure | Who can reach it | What stops them |
+| --- | --- | --- |
+| Unix socket (default) | Processes running as this user | Filesystem permissions, `0600` |
+| `--http` on loopback | Any process on this machine | A 256-bit bearer token, compared in constant time |
+| `--http … --lan` | Anyone who can route to the address | The same token, **over plaintext HTTP** |
+
+**Mitigations:**
+- A fresh 256-bit token per run, from the same `Rng` seam as everything else,
+  printed once and never written to a file or a log. It cannot be `Debug`-printed:
+  the type has a hand-written impl that prints `<redacted>` (I8).
+- The token travels in the **URL fragment**, which browsers never send to a
+  server and proxies never log. A token in a path or a query string would land
+  in every access log and history file that saw the request.
+- Constant-time comparison. A byte-at-a-time check that returned early would
+  leak the token one byte per request, and a local attacker can make a great
+  many requests.
+- **No CORS headers on any response**, so a page on another origin cannot read
+  a reply even if it guessed the token — and a request carrying an `Origin`
+  header is refused outright, so a cross-origin *write* never executes.
+- `Cache-Control: no-store` on everything: these responses carry memory content,
+  and a browser cache is a plaintext copy outside the vault (I1).
+- A CSP with no remote origin at all. If corpus text ever reached the page as
+  markup, it would have nowhere to send what it read (§T7).
+- The parser is bounded before it allocates, refuses `Transfer-Encoding` and
+  duplicate `Content-Length` outright, and never keeps a connection alive — so
+  the request-smuggling class is removed rather than handled.
+
+**Residual risk — read this part:**
+- **`--lan` is plaintext HTTP.** There is no TLS: a self-signed certificate
+  would train users to click through certificate warnings, which is worse than
+  the thing it fixes. Anyone passively watching that wifi sees the token and
+  then everything it unlocks. This is a "your own network, briefly" feature and
+  the banner says so. It should not be left running.
+- **Loopback is not a boundary on a shared machine.** Any process running as
+  this user can read the token from the terminal scrollback, and any process at
+  all can connect to the port. The token stops a *drive-by* — a webpage
+  guessing at `localhost:7749` — not a determined local attacker, who has the
+  vault file anyway.
+- **The token is per-run, not per-device.** Revoking one means restarting the
+  server. There is no session list and no way to see who is connected.
+- **No rate limiting.** Guessing a 256-bit token is not a realistic attack, so
+  there is nothing here to slow down; a request flood is a denial of service
+  against yourself, on your own machine.
+- The server handles one connection at a time. That is a deliberate simplicity
+  — `SqliteStore` is not `Sync`, so there is no shared state to race — but it
+  means a stalled client blocks the next one until its ten-second timeout.
+
+---
+
 ## 4. Explicit non-goals
 
 Stated plainly, because a threat model that implies protection it doesn't provide

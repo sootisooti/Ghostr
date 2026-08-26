@@ -233,17 +233,30 @@ impl QuestGenerator for DeterministicGenerator {
             .collect();
 
         let mut out = Vec::new();
+        // Two quests with the same answer in one day is one question asked
+        // twice: it doubles the weight of whatever it probes and reads, to the
+        // user, as the ghost not paying attention.
+        let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
         while out.len() < n {
             let before = out.len();
             for drafts in &mut by_facet {
                 if out.len() >= n {
                     break;
                 }
-                if drafts.is_empty() {
+                let Some(position) = drafts
+                    .iter()
+                    .position(|d| !asked.contains(d.kind.committed_answer()))
+                else {
+                    // Everything left in this facet repeats something already
+                    // asked. Drop it rather than carrying it into every round.
+                    drafts.clear();
                     continue;
-                }
+                };
+                let draft = drafts.remove(position);
+                asked.insert(draft.kind.committed_answer().to_owned());
                 let index = out.len();
-                out.push(finish(ctx, drafts.remove(0), index)?);
+                out.push(finish(ctx, draft, index)?);
             }
             // Every facet is exhausted. Fewer quests than asked for is the
             // honest answer; padding would mean asking something twice.
@@ -418,30 +431,106 @@ fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
 pub fn cloze_from(text: &str, memory: ghostr_core::ids::MemoryId) -> Option<QuestKind> {
     use ghostr_core::memory::Span;
 
-    let words: Vec<&str> = text.split_whitespace().collect();
-    // Fewer than six words and removing one leaves nothing to reason from.
-    if words.len() < 6 {
-        return None;
-    }
-    // The middle word, so the user has context on both sides. Deterministic
-    // rather than random: the same exemplar must produce the same question, or
-    // a re-run would issue a different quest under the same persona version.
-    let index = words.len() / 2;
-    let removed = words[index];
-    if removed.len() < 3 {
-        return None;
+    let _ = memory;
+    let sentence = pick_sentence(text)?;
+    let (offset, word) = pick_word(sentence)?;
+
+    // Offsets are into the sentence, and the sentence is what is shown. A span
+    // measured against the whole note would point somewhere else entirely.
+    Some(QuestKind::Cloze {
+        context: sentence.to_owned(),
+        redacted: Span {
+            start: u32::try_from(offset).ok()?,
+            end: u32::try_from(offset + word.len()).ok()?,
+        },
+        ghost_completion: word.to_owned(),
+    })
+}
+
+/// The sentence a cloze is built from.
+///
+/// One sentence, not the whole note. A gap in the middle of three paragraphs is
+/// not a question anyone can answer — the surrounding text is noise, and the
+/// user is being asked to recall which of forty words was removed.
+///
+/// Markdown structure is skipped: a list item or a heading is not a sentence
+/// the user *wrote* so much as one they formatted, and quizzing someone on
+/// their own checkbox tests nothing about their voice.
+fn pick_sentence(text: &str) -> Option<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with('-')
+                && !line.starts_with('*')
+                && !line.starts_with('#')
+                && !line.starts_with('>')
+                && !line.starts_with("- [")
+        })
+        .flat_map(|line| line.split_terminator(['.', '!', '?']))
+        .map(str::trim)
+        // Deterministic: the longest qualifying sentence, ties broken by order.
+        // The same exemplar must produce the same question, or a re-run would
+        // issue a different quest under the same persona version.
+        .filter(|s| s.split_whitespace().count() >= MIN_CLOZE_WORDS)
+        .max_by_key(|s| s.split_whitespace().count())
+}
+
+/// The fewest words a sentence needs before a gap leaves anything to reason from.
+const MIN_CLOZE_WORDS: usize = 6;
+
+/// The shortest word worth asking about.
+const MIN_CLOZE_WORD_LEN: usize = 4;
+
+/// Words that carry no voice, so removing one asks nothing about the person.
+const STOPWORDS: &[&str] = &[
+    "about", "after", "again", "been", "before", "being", "some", "such", "than", "that", "them",
+    "then", "there", "these", "they", "this", "those", "very", "were", "what", "when", "which",
+    "while", "with", "would", "your", "from", "have", "just", "like", "more", "much", "only",
+    "over", "into", "will", "still",
+];
+
+/// Picks the word to remove, and its byte offset in the sentence.
+///
+/// Returns `None` when nothing in the sentence is worth asking about. Fewer
+/// quests of the kinds it can do well beats bad ones of the kinds it cannot
+/// (SPEC Q7).
+fn pick_word(sentence: &str) -> Option<(usize, &str)> {
+    let mut candidates: Vec<(usize, &str)> = Vec::new();
+    let mut offset = 0usize;
+
+    for word in sentence.split_whitespace() {
+        // Walked rather than searched. `str::find` returns the *first* match,
+        // so a word appearing twice would put the gap on the wrong occurrence —
+        // and the ghost's committed answer would then be a word the user can
+        // still see.
+        let at = sentence[offset..].find(word)? + offset;
+        offset = at + word.len();
+
+        let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if bare.len() < MIN_CLOZE_WORD_LEN {
+            continue;
+        }
+        let lowered = bare.to_lowercase();
+        if STOPWORDS.contains(&lowered.as_str()) {
+            continue;
+        }
+        // A name or handle identifies someone rather than testing voice, and a
+        // gap where a person's name was is a quiz about other people.
+        if word.starts_with('@') || word.starts_with('#') {
+            continue;
+        }
+        // Must be unique in the sentence, or the gap is ambiguous: the user
+        // could fill it correctly with a word the ghost did not commit to.
+        if sentence.matches(bare).count() != 1 {
+            continue;
+        }
+        let bare_at = at + word.find(bare)?;
+        candidates.push((bare_at, bare));
     }
 
-    let start = text.find(removed)?;
-    let _ = memory;
-    Some(QuestKind::Cloze {
-        context: text.to_owned(),
-        redacted: Span {
-            start: u32::try_from(start).unwrap_or(0),
-            end: u32::try_from(start + removed.len()).unwrap_or(0),
-        },
-        ghost_completion: removed.to_owned(),
-    })
+    // The middle candidate, so there is context on both sides.
+    candidates.get(candidates.len() / 2).copied()
 }
 
 /// Attaches identity, holdout status, and the commitment.
@@ -727,6 +816,35 @@ mod tests {
         assert!(!verify_commitment(quest, answer, 0.05).expect("v"));
     }
 
+    /// One question asked twice doubles the weight of whatever it probes, and
+    /// reads to the user as the ghost not paying attention.
+    #[test]
+    fn a_day_never_asks_the_same_thing_twice() {
+        let model = persona();
+        let rng = SeededRng::new(5);
+        // Three exemplars, two of which say exactly the same thing.
+        let repeated = "I spent the whole afternoon wrestling with the parser again".to_owned();
+        let exemplars = vec![
+            (MemoryId::new(1, [1u8; 10]), repeated.clone()),
+            (MemoryId::new(2, [2u8; 10]), repeated),
+            (
+                MemoryId::new(3, [3u8; 10]),
+                "The train was late so I read on the platform instead".to_owned(),
+            ),
+        ];
+
+        let quests = DeterministicGenerator
+            .generate(&context_with(&model, &rng, &exemplars), 10)
+            .expect("generate");
+        let answers: std::collections::BTreeSet<&str> =
+            quests.iter().map(|q| q.kind.committed_answer()).collect();
+        assert_eq!(
+            answers.len(),
+            quests.len(),
+            "the same question was issued more than once"
+        );
+    }
+
     /// Two quests must not share a nonce, or one commitment could be replayed
     /// against another quest.
     #[test]
@@ -949,8 +1067,75 @@ mod tests {
             panic!("expected a cloze");
         };
         assert_eq!(context, text);
-        let span = &text[redacted.start as usize..redacted.end as usize];
+        let span = &context[redacted.start as usize..redacted.end as usize];
         assert_eq!(span, kind.committed_answer());
+    }
+
+    /// A gap in the middle of three paragraphs is not a question anyone can
+    /// answer. One sentence, so the context is context rather than noise.
+    #[test]
+    fn a_cloze_is_built_from_one_sentence_not_a_whole_note() {
+        let note = "Day 01. Shipped a bit more of the parser and felt alright about it.\n\n\
+                    Coffee with @nan about the lease. She thinks it is fine.\n\n\
+                    - [ ] groceries\n- [x] groceries\n";
+        let kind = cloze_from(note, MemoryId::new(1, [1u8; 10])).expect("a sentence");
+        let QuestKind::Cloze { context, .. } = &kind else {
+            panic!("expected a cloze");
+        };
+        assert!(
+            !context.contains('\n'),
+            "the whole note leaked in: {context}"
+        );
+        assert!(
+            !context.contains("groceries"),
+            "a checkbox is not a sentence"
+        );
+        assert!(context.split_whitespace().count() >= 6);
+    }
+
+    /// The span and the committed answer have to describe the same word. A
+    /// search for the first match would put the gap on the wrong occurrence,
+    /// and the answer would then be a word still visible on screen.
+    #[test]
+    fn a_repeated_word_does_not_move_the_gap() {
+        let text = "the parser broke and then the parser worked and I moved on";
+        if let Some(kind) = cloze_from(text, MemoryId::new(1, [1u8; 10])) {
+            let QuestKind::Cloze {
+                context, redacted, ..
+            } = &kind
+            else {
+                panic!("expected a cloze");
+            };
+            let span = &context[redacted.start as usize..redacted.end as usize];
+            assert_eq!(span, kind.committed_answer());
+            assert_eq!(
+                context.matches(kind.committed_answer()).count(),
+                1,
+                "an ambiguous gap can be filled with a word the ghost did not commit to"
+            );
+        }
+    }
+
+    /// Removing "with" or "about" asks nothing about the person, and a gap
+    /// where a name was is a quiz about somebody else.
+    #[test]
+    fn a_cloze_does_not_ask_about_filler_or_names() {
+        let text = "I went with @nan about the lease and it was fine after all that";
+        if let Some(kind) = cloze_from(text, MemoryId::new(1, [1u8; 10])) {
+            let answer = kind.committed_answer();
+            assert!(!answer.starts_with('@'));
+            assert!(answer.len() >= 4, "{answer}");
+            assert!(!["with", "about", "that", "after"].contains(&answer));
+        }
+    }
+
+    /// Fewer quests of the kinds it can do well beats bad ones of the kinds it
+    /// cannot (SPEC Q7).
+    #[test]
+    fn a_note_with_nothing_worth_asking_produces_no_cloze() {
+        assert!(cloze_from("- [ ] milk\n- [x] eggs\n", MemoryId::new(1, [1u8; 10])).is_none());
+        assert!(cloze_from("# heading only\n", MemoryId::new(1, [1u8; 10])).is_none());
+        assert!(cloze_from("too short", MemoryId::new(1, [1u8; 10])).is_none());
     }
 
     #[test]

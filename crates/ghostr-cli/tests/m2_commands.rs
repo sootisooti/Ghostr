@@ -128,3 +128,44 @@ fn an_unknown_fidelity_window_names_the_ones_that_work() {
         .failure()
         .stderr(predicate::str::contains("try `30`, `90`, or `all`"));
 }
+
+/// A non-loopback bind puts the vault on a network, and that must be something
+/// the user said rather than something they inherited. `--http 0.0.0.0:7749` is
+/// one typo away from `--http 127.0.0.1:7749`, and the difference is who can
+/// read their journal.
+#[test]
+fn binding_to_the_network_needs_a_second_flag() {
+    let home = tempfile::tempdir().unwrap();
+    let v = empty_vault(home.path());
+
+    ghostr(&v)
+        .args(["serve", "--http", "0.0.0.0:7749"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reachable from the network"))
+        .stderr(predicate::str::contains("--lan"));
+}
+
+#[test]
+fn a_lan_address_is_refused_without_the_flag_too() {
+    let home = tempfile::tempdir().unwrap();
+    let v = empty_vault(home.path());
+
+    ghostr(&v)
+        .args(["serve", "--http", "192.168.1.20:7749"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lan"));
+}
+
+#[test]
+fn an_unparseable_bind_address_says_what_works() {
+    let home = tempfile::tempdir().unwrap();
+    let v = empty_vault(home.path());
+
+    ghostr(&v)
+        .args(["serve", "--http", "not-an-address"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("127.0.0.1:7749"));
+}

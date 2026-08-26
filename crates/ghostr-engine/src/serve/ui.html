@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>ghost</title>
+<style>
+:root {
+  --bg: #0d0e12; --panel: #16181f; --line: #262a36;
+  --ink: #e7e9ee; --dim: #8b90a0; --faint: #5a5f70;
+  --accent: #7dd3a0; --warn: #e5b567; --bad: #e07a7a;
+  --tap: 48px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --line: #e3e3de;
+    --ink: #1a1c22; --dim: #61656f; --faint: #9296a1;
+    --accent: #1f7a4d; --warn: #8a5a00; --bad: #a63232;
+  }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  overscroll-behavior-y: contain;
+}
+main { max-width: 34rem; margin: 0 auto; padding: 1rem 1rem 5rem; }
+h1 { font-size: 1rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); margin: .25rem 0 1rem; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem; margin-bottom: .875rem; }
+.meta { display: flex; flex-wrap: wrap; gap: .5rem 1rem; font-size: .8125rem; color: var(--faint); }
+.meta b { color: var(--dim); font-weight: 600; }
+.tag { font-size: .6875rem; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.claim { font-size: 1.0625rem; margin: .5rem 0 1rem; overflow-wrap: anywhere; }
+.gap { display: inline-block; min-width: 4.5rem; border-bottom: 2px dashed var(--faint); }
+.quote { border-left: 3px solid var(--line); padding-left: .75rem; color: var(--ink); font-style: italic; }
+.row { display: flex; gap: .5rem; flex-wrap: wrap; }
+button {
+  font: inherit; font-weight: 600; color: var(--ink);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 11px;
+  min-height: var(--tap); padding: 0 1rem; flex: 1 1 auto; cursor: pointer;
+  touch-action: manipulation;
+}
+button:active { transform: scale(.97); }
+button.primary { border-color: var(--accent); color: var(--accent); }
+button.danger { border-color: var(--bad); color: var(--bad); }
+button.wide { flex-basis: 100%; }
+button[disabled] { opacity: .45; }
+button.opt { text-align: left; padding: .75rem 1rem; white-space: normal; min-height: var(--tap); }
+textarea {
+  font: inherit; width: 100%; min-height: 5rem; margin: .5rem 0;
+  background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 11px; padding: .75rem; resize: vertical;
+}
+.score { font-size: 2.75rem; font-weight: 650; letter-spacing: -.02em; line-height: 1; }
+.qual { color: var(--dim); font-size: .875rem; margin-top: .375rem; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; margin: .75rem 0 .25rem; position: relative; overflow: hidden; }
+.bar i { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .35; }
+.bar u { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--accent); }
+table { width: 100%; border-collapse: collapse; font-size: .875rem; margin-top: .5rem; }
+td { padding: .3125rem 0; border-bottom: 1px solid var(--line); }
+td:last-child { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+.flag { color: var(--warn); font-size: .875rem; margin-top: .5rem; }
+.flag.bad { color: var(--bad); }
+.empty { color: var(--dim); text-align: center; padding: 2rem 1rem; }
+nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex;
+      background: var(--panel); border-top: 1px solid var(--line);
+      padding-bottom: env(safe-area-inset-bottom); }
+nav button { border: 0; border-radius: 0; background: none; color: var(--faint); font-size: .8125rem; min-height: 3.25rem; }
+nav button[aria-current="true"] { color: var(--accent); }
+.hidden { display: none !important; }
+.note { color: var(--faint); font-size: .8125rem; margin-top: .75rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="head">ghost</h1>
+  <div id="view"></div>
+</main>
+<nav>
+  <button data-tab="quests" aria-current="true">Quests</button>
+  <button data-tab="score">Fidelity</button>
+  <button data-tab="vault">Vault</button>
+</nav>
+<script>
+"use strict";
+// The token arrives in the URL fragment. Browsers never send a fragment to the
+// server and proxies never log one, so a token that would otherwise sit in
+// history and access logs stays in the tab. It is cleared from the address bar
+// as soon as it is read, and kept only for this tab.
+const KEY = "ghostr.token";
+(function () {
+  const m = location.hash.match(/(?:^|[#&])t=([a-f0-9]{64})/i);
+  if (m) {
+    try { sessionStorage.setItem(KEY, m[1]); } catch (e) { window.__tok = m[1]; }
+    history.replaceState(null, "", location.pathname);
+  }
+})();
+function token() {
+  try { return sessionStorage.getItem(KEY) || window.__tok || ""; }
+  catch (e) { return window.__tok || ""; }
+}
+
+const $ = (h) => { const d = document.createElement("div"); d.innerHTML = h; return d; };
+// Everything from the vault is the user's own words, but it is still text going
+// into markup. Escaped on the way in rather than trusted, because a corpus can
+// contain anything a feed put in it (THREAT_MODEL T7).
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pct = (x) => Math.round(x * 100) + "%";
+
+async function call(path, method, body) {
+  const res = await fetch(path, {
+    method: method || "GET",
+    headers: Object.assign({ "Authorization": "Bearer " + token() },
+                           body ? { "Content-Type": "application/json" } : {}),
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+    credentials: "omit",
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  if (!res.ok) { const e = new Error((data && data.error) || res.status); e.status = res.status; throw e; }
+  return data;
+}
+
+const view = document.getElementById("view");
+const head = document.getElementById("head");
+let tab = "quests";
+
+function show(html) { view.innerHTML = html; }
+function fail(e) {
+  const hint = e.status === 401
+    ? "This tab has no token. Reopen the link <code>ghostr serve</code> printed."
+    : "The vault said no. Check the terminal running <code>ghostr serve</code>.";
+  show(`<div class="card"><div class="empty">${hint}</div></div>`);
+}
+
+/* ---------- quests ---------- */
+
+function questCard(q) {
+  let claim = "";
+  if (q.shape === "claim") {
+    claim = `<div class="claim">${esc(q.prompt)}</div>
+             <div class="tag">about ${esc(q.tail || "")}</div>`;
+  } else if (q.shape === "assertion") {
+    claim = `<div class="tag">the ghost says, about “${esc(q.prompt)}”</div>
+             <div class="claim quote">${esc(q.ghost_answer)}</div>`;
+  } else if (q.shape === "choice") {
+    claim = `<div class="tag">which would you pick?</div>
+             <div class="claim">The ghost has chosen one. It is sealed until you answer.</div>`;
+  } else if (q.shape === "gap") {
+    claim = `<div class="tag">fill the gap</div>
+             <div class="claim">${esc(q.prompt)}<span class="gap"></span>${esc(q.tail || "")}</div>`;
+  } else {
+    claim = `<div class="claim">This build cannot show this quest safely.</div>`;
+  }
+
+  let actions;
+  if (q.shape === "choice") {
+    const o = q.options || ["", ""];
+    actions = `<div class="row">
+        <button class="opt wide" data-act="confirm" data-note="A: ${esc(o[0])}">A · ${esc(o[0])}</button>
+        <button class="opt wide" data-act="confirm" data-note="B: ${esc(o[1])}">B · ${esc(o[1])}</button>
+      </div>
+      <div class="row" style="margin-top:.5rem">
+        <button data-act="unknown">Can't say</button>
+        <button data-act="void">Broken</button>
+      </div>`;
+  } else if (q.shape === "gap") {
+    actions = `<textarea data-field="text" placeholder="the missing words" autocapitalize="none"></textarea>
+      <div class="row">
+        <button class="primary" data-act="correct">Submit</button>
+        <button data-act="unknown">Can't say</button>
+        <button data-act="void">Broken</button>
+      </div>`;
+  } else {
+    actions = `<div class="row">
+        <button class="primary" data-act="confirm">Yes, that's me</button>
+        <button data-act="correct">Not quite</button>
+      </div>
+      <div class="row" style="margin-top:.5rem">
+        <button class="danger" data-act="reject">Wrong</button>
+        <button data-act="unknown">Can't say</button>
+        <button data-act="void">Broken</button>
+      </div>
+      <textarea class="hidden" data-field="text" placeholder="what you'd actually have said"></textarea>
+      <div class="row hidden" data-role="confirm-correct">
+        <button class="primary" data-act="correct!">Save correction</button>
+      </div>`;
+  }
+
+  return `<div class="card" data-id="${esc(q.id)}">
+      <div class="meta"><span class="tag">${esc(q.facet)}</span><span class="tag">${esc(q.kind)}</span></div>
+      ${claim}${actions}
+      <div data-role="result"></div>
+    </div>`;
+}
+
+function resultHtml(r) {
+  const bits = [];
+  if (r.decoy_confirmed) {
+    bits.push(`<div class="flag bad">That claim was a deliberate decoy, and you confirmed it.
+      Decoys exist to catch exactly this; the rate is published beside your score.</div>`);
+  }
+  if (r.suspiciously_fast) {
+    bits.push(`<div class="flag">Answered faster than a plausible read. Flagged, not discounted.</div>`);
+  }
+  if (r.ghost_choice) bits.push(`<div class="note">The ghost had picked ${esc(r.ghost_choice)}.</div>`);
+  if (r.ghost_answer) bits.push(`<div class="note">The ghost said: “${esc(r.ghost_answer)}”.</div>`);
+  bits.push(`<div class="note">It was ${pct(r.ghost_confidence)} sure ·
+    ${r.scored ? "counts toward fidelity" : "trains the ghost instead"}</div>`);
+  if (r.stored_correction) bits.push(`<div class="note">Your correction is now part of the corpus.</div>`);
+  return bits.join("");
+}
+
+async function loadQuests() {
+  head.textContent = "today";
+  let list;
+  try { list = await call("/api/quests"); } catch (e) { return fail(e); }
+
+  if (!list.length) {
+    show(`<div class="card"><div class="empty">No open quests.</div>
+      <button class="primary wide" id="issue">Issue today's</button></div>`);
+    document.getElementById("issue").onclick = async (ev) => {
+      ev.target.disabled = true;
+      try { await call("/api/quests/issue", "POST"); loadQuests(); }
+      catch (e) {
+        ev.target.disabled = false;
+        show(`<div class="card"><div class="empty">${
+          e.status === 422
+            ? "Nothing to ask yet — the ghost needs a persona and a day already has its quests.<br>Run <code>ghostr persona distill --adopt</code> first."
+            : "Could not issue."}</div></div>`);
+      }
+    };
+    return;
+  }
+  show(list.map(questCard).join(""));
+}
+
+view.addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const card = btn.closest(".card");
+  const id = card.getAttribute("data-id");
+  const area = card.querySelector('[textarea],[data-field="text"]');
+  let act = btn.getAttribute("data-act");
+
+  // "Not quite" reveals the box rather than sending an empty correction: a
+  // correction with no words would be the ghost putting text in its owner's
+  // mouth.
+  if (act === "correct" && area && area.classList.contains("hidden")) {
+    area.classList.remove("hidden");
+    card.querySelector('[data-role="confirm-correct"]').classList.remove("hidden");
+    area.focus();
+    return;
+  }
+  if (act === "correct!") act = "correct";
+
+  const text = btn.getAttribute("data-note") || (area ? area.value : "");
+  if ((act === "correct" || act === "void") && !text.trim()) { if (area) area.focus(); return; }
+
+  card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+  try {
+    const r = await call("/api/quests/" + encodeURIComponent(id) + "/answer", "POST",
+                         { verdict: act === "confirm" && btn.getAttribute("data-note") ? "confirm" : act,
+                           text: text || null });
+    card.querySelectorAll("button, textarea").forEach((n) => n.remove());
+    card.querySelector('[data-role="result"]').innerHTML = resultHtml(r);
+  } catch (e) {
+    card.querySelector('[data-role="result"]').innerHTML =
+      `<div class="flag bad">${e.status === 409 ? "Already answered, or past its window."
+        : e.status === 403 ? "That quest cannot reproduce its own commitment. Refused."
+        : "Could not record that."}</div>`;
+  }
+});
+
+/* ---------- fidelity ---------- */
+
+async function loadScore() {
+  head.textContent = "fidelity";
+  let s;
+  try { s = await call("/api/fidelity"); }
+  catch (e) {
+    if (e.status === 422) {
+      return show(`<div class="card"><div class="empty">
+        Not enough evidence yet.<br>A score over a handful of quests is noise, so there isn't one.
+        </div></div>`);
+    }
+    return fail(e);
+  }
+
+  const lo = s.interval[0], hi = s.interval[1];
+  const rows = (arr) => arr.map((r) =>
+    `<tr><td>${esc(r.label)}</td><td>${pct(r.score)} · ${r.sample_size}</td></tr>`).join("");
+
+  show(`<div class="card">
+      <div class="score">${pct(s.overall)}</div>
+      <div class="qual">over ${s.sample_size} held-out quest(s), last 30 days</div>
+      <div class="bar">
+        <i style="left:${pct(lo)};right:${pct(1 - hi)}"></i>
+        <u style="left:${pct(s.overall)}"></u>
+      </div>
+      <div class="qual">95% interval ${pct(lo)}–${pct(hi)} ·
+        ${s.converged ? "converged" : "not yet converged"}</div>
+      <div class="note">Brier ${s.brier.toFixed(3)} · ECE ${s.ece.toFixed(3)} · at chain seq ${s.committed_at_seq}</div>
+    </div>
+    ${s.by_facet.length ? `<div class="card"><div class="tag">by facet</div><table>${rows(s.by_facet)}</table></div>` : ""}
+    ${s.by_kind.length ? `<div class="card"><div class="tag">by kind</div><table>${rows(s.by_kind)}</table></div>` : ""}
+    <div class="card">
+      <div class="tag">integrity</div>
+      <table>
+        <tr><td>decoys confirmed</td><td>${pct(s.decoy_confirm_rate)} of ${s.decoy_sample_size}</td></tr>
+        <tr><td>fast verdicts</td><td>${pct(s.fast_verdict_rate)}</td></tr>
+        <tr><td>longest confirm streak</td><td>${s.longest_confirm_streak}</td></tr>
+        <tr><td>expired unanswered</td><td>${pct(s.expiry_rate)}</td></tr>
+      </table>
+      <div class="note">These travel with the number, always. 92% beside a 30% decoy-confirm rate is not 92%.</div>
+    </div>`);
+}
+
+/* ---------- vault ---------- */
+
+async function loadVault() {
+  head.textContent = "vault";
+  let s;
+  try { s = await call("/api/status"); } catch (e) { return fail(e); }
+  show(`<div class="card">
+      <table>
+        <tr><td>today</td><td>${esc(s.today)}</td></tr>
+        <tr><td>sealed days</td><td>${s.sealed_days}</td></tr>
+        <tr><td>persona</td><td>${s.persona == null ? "none yet" : "v" + s.persona}</td></tr>
+        <tr><td>open quests</td><td>${s.open_quests}</td></tr>
+        <tr><td>queued corrections</td><td>${s.queued_corrections}</td></tr>
+      </table>
+      <div class="note" style="overflow-wrap:anywhere">${esc(s.npub)}</div>
+      <div class="note">Everything here stayed on the machine running <code>ghostr serve</code>.</div>
+    </div>`);
+}
+
+/* ---------- tabs ---------- */
+
+document.querySelector("nav").addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-tab]");
+  if (!btn) return;
+  tab = btn.getAttribute("data-tab");
+  document.querySelectorAll("nav button").forEach((b) =>
+    b.setAttribute("aria-current", String(b === btn)));
+  render();
+});
+
+function render() {
+  show(`<div class="card"><div class="empty">…</div></div>`);
+  if (tab === "quests") loadQuests();
+  else if (tab === "score") loadScore();
+  else loadVault();
+}
+render();
+</script>
+</body>
+</html>
