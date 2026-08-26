@@ -223,7 +223,7 @@ pub const fn kind() -> SourceKindTag {
     SourceKindTag::MarkdownVault
 }
 
-/// The markdown vault source, as an [`IngestAdapter`].
+/// The markdown vault source, as an [`IngestAdapter`](crate::IngestAdapter).
 ///
 /// Holds the clock and the entropy source rather than reaching for them: nothing
 /// outside the composition root calls `SystemTime::now` or `OsRng`, which is what

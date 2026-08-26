@@ -60,6 +60,9 @@ pub enum Error {
     /// Distillation or retrieval failed.
     #[error(transparent)]
     Persona(#[from] ghostr_persona::Error),
+    /// Quest generation, verdict intake, or scoring refused.
+    #[error(transparent)]
+    Quests(#[from] ghostr_quests::Error),
 
     /// A model call failed, or the gate refused it.
     ///

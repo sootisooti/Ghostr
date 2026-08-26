@@ -1,6 +1,6 @@
 # Ghostr — Roadmap
 
-**Status:** Draft v0.3 · M0 and M1 shipped, M2 next
+**Status:** Draft v0.4 · M0 and M1 shipped, M2 under way
 
 Five milestones. The rule for all of them: **each one ships something a person
 would actually use, on its own, with no promise of the next.** If a milestone's
@@ -151,21 +151,41 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
       `persona show/distill/adopt/diff/history`. Voice, relationships, and
       routines are computed exactly; opinions, boundaries, and lore await the
       model path.
-- [ ] `ghostr-quests`, the `Scorer`, and the quest UI.
+- [x] `ghostr-quests`: answer commitments, holdout marking, decoys, priority
+      selection, verdict intake, the `PersonaDelta` queue, and the `Scorer` —
+      Wilson intervals, Brier + ECE, `IntegritySignals`, convergence.
+- [x] The loop, wired: `quest issue/list/show/answer`, `fidelity`, quest
+      storage with an immutable commitment column, and corrections that reach
+      distillation exactly once.
+- [ ] Generation for the three kinds that need a model to write their prompt:
+      `VoiceProbe`, `Counterfactual`, `Prediction`. Without one the generator
+      emits fewer quests of the kinds it can do well (SPEC Q7), which on a stock
+      build means `Cloze` and `FactRecall`.
+- [ ] The fast keyboard loop. `quest answer` works one quest at a time; a daily
+      ritual that takes 90 seconds gets done and one that takes 5 minutes does
+      not, and the current shape is closer to the second.
 
 **Exit criteria**
-- [ ] 30-day run on a synthetic corpus produces a rising fidelity score with a
-      correctly narrowing CI.
-- [ ] Held-out corrections provably never reach distillation — an integration
-      test asserts it, including via verdict-derived memories (SPEC Q18).
-- [ ] Answer commitments verify on every verdict; a mismatch rejects the verdict.
-- [ ] Decoys are detected and `decoy_confirm_rate` is surfaced beside the score.
+- [x] 30-day run on a synthetic corpus produces a fidelity score with a Wilson
+      interval, a per-facet breakdown, and integrity signals beside it
+      (`quest_flow::a_month_of_answered_quests_produces_a_qualified_score`).
+      Whether the score *rises* is a claim about a model that is not wired in
+      yet, so it is not asserted.
+- [x] Held-out corrections provably never reach distillation — the store
+      refuses the insert, the intake refuses to build the delta, and the
+      integration suite asserts the queue is non-empty before checking it.
+- [x] Answer commitments verify on every verdict; a mismatch rejects it. The
+      answer is recomputed from the quest, so an edited claim fails too.
+- [x] Decoys are detected and `decoy_confirm_rate` is surfaced beside the score,
+      and a confirmed decoy is called out on the spot rather than only in the
+      monthly aggregate.
 - [ ] Local-model quality benchmarked per `QuestKind`; the floor is documented
       and the pipeline degrades by kind rather than emitting bad quests (Q7).
-- [ ] `persona diff` between two versions is readable by someone who isn't a
+- [x] `persona diff` between two versions is readable by someone who isn't a
       developer.
 - [ ] Quest sets and verdicts are committed into the day's Merkle tree and
-      anchored.
+      anchored. Today a score names the chain `seq` it was computed at, which
+      dates it but does not commit the quests themselves.
 - [ ] Median time to answer 5 quests, measured on real users: under 2 minutes.
 
 **Not in M2:** relays, multi-device, publishing.

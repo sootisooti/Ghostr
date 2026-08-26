@@ -1,7 +1,8 @@
 # Ghostr — Threat Model
 
-**Status:** Draft v0.1 · nothing is implemented, so every "mitigated" below is a
-**design commitment, not a shipped control.** Status columns say which.
+**Status:** Draft v0.2 · M0, M1, and the M2 quest loop are implemented; relays
+and multi-device are not. Controls in those areas are **design commitments, not
+shipped controls**, and are marked "(planned)" where they are.
 
 Ghostr concentrates the most sensitive corpus a person owns — what they said,
 who they saw, how they felt, what they believe — into one encrypted store with an
@@ -64,11 +65,20 @@ Each: what they get, what they don't, what stops them, what's left over.
   sequence numbers, ciphertext lengths. That is the *shape* of the corpus — how
   much, how often, how many distinct people, when the user was active, when they
   travelled, when they stopped.
+- **The shape of the verification loop.** A quest row keeps its facet, its kind,
+  its difficulty, the ghost's stated confidence, its holdout and decoy flags,
+  its status, and how many seconds the user took to answer — all in the clear,
+  because filtering the scoreable set in SQL is what keeps a score from
+  decrypting the whole corpus to compute a number (SPEC I7). An analyst
+  therefore learns which parts of the user's identity the ghost was unsure of
+  and how engaged the user was, without learning a single claim.
 - Config, relay list, the public keys.
 - The chain of link hashes and any `.ots` proofs (these are public by design).
 
 **Does not get:** A2, A3, A6 content. All memory bodies, persona facets, entity
-names, and quest content are XChaCha20-Poly1305 ciphertext under the DEK.
+names, quest claims, and queued corrections are XChaCha20-Poly1305 ciphertext
+under the DEK. In particular the ghost's committed answer is inside the sealed
+body, not beside the commitment digest.
 
 **Mitigations (planned):**
 - Argon2id (m=256MiB, t=3, p=4) on the passphrase — a GPU farm gets a handful of
@@ -83,7 +93,9 @@ names, and quest content are XChaCha20-Poly1305 ciphertext under the DEK.
 **Residual risk — read this part:**
 - **The metadata leak is real and unfixed.** Encrypting the index would make the
   store unqueryable. A skilled analyst learns a great deal from activity shape
-  alone. Documented, not solved.
+  alone. Documented, not solved. The quest columns widen it: `facet` and
+  `confidence` in the clear say which parts of a person the ghost found hard,
+  which is a sharper signal than a row count.
 - A weak passphrase defeats everything above. Enforce a strength floor at `init`
   and offer a generated passphrase.
 - **Cold-boot / swap / hibernation:** an image captured while unlocked may contain
@@ -313,8 +325,8 @@ deserve the same scrutiny as crypto libraries and rarely get it.
 | Attack | Defence | Residual |
 | --- | --- | --- |
 | User rubber-stamps every quest | Decoy quests (~5%); `decoy_confirm_rate` published *inside* the attestation | A patient, careful liar who reads each quest and only confirms plausible ones is not detected |
-| Ghost is graded on its training data | 30% holdout, never fed back (SPEC I7); verdict-derived memories excluded from held-out evidence (Q18) | Corpus-level leakage is subtle; needs auditing |
-| Client peeks at the user's answer before scoring | Answer commitment stored before display (I6), included in the anchored Merkle tree | Requires trusting the binary — see T8 |
+| Ghost is graded on its training data | 30% holdout, never fed back (SPEC I7). Enforced twice: the intake builds no `PersonaDelta` for a held-out verdict, and the store's queue rejects one anyway. The correction's *memory* is filed under a source distillation does not read, closing the corpus-level path (Q18) | The holdout is only as good as the RNG that assigns it, and that seed lives on the same device as everything else |
+| Client peeks at the user's answer before scoring | Answer commitment stored before display (I6). The commitment, holdout, and decoy columns are immutable by trigger while the claim beside them is not, so a question edited between issue and verdict fails to reproduce its own commitment and the verdict is refused | Requires trusting the binary — see T8. The quest set is **not yet** in the anchored Merkle tree, so today the immutability is the database's, not Bitcoin's |
 | Backdating a good streak | Chain + OTS anchoring (§7): rewriting day 40 breaks every subsequent link | An attacker who never anchored can forge freely; verifiers must check anchor coverage, not just chain validity |
 | Third party impersonates someone's ghost | Ghost manifest signed by the identity key (§8.2); verifiers check the binding | Users who don't check the manifest are fooled by any npub with the right display name |
 | Cherry-picked attestation window | Attestation carries `window`, `sample_size`, CI, and chain `seq` | Nothing forces a user to publish their worst window |

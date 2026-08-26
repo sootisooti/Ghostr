@@ -4,14 +4,17 @@
 //! bare count or a bare "ok" invites a conclusion the evidence may not support,
 //! and this project's whole claim rests on its numbers being trustworthy.
 
+use ghostr_core::fidelity::{FidelityScore, ScoreWindow};
 use ghostr_core::footage::Thread;
 use ghostr_core::persona::{ChangeKind, PersonaDiff, PersonaModel};
+use ghostr_core::quest::{Quest, QuestKind};
 use ghostr_core::sensitivity::Sensitivity;
 use ghostr_engine::engine::{Engine, InitOutcome};
 use ghostr_engine::ops::CandidateVersion;
-use ghostr_engine::ops::{IngestReport, Recap, VerifyReport};
+use ghostr_engine::ops::{IngestReport, QuestIssue, Recap, VerifyReport};
 use ghostr_engine::sources::{SourcePlan, SyncReport};
 use ghostr_engine::types::{AnchorRecord, AnchorRecordState, Footage};
+use ghostr_quests::VerdictOutcome;
 use ghostr_store::sqlite::{EgressRecord, PersonaSummary, StoredSource};
 
 /// Renders the result of `init`.
@@ -645,4 +648,259 @@ const fn change_word(kind: ChangeKind) -> &'static str {
         ChangeKind::Contradicted => "contradicted",
         _ => "changed",
     }
+}
+
+/// Renders what `quest issue` produced.
+///
+/// Counts and ids, never the claims. The claims are the ghost's committed
+/// answers, and printing them at issue time would hand the user the answer key
+/// before they had answered anything (I6).
+pub(crate) fn quest_issue(issue: &QuestIssue) -> String {
+    let mut out = format!(
+        "issued {} quest(s) for {} under {}\n",
+        issue.issued.len(),
+        issue.date,
+        issue.persona_version.display_short()
+    );
+    if issue.expired > 0 {
+        out.push_str(&format!("closed {} stale quest(s) first\n", issue.expired));
+    }
+    if issue.issued.is_empty() {
+        out.push_str(
+            "  nothing to ask — the persona has no facet with evidence behind it yet\n  \
+             ingest more, seal a few days, then `ghostr persona distill`\n",
+        );
+    } else {
+        out.push_str("\n  answer them with `ghostr quest list`\n");
+    }
+    out
+}
+
+/// Renders the open quests.
+pub(crate) fn quest_list(quests: &[Quest]) -> String {
+    if quests.is_empty() {
+        return "no open quests\n  issue today's with `ghostr quest issue`".to_owned();
+    }
+
+    let mut out = format!("{} open quest(s)\n\n", quests.len());
+    for quest in quests {
+        out.push_str(&format!(
+            "{}  {:?}  {}\n",
+            quest.id.display_short(),
+            quest.facet,
+            quest.kind.variant_name()
+        ));
+        for line in question(&quest.kind).lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str("answer with `ghostr quest answer <id> confirm|correct|reject|unknown|void`\n");
+    out
+}
+
+/// Renders one quest in full.
+pub(crate) fn quest_show(quest: &Quest) -> String {
+    let mut out = format!(
+        "{}  {:?}  {}\n",
+        quest.id.display_short(),
+        quest.facet,
+        quest.kind.variant_name()
+    );
+    out.push_str(&format!(
+        "issued {} for {}, expires {}\n",
+        local(quest.issued_at),
+        quest.issued_for,
+        local(quest.expires_at)
+    ));
+    out.push_str(&format!(
+        "asked by {}, over {} memory(ies)\n",
+        quest.persona_version.display_short(),
+        quest.evidence.len()
+    ));
+    out.push_str(&format!("commitment {}\n", quest.answer_commitment.short()));
+    out.push_str(&format!("\n{}\n", question(&quest.kind)));
+
+    match &quest.verdict {
+        // Confidence is shown only after the verdict. Calibration is measurable
+        // only if the ghost's stated confidence did not influence the outcome it
+        // predicts (SPEC Q17).
+        Some(verdict) => out.push_str(&format!(
+            "\nanswered: {verdict:?}\n  the ghost was {:.0}% sure\n",
+            quest.confidence * 100.0
+        )),
+        None => out.push_str("\nunanswered\n"),
+    }
+    out
+}
+
+/// A timestamp in the offset it was recorded at.
+fn local(at: ghostr_core::time::Timestamp) -> String {
+    at.to_local().format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// What the user is asked, with nothing they should not see yet.
+///
+/// For `VoiceProbe` and `Counterfactual` the ghost's answer *is* the question,
+/// so it is shown. For the rest it is withheld: printing it would be handing
+/// over the answer key, which is the one thing that makes the score a lie.
+fn question(kind: &QuestKind) -> String {
+    match kind {
+        QuestKind::VoiceProbe {
+            prompt,
+            ghost_answer,
+        } => format!("on \"{prompt}\", the ghost says you'd say:\n\"{ghost_answer}\""),
+        QuestKind::Counterfactual {
+            scenario,
+            ghost_answer,
+        } => format!("in \"{scenario}\", the ghost says you'd:\n\"{ghost_answer}\""),
+        QuestKind::FactRecall { claim, as_of } => format!("{as_of}: {claim}"),
+        QuestKind::Prediction { claim, horizon } => format!("by {horizon}: {claim}"),
+        QuestKind::Preference { a, b, .. } => {
+            format!("A: {a}\nB: {b}\n(the ghost has picked one; it is sealed until you answer)")
+        }
+        QuestKind::Cloze {
+            context, redacted, ..
+        } => {
+            let start = redacted.start as usize;
+            let end = redacted.end as usize;
+            if start <= end
+                && end <= context.len()
+                && context.is_char_boundary(start)
+                && context.is_char_boundary(end)
+            {
+                format!("fill the gap: {}___{}", &context[..start], &context[end..])
+            } else {
+                // A span that does not land on a character boundary means the
+                // row is damaged. Showing the whole sentence would reveal the
+                // answer, so it shows nothing instead.
+                "fill the gap: (this quest's span is damaged; answer `void`)".to_owned()
+            }
+        }
+        other => format!("({} — this build cannot render it)", other.variant_name()),
+    }
+}
+
+/// Renders the result of a verdict.
+pub(crate) fn quest_answered(quest: &Quest, outcome: &VerdictOutcome) -> String {
+    let mut out = format!("recorded on {}\n", quest.id.display_short());
+    out.push_str(&format!(
+        "the ghost was {:.0}% sure\n",
+        quest.confidence * 100.0
+    ));
+
+    if outcome.decoy_confirmed {
+        // Said now, not only in the monthly aggregate. A user who is
+        // rubber-stamping benefits from finding out today.
+        out.push_str(
+            "\n  that claim was a deliberate decoy, and you confirmed it.\n  \
+             Decoys exist to catch exactly this; the rate is published beside your score.\n",
+        );
+    }
+    if outcome.suspiciously_fast {
+        out.push_str("\n  answered faster than a plausible read; flagged, not discounted\n");
+    }
+
+    out.push_str(&format!(
+        "\nscored: {}\n",
+        if outcome.scored {
+            "yes — this one counts toward fidelity"
+        } else {
+            "no — this one trains the ghost instead"
+        }
+    ));
+    if outcome.memory.is_some() {
+        out.push_str("your correction is now part of the corpus\n");
+    }
+    if outcome.delta.is_some() {
+        out.push_str("queued against the persona; applied at the next distillation\n");
+    }
+    out
+}
+
+/// Renders a fidelity score, never as a bare percentage.
+///
+/// The interval, the sample size, and the integrity signals travel with the
+/// number every time it is shown. 100% over four quests is noise, and 92% with
+/// a 30% decoy-confirm rate is a lie (SPEC §3.7).
+pub(crate) fn fidelity(score: &FidelityScore) -> String {
+    let pct = |x: f32| format!("{:.0}%", x * 100.0);
+    let window = match score.window {
+        ScoreWindow::Rolling30 => "last 30 days",
+        ScoreWindow::Rolling90 => "last 90 days",
+        _ => "all time",
+    };
+
+    let mut out = format!(
+        "{} over {} held-out quest(s), {}\n",
+        pct(score.overall),
+        score.sample_size,
+        window
+    );
+    out.push_str(&format!(
+        "95% interval {}–{}\n",
+        pct(score.confidence_interval.0),
+        pct(score.confidence_interval.1)
+    ));
+    out.push_str(&format!(
+        "calibration: Brier {:.3}, ECE {:.3} over {} pair(s)\n",
+        score.calibration.brier, score.calibration.ece, score.calibration.sample_size
+    ));
+    out.push_str(&format!("at chain seq {}\n", score.committed_at_seq));
+
+    if !score.by_facet.is_empty() {
+        out.push_str("\nBY FACET\n");
+        for (facet, slice) in &score.by_facet {
+            out.push_str(&format!(
+                "  {:<13} {} over {} ({}–{})\n",
+                format!("{facet:?}"),
+                pct(slice.score),
+                slice.sample_size,
+                pct(slice.confidence_interval.0),
+                pct(slice.confidence_interval.1)
+            ));
+        }
+    }
+
+    if !score.by_quest_kind.is_empty() {
+        out.push_str("\nBY KIND\n");
+        for (kind, slice) in &score.by_quest_kind {
+            out.push_str(&format!(
+                "  {:<15} {} over {}\n",
+                format!("{kind:?}"),
+                pct(slice.score),
+                slice.sample_size
+            ));
+        }
+    }
+
+    let i = &score.integrity;
+    out.push_str("\nINTEGRITY\n");
+    out.push_str(&format!(
+        "  decoys confirmed  {} of {}\n",
+        pct(i.decoy_confirm_rate),
+        i.decoy_sample_size
+    ));
+    out.push_str(&format!(
+        "  fast verdicts     {}\n",
+        pct(i.fast_verdict_rate)
+    ));
+    out.push_str(&format!(
+        "  longest confirm streak  {}\n",
+        i.longest_confirm_streak
+    ));
+    out.push_str(&format!(
+        "  expired unanswered      {}\n",
+        pct(i.expiry_rate)
+    ));
+
+    out.push_str(&format!(
+        "\nconverged: {}\n",
+        if score.converged {
+            "yes"
+        } else {
+            "not yet — see SPEC §5.3 for what is still missing"
+        }
+    ));
+    out
 }

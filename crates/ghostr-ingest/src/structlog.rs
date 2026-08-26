@@ -387,7 +387,7 @@ pub const fn kind() -> SourceKindTag {
     SourceKindTag::StructuredLog
 }
 
-/// The structured-log source, as an [`IngestAdapter`].
+/// The structured-log source, as an [`IngestAdapter`](crate::IngestAdapter).
 pub struct StructLogAdapter {
     clock: std::sync::Arc<dyn Clock>,
     rng: std::sync::Arc<dyn Rng>,

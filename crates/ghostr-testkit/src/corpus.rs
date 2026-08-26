@@ -216,10 +216,18 @@ impl CorpusGenerator {
             out.push((*text).to_owned());
         }
 
-        // Routines.
+        // Routines, written the way a recurring task actually appears in a
+        // vault: opened on its day and ticked off the next. Each reopening is a
+        // fresh thread under the same title, and that repetition is what makes
+        // "this keeps happening" countable from the corpus rather than asserted
+        // by the fixture. A routine mentioned only in prose would leave
+        // `GroundTruth::routines` promising something the pipeline cannot find.
         for (routine, cadence) in ROUTINES {
             if day.is_multiple_of(*cadence) {
+                out.push(format!("- [ ] {routine}"));
                 out.push(format!("Did the {routine} again. #routine"));
+            } else if day % *cadence == 1 {
+                out.push(format!("- [x] {routine}"));
             }
         }
 

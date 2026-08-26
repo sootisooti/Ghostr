@@ -1,6 +1,6 @@
 # Ghostr — Architecture
 
-**Status:** Draft v0.2 · M0 implemented; M1+ scaffolded
+**Status:** Draft v0.3 · M0 and M1 implemented; M2 under way
 **Companion to:** [SPEC.md](SPEC.md) (what it does) and
 [THREAT_MODEL.md](THREAT_MODEL.md) (what it defends against)
 
@@ -221,6 +221,10 @@ pub trait FootageStore: Send + Sync {
 }
 
 pub trait QuestStore  { /* issue, list_open, record_verdict, holdout_set */ }
+//   ^ `holdout_set` filters on clear `holdout`/`decoy`/`status` columns, which
+//     is why those three are not sealed: computing a score by decrypting every
+//     quest to find the held-out ones would open the corpus to draw a number.
+//     The `answer_commitment` column beside them is immutable by trigger.
 pub trait PersonaStore{ /* put_version, get_version, head, diff */ }
 pub trait BlobStore   { /* put (content-addressed), get, gc */ }
 pub trait VectorIndex { /* upsert, knn, remove, rebuild, unembedded */ }
@@ -442,6 +446,7 @@ sequenceDiagram
   Qu->>St: issue quests (commitments stored first)
   U->>Qu: verdicts
   Qu->>St: Memory(correction) + PersonaDelta
+  Note over Qu,St: a held-out correction gets the memory and no delta,\nunder a source distillation does not read (SPEC Q18)
   Qu->>St: FidelityScore (holdout only)
 ```
 

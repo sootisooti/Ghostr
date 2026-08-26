@@ -20,13 +20,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, meta_key};
+use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, meta_key};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -168,6 +168,7 @@ impl SqliteStore {
             (2, SCHEMA_V3),
             (3, SCHEMA_V4),
             (4, SCHEMA_V5),
+            (5, SCHEMA_V6),
         ] {
             if current <= from {
                 self.conn
@@ -2987,6 +2988,612 @@ pub struct PersonaSummary {
     pub is_head: bool,
 }
 
+/// Quests.
+impl SqliteStore {
+    /// Stores a freshly issued quest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::AppendOnlyViolation`](crate::Error::AppendOnlyViolation)
+    /// if the id exists.
+    pub fn put_quest(
+        &self,
+        dek: &Dek,
+        quest: &ghostr_core::quest::Quest,
+        nonce: [u8; 24],
+    ) -> crate::Result<()> {
+        let plaintext = encode_row(quest)?;
+        let aad = format!("quest:{}", quest.id);
+        let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO quest
+                 (id, issued_for, issued_at, persona_ordinal, facet, kind_tag,
+                  difficulty, confidence, answer_commitment, holdout, decoy,
+                  expires_at, status, body_nonce, body_sealed)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    quest.id.to_string(),
+                    quest.issued_for.to_string(),
+                    quest.issued_at.utc_millis(),
+                    i64::from(quest.persona_version.ordinal),
+                    format!("{:?}", quest.facet),
+                    quest.kind.variant_name(),
+                    f64::from(quest.difficulty),
+                    f64::from(quest.confidence),
+                    quest.answer_commitment.to_hex(),
+                    i64::from(quest.holdout),
+                    i64::from(quest.decoy),
+                    quest.expires_at.utc_millis(),
+                    status_tag(quest.status),
+                    nonce.to_vec(),
+                    sealed
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    crate::Error::AppendOnlyViolation { table: "quest" }
+                }
+                _ => crate::Error::Backend {
+                    operation: "insert quest",
+                },
+            })?;
+        Ok(())
+    }
+
+    /// Records a verdict against an open quest.
+    ///
+    /// Updates the sealed body and the answered columns. The commitment,
+    /// holdout, and decoy columns are protected by a trigger — a commitment
+    /// that could be rewritten after the answer would be worthless (I6).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn answer_quest(
+        &self,
+        dek: &Dek,
+        quest: &ghostr_core::quest::Quest,
+        answered_at: Timestamp,
+        answer_seconds: f32,
+        nonce: [u8; 24],
+    ) -> crate::Result<()> {
+        let plaintext = encode_row(quest)?;
+        let aad = format!("quest:{}", quest.id);
+        let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
+
+        // `status = 'open'` in the WHERE clause is what makes a verdict
+        // one-shot: a second answer matches no row rather than overwriting the
+        // first. The intake checks this too, but a check in the caller is a
+        // convention and a check here is a guarantee.
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE quest
+                 SET status = ?2, answered_at = ?3, answer_seconds = ?4,
+                     body_nonce = ?5, body_sealed = ?6
+                 WHERE id = ?1 AND status = 'open'",
+                params![
+                    quest.id.to_string(),
+                    status_tag(quest.status),
+                    answered_at.utc_millis(),
+                    f64::from(answer_seconds),
+                    nonce.to_vec(),
+                    sealed
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "answer quest",
+            })?;
+        if changed == 0 {
+            return Err(crate::Error::AppendOnlyViolation { table: "quest" });
+        }
+        Ok(())
+    }
+
+    /// One quest by id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn get_quest(
+        &self,
+        dek: &Dek,
+        id: ghostr_core::ids::QuestId,
+    ) -> crate::Result<Option<ghostr_core::quest::Quest>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, body_nonce, body_sealed FROM quest WHERE id = ?1",
+                [id.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| crate::Error::Backend {
+                operation: "read quest",
+            })?;
+        row.map(|(id, nonce, sealed)| open_quest(dek, &id, nonce, &sealed))
+            .transpose()
+    }
+
+    /// One quest by a full id or the short form `quest list` prints.
+    ///
+    /// The short form is the id's last eight hex digits, so the match is a
+    /// suffix match. An ambiguous suffix is an error rather than a pick: the
+    /// commands that take a quest id answer it, and answering the wrong one is
+    /// unrecoverable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails or
+    /// the needle matches more than one quest.
+    pub fn find_quest(
+        &self,
+        dek: &Dek,
+        needle: &str,
+    ) -> crate::Result<Option<ghostr_core::quest::Quest>> {
+        let suffix = needle.trim().trim_start_matches("qst:").to_lowercase();
+        if suffix.is_empty() {
+            return Ok(None);
+        }
+        let mut found = self.quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed FROM quest
+             WHERE id LIKE '%' || ?1 LIMIT 2",
+            params![suffix],
+        )?;
+        if found.len() > 1 {
+            return Err(crate::Error::Backend {
+                operation: "resolve an ambiguous quest id",
+            });
+        }
+        Ok(found.pop())
+    }
+
+    /// Quests matching a status, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn quests_with_status(
+        &self,
+        dek: &Dek,
+        status: ghostr_core::quest::QuestStatus,
+        limit: u32,
+    ) -> crate::Result<Vec<ghostr_core::quest::Quest>> {
+        self.quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed FROM quest
+             WHERE status = ?1 ORDER BY issued_at DESC LIMIT ?2",
+            params![status_tag(status), i64::from(limit)],
+        )
+    }
+
+    /// Answered, held-out, non-decoy quests — the only ones that may be scored.
+    ///
+    /// Filtered in SQL on the clear columns rather than after decryption. That
+    /// is why `holdout` and `decoy` are not sealed: a scoring pass that had to
+    /// decrypt every row to find the held-out ones would decrypt the whole
+    /// corpus to compute a number (SPEC I7).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn scoreable_quests(
+        &self,
+        dek: &Dek,
+        since: Timestamp,
+    ) -> crate::Result<Vec<(ghostr_core::quest::Quest, f32)>> {
+        self.timed_quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed, COALESCE(answer_seconds, 0.0)
+             FROM quest
+             WHERE holdout = 1 AND decoy = 0 AND status = 'answered'
+               AND issued_at >= ?1
+             ORDER BY issued_at",
+            params![since.utc_millis()],
+        )
+    }
+
+    /// Decoys and how long each took to answer, for the integrity signals.
+    ///
+    /// Answer times come back with them because the fast-verdict signal is
+    /// computed over decoys and held-out quests together. A decoy reported with
+    /// no time would read as instant, and would inflate the very signal the
+    /// decoys exist to make legible.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn decoy_quests(
+        &self,
+        dek: &Dek,
+        since: Timestamp,
+    ) -> crate::Result<Vec<(ghostr_core::quest::Quest, f32)>> {
+        self.timed_quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed, COALESCE(answer_seconds, 0.0)
+             FROM quest
+             WHERE decoy = 1 AND issued_at >= ?1
+             ORDER BY issued_at",
+            params![since.utc_millis()],
+        )
+    }
+
+    /// How many quests were issued for a day.
+    ///
+    /// Read from the clear `issued_for` column, so a caller can refuse to issue
+    /// a day twice without opening a single sealed row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn quests_issued_for(&self, date: NaiveDate) -> crate::Result<u32> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM quest WHERE issued_for = ?1",
+                [date.to_string()],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .map_err(|_| crate::Error::Backend {
+                operation: "count quests for a day",
+            })
+    }
+
+    /// Marks every open quest past its expiry as expired.
+    ///
+    /// Returns how many were closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn expire_quests(&self, now: Timestamp) -> crate::Result<u64> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE quest SET status = 'expired'
+                 WHERE status = 'open' AND expires_at < ?1",
+                [now.utc_millis()],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "expire quests",
+            })?;
+        Ok(changed as u64)
+    }
+
+    /// Runs a quest query returning rows with their answer times.
+    fn timed_quest_query(
+        &self,
+        dek: &Dek,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> crate::Result<Vec<(ghostr_core::quest::Quest, f32)>> {
+        let mut stmt = self.conn.prepare(sql).map_err(|_| crate::Error::Backend {
+            operation: "prepare timed quest query",
+        })?;
+        let rows = stmt
+            .query_map(params, |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, f64>(3)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "run timed quest query",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, nonce, sealed, seconds) = row.map_err(|_| crate::Error::Backend {
+                operation: "read timed quest row",
+            })?;
+            out.push((open_quest(dek, &id, nonce, &sealed)?, seconds as f32));
+        }
+        Ok(out)
+    }
+
+    /// Runs a quest query returning full rows.
+    fn quest_query(
+        &self,
+        dek: &Dek,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> crate::Result<Vec<ghostr_core::quest::Quest>> {
+        let mut stmt = self.conn.prepare(sql).map_err(|_| crate::Error::Backend {
+            operation: "prepare quest query",
+        })?;
+        let rows = stmt
+            .query_map(params, |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "run quest query",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, nonce, sealed) = row.map_err(|_| crate::Error::Backend {
+                operation: "read quest row",
+            })?;
+            out.push(open_quest(dek, &id, nonce, &sealed)?);
+        }
+        Ok(out)
+    }
+}
+
+/// Recent engagement with the quest loop.
+///
+/// Every field comes from clear columns — no row is decrypted to compute it.
+/// A number that required reading the whole corpus would mean opening the
+/// corpus to draw a progress bar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestEngagement {
+    /// Quests issued in the window.
+    pub issued: u32,
+    /// Of those, how many were answered.
+    pub answered: u32,
+    /// Answer times in seconds, ascending.
+    pub answer_seconds: Vec<f32>,
+    /// Days with at least one answer, most recent first.
+    pub answered_days: Vec<NaiveDate>,
+}
+
+/// The correction queue.
+impl SqliteStore {
+    /// Queues a correction against the persona.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::HoldoutLeak`](crate::Error::HoldoutLeak) if the delta
+    /// came from a held-out quest (I7).
+    pub fn queue_delta(
+        &self,
+        dek: &Dek,
+        delta: &ghostr_core::persona::PersonaDelta,
+        nonce: [u8; 24],
+    ) -> crate::Result<()> {
+        // I7, refused here rather than filtered at the far end. A held-out
+        // correction reaching distillation invalidates every score since, and a
+        // silent drop would hide the caller that produced it.
+        if delta.from_holdout {
+            return Err(crate::Error::HoldoutLeak);
+        }
+
+        let plaintext = encode_row(delta)?;
+        // The row id is assigned by SQLite, so the AAD binds to the memory the
+        // delta is about instead. Two deltas over one memory are legitimately
+        // interchangeable; a delta moved onto a *different* memory is not, and
+        // that is the swap this catches.
+        let aad = format!("persona_delta:{}", delta.memory_id);
+        let sealed = seal_row(dek, &plaintext, &nonce, aad.as_bytes())?;
+
+        self.conn
+            .execute(
+                "INSERT INTO persona_delta
+                 (facet, memory_id, queued_at, from_holdout, body_nonce, body_sealed)
+                 VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+                params![
+                    format!("{:?}", delta.facet),
+                    delta.memory_id.to_string(),
+                    delta.queued_at.utc_millis(),
+                    nonce.to_vec(),
+                    sealed
+                ],
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "queue delta",
+            })?;
+        Ok(())
+    }
+
+    /// Reads the queued corrections without clearing them.
+    ///
+    /// A proposal the user never adopts must not consume the corrections it was
+    /// built from — otherwise reviewing a diff and declining it would silently
+    /// throw away the user's own words.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn peek_deltas(&self, dek: &Dek) -> crate::Result<Vec<ghostr_core::persona::PersonaDelta>> {
+        self.read_deltas(dek, &self.conn)
+    }
+
+    /// Takes every queued correction, clearing the queue.
+    ///
+    /// Read and delete happen in one transaction. A delta applied twice would
+    /// let one answer count twice, and a delta deleted without being applied
+    /// would lose a correction the user took the trouble to write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read or the
+    /// delete fails.
+    pub fn drain_deltas(
+        &self,
+        dek: &Dek,
+    ) -> crate::Result<Vec<ghostr_core::persona::PersonaDelta>> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|_| crate::Error::Backend {
+                operation: "begin drain",
+            })?;
+
+        let rows = self.read_deltas(dek, &tx)?;
+
+        tx.execute("DELETE FROM persona_delta", [])
+            .map_err(|_| crate::Error::Backend {
+                operation: "clear delta queue",
+            })?;
+        tx.commit().map_err(|_| crate::Error::Backend {
+            operation: "commit drain",
+        })?;
+        Ok(rows)
+    }
+
+    /// Reads the queue through whichever connection or transaction is given.
+    fn read_deltas(
+        &self,
+        dek: &Dek,
+        conn: &rusqlite::Connection,
+    ) -> crate::Result<Vec<ghostr_core::persona::PersonaDelta>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT memory_id, body_nonce, body_sealed
+                 FROM persona_delta ORDER BY queued_at, id",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare delta read",
+            })?;
+        let mapped = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "query deltas",
+            })?;
+
+        let mut out = Vec::new();
+        for row in mapped {
+            let (memory_id, nonce, sealed) = row.map_err(|_| crate::Error::Backend {
+                operation: "read delta row",
+            })?;
+            let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+                operation: "delta nonce length",
+            })?;
+            let aad = format!("persona_delta:{memory_id}");
+            let plaintext = open_row(dek, &sealed, &nonce, aad.as_bytes()).map_err(|_| {
+                crate::Error::RowDecryptFailed {
+                    table: "persona_delta",
+                }
+            })?;
+            out.push(decode_row(&plaintext, "persona_delta")?);
+        }
+        Ok(out)
+    }
+
+    /// How many corrections are waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn queued_delta_count(&self) -> crate::Result<u32> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM persona_delta", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+            .map_err(|_| crate::Error::Backend {
+                operation: "count deltas",
+            })
+    }
+
+    /// Engagement with the quest loop since `since`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn quest_engagement(&self, since: Timestamp) -> crate::Result<QuestEngagement> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT status, COALESCE(answer_seconds, 0.0), issued_for
+                 FROM quest WHERE issued_at >= ?1",
+            )
+            .map_err(|_| crate::Error::Backend {
+                operation: "prepare engagement",
+            })?;
+        let rows = stmt
+            .query_map([since.utc_millis()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "query engagement",
+            })?;
+
+        let mut issued = 0u32;
+        let mut answer_seconds = Vec::new();
+        let mut days = std::collections::BTreeSet::new();
+        for row in rows {
+            let (status, seconds, day) = row.map_err(|_| crate::Error::Backend {
+                operation: "read engagement row",
+            })?;
+            issued = issued.saturating_add(1);
+            if status == "answered" {
+                answer_seconds.push(seconds as f32);
+                if let Ok(date) = day.parse::<NaiveDate>() {
+                    days.insert(date);
+                }
+            }
+        }
+        answer_seconds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+
+        Ok(QuestEngagement {
+            issued,
+            answered: u32::try_from(answer_seconds.len()).unwrap_or(u32::MAX),
+            answer_seconds,
+            answered_days: days.into_iter().rev().collect(),
+        })
+    }
+}
+
+/// Decrypts one quest row.
+fn open_quest(
+    dek: &Dek,
+    id: &str,
+    nonce: Vec<u8>,
+    sealed: &[u8],
+) -> crate::Result<ghostr_core::quest::Quest> {
+    let nonce: [u8; 24] = nonce.try_into().map_err(|_| crate::Error::Backend {
+        operation: "quest nonce length",
+    })?;
+    let aad = format!("quest:{id}");
+    let plaintext = open_row(dek, sealed, &nonce, aad.as_bytes())
+        .map_err(|_| crate::Error::RowDecryptFailed { table: "quest" })?;
+    decode_row(&plaintext, "quest")
+}
+
+/// The stored form of a quest status.
+const fn status_tag(status: ghostr_core::quest::QuestStatus) -> &'static str {
+    use ghostr_core::quest::QuestStatus;
+
+    match status {
+        QuestStatus::Open => "open",
+        QuestStatus::Answered => "answered",
+        QuestStatus::Expired => "expired",
+        QuestStatus::Voided => "voided",
+        // `QuestStatus` is `#[non_exhaustive]`; an unrecognised status must not
+        // land in a column a scoring query filters on, so it stores as a value
+        // no query selects.
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod vector_tests {
     use ghostr_core::ids::VectorId;
@@ -3585,5 +4192,481 @@ mod persona_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let s = store(dir.path());
         assert!(s.persona_head(&dek()).expect("head").is_none());
+    }
+}
+
+#[cfg(test)]
+mod quest_tests {
+    use ghostr_core::hash::{Tag, tagged_hash};
+    use ghostr_core::ids::{PersonaVersion, QuestId};
+    use ghostr_core::quest::{Facet, Quest, QuestKind, QuestStatus, Verdict};
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, store};
+    use super::*;
+
+    const CLAIM: &str = "you spent the afternoon arguing with the timezone code again";
+
+    fn quest(n: u8, holdout: bool, decoy: bool) -> Quest {
+        Quest {
+            id: QuestId::new(1_700_000_000_000 + u64::from(n), [n; 10]),
+            issued_for: chrono::NaiveDate::from_ymd_opt(2026, 3, 1).expect("date"),
+            issued_at: Timestamp::new(1_700_000_000_000 + i64::from(n), 0),
+            persona_version: PersonaVersion {
+                ordinal: 12,
+                content: tagged_hash(Tag::Persona, b"v12"),
+            },
+            kind: QuestKind::FactRecall {
+                claim: CLAIM.to_owned(),
+                as_of: chrono::NaiveDate::from_ymd_opt(2026, 3, 1).expect("date"),
+            },
+            facet: Facet::Routine,
+            difficulty: 0.4,
+            evidence: Vec::new(),
+            confidence: 0.7,
+            answer_commitment: tagged_hash(Tag::QuestAnswer, &[n]),
+            nonce: [n; 32],
+            holdout,
+            decoy,
+            expires_at: Timestamp::new(1_700_000_100_000, 0),
+            status: QuestStatus::Open,
+            verdict: None,
+        }
+    }
+
+    #[test]
+    fn a_quest_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+
+        let back = s.get_quest(&d, q.id).expect("get").expect("present");
+        assert_eq!(back.id, q.id);
+        assert_eq!(back.answer_commitment, q.answer_commitment);
+        assert_eq!(back.nonce, q.nonce);
+        assert!(matches!(back.kind, QuestKind::FactRecall { .. }));
+    }
+
+    /// I1. The claim is the ghost's committed answer; if it were readable from
+    /// the file, the pre-commitment would protect nothing.
+    #[test]
+    fn no_claim_text_appears_in_the_database_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let s = store(dir.path());
+            s.put_quest(&dek(), &quest(1, true, false), [1u8; 24])
+                .expect("put");
+        }
+        let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
+        assert!(
+            !raw.windows(CLAIM.len()).any(|w| w == CLAIM.as_bytes()),
+            "the claim survived into the database file in plaintext"
+        );
+    }
+
+    #[test]
+    fn the_wrong_key_cannot_read_a_quest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let q = quest(1, true, false);
+        s.put_quest(&dek(), &q, [1u8; 24]).expect("put");
+        let wrong = derive_dek(&[7u8; 32]);
+        assert!(matches!(
+            s.get_quest(&wrong, q.id),
+            Err(crate::Error::RowDecryptFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn issuing_the_same_id_twice_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("first");
+        assert!(matches!(
+            s.put_quest(&d, &q, [2u8; 24]),
+            Err(crate::Error::AppendOnlyViolation { .. })
+        ));
+    }
+
+    /// I6. A client that could rewrite the commitment after seeing the user's
+    /// verdict could make the ghost right every time.
+    #[test]
+    fn a_commitment_cannot_be_rewritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let q = quest(1, true, false);
+        s.put_quest(&dek(), &q, [1u8; 24]).expect("put");
+
+        let err = s.conn.execute(
+            "UPDATE quest SET answer_commitment = ?2 WHERE id = ?1",
+            params![
+                q.id.to_string(),
+                tagged_hash(Tag::QuestAnswer, b"x").to_hex()
+            ],
+        );
+        assert!(err.is_err(), "the trigger let the commitment be rewritten");
+    }
+
+    /// I7. Moving a quest out of the holdout after it was answered would let a
+    /// bad day be reclassified as training data.
+    #[test]
+    fn the_holdout_flag_cannot_be_flipped_after_issue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let q = quest(1, true, false);
+        s.put_quest(&dek(), &q, [1u8; 24]).expect("put");
+
+        assert!(
+            s.conn
+                .execute(
+                    "UPDATE quest SET holdout = 0 WHERE id = ?1",
+                    [q.id.to_string()],
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn answering_moves_the_quest_out_of_the_open_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+        assert_eq!(
+            s.quests_with_status(&d, QuestStatus::Open, 10)
+                .expect("open")
+                .len(),
+            1
+        );
+
+        let mut answered = q.clone();
+        answered.status = QuestStatus::Answered;
+        answered.verdict = Some(Verdict::Confirm);
+        s.answer_quest(
+            &d,
+            &answered,
+            Timestamp::new(1_700_000_050_000, 0),
+            9.5,
+            [2u8; 24],
+        )
+        .expect("answer");
+
+        assert!(
+            s.quests_with_status(&d, QuestStatus::Open, 10)
+                .expect("open")
+                .is_empty()
+        );
+        let back = s.get_quest(&d, q.id).expect("get").expect("present");
+        assert_eq!(back.verdict, Some(Verdict::Confirm));
+    }
+
+    /// A verdict is one-shot. A second one would overwrite the first, which
+    /// makes the score a function of how many times the user pressed the button.
+    #[test]
+    fn a_second_verdict_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+
+        let mut answered = q.clone();
+        answered.status = QuestStatus::Answered;
+        answered.verdict = Some(Verdict::Confirm);
+        let at = Timestamp::new(1_700_000_050_000, 0);
+        s.answer_quest(&d, &answered, at, 9.5, [2u8; 24])
+            .expect("first");
+
+        answered.verdict = Some(Verdict::Unknown);
+        assert!(matches!(
+            s.answer_quest(&d, &answered, at, 1.0, [3u8; 24]),
+            Err(crate::Error::AppendOnlyViolation { .. })
+        ));
+        assert_eq!(
+            s.get_quest(&d, q.id)
+                .expect("get")
+                .expect("present")
+                .verdict,
+            Some(Verdict::Confirm)
+        );
+    }
+
+    #[test]
+    fn answering_an_unknown_quest_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let mut q = quest(9, true, false);
+        q.status = QuestStatus::Answered;
+        assert!(matches!(
+            s.answer_quest(&dek(), &q, Timestamp::new(1, 0), 1.0, [1u8; 24]),
+            Err(crate::Error::AppendOnlyViolation { .. })
+        ));
+    }
+
+    /// I7. Anything but an answered, held-out, non-decoy quest is either
+    /// training data or a trap, and scoring it makes the number a lie.
+    #[test]
+    fn only_answered_holdout_non_decoys_are_scoreable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let at = Timestamp::new(1_700_000_050_000, 0);
+
+        // Answered and held out: the one that counts.
+        let good = quest(1, true, false);
+        // Answered but trainable: excluded, it is the ghost's own study material.
+        let trainable = quest(2, false, false);
+        // Answered decoy: excluded, it is deliberately wrong.
+        let decoy = quest(3, true, true);
+        // Held out but never answered: excluded, there is no verdict to score.
+        let unanswered = quest(4, true, false);
+
+        for q in [&good, &trainable, &decoy, &unanswered] {
+            s.put_quest(&d, q, [q.nonce[0]; 24]).expect("put");
+        }
+        for q in [&good, &trainable, &decoy] {
+            let mut a = q.clone();
+            a.status = QuestStatus::Answered;
+            a.verdict = Some(Verdict::Confirm);
+            s.answer_quest(&d, &a, at, 12.0, [q.nonce[0] + 100; 24])
+                .expect("answer");
+        }
+
+        let scoreable = s
+            .scoreable_quests(&d, Timestamp::new(0, 0))
+            .expect("scoreable");
+        assert_eq!(scoreable.len(), 1);
+        assert_eq!(scoreable[0].0.id, good.id);
+        assert!((scoreable[0].1 - 12.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn decoys_are_listed_for_the_rubber_stamp_signal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        s.put_quest(&d, &quest(1, true, false), [1u8; 24])
+            .expect("plain");
+        s.put_quest(&d, &quest(2, true, true), [2u8; 24])
+            .expect("decoy");
+
+        let decoys = s.decoy_quests(&d, Timestamp::new(0, 0)).expect("decoys");
+        assert_eq!(decoys.len(), 1);
+        assert!(decoys[0].0.decoy);
+    }
+
+    #[test]
+    fn expiry_closes_only_open_quests_past_their_deadline() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let stale = quest(1, true, false);
+        let mut fresh = quest(2, true, false);
+        fresh.expires_at = Timestamp::new(1_800_000_000_000, 0);
+        s.put_quest(&d, &stale, [1u8; 24]).expect("stale");
+        s.put_quest(&d, &fresh, [2u8; 24]).expect("fresh");
+
+        let closed = s
+            .expire_quests(Timestamp::new(1_700_000_200_000, 0))
+            .expect("expire");
+        assert_eq!(closed, 1);
+        assert_eq!(
+            s.quests_with_status(&d, QuestStatus::Expired, 10)
+                .expect("expired")
+                .len(),
+            1
+        );
+        // Idempotent: a second sweep finds nothing left to close.
+        assert_eq!(
+            s.expire_quests(Timestamp::new(1_700_000_200_000, 0))
+                .expect("again"),
+            0
+        );
+    }
+
+    /// An expired quest is closed. Accepting a verdict afterwards would let a
+    /// user answer a month of backlog in one sitting and call it fidelity.
+    #[test]
+    fn an_expired_quest_no_longer_accepts_a_verdict() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+        s.expire_quests(Timestamp::new(1_700_000_200_000, 0))
+            .expect("expire");
+
+        let mut answered = q.clone();
+        answered.status = QuestStatus::Answered;
+        answered.verdict = Some(Verdict::Confirm);
+        assert!(matches!(
+            s.answer_quest(
+                &d,
+                &answered,
+                Timestamp::new(1_700_000_300_000, 0),
+                2.0,
+                [2u8; 24]
+            ),
+            Err(crate::Error::AppendOnlyViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn engagement_counts_without_decrypting_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        for n in 1..=3u8 {
+            s.put_quest(&d, &quest(n, true, false), [n; 24])
+                .expect("put");
+        }
+        let mut answered = quest(1, true, false);
+        answered.status = QuestStatus::Answered;
+        answered.verdict = Some(Verdict::Confirm);
+        s.answer_quest(
+            &d,
+            &answered,
+            Timestamp::new(1_700_000_050_000, 0),
+            8.0,
+            [9u8; 24],
+        )
+        .expect("answer");
+
+        let e = s
+            .quest_engagement(Timestamp::new(0, 0))
+            .expect("engagement");
+        assert_eq!(e.issued, 3);
+        assert_eq!(e.answered, 1);
+        assert_eq!(e.answer_seconds, vec![8.0]);
+        assert_eq!(
+            e.answered_days,
+            vec![chrono::NaiveDate::from_ymd_opt(2026, 3, 1).expect("date")]
+        );
+    }
+
+    #[test]
+    fn scoreable_respects_the_window_start() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+        let mut a = q.clone();
+        a.status = QuestStatus::Answered;
+        a.verdict = Some(Verdict::Confirm);
+        s.answer_quest(&d, &a, Timestamp::new(1_700_000_050_000, 0), 5.0, [2u8; 24])
+            .expect("answer");
+
+        assert!(
+            s.scoreable_quests(&d, Timestamp::new(1_800_000_000_000, 0))
+                .expect("after")
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use ghostr_core::ids::MemoryId;
+    use ghostr_core::persona::PersonaDelta;
+    use ghostr_core::quest::Facet;
+    use ghostr_crypto::kdf::derive_dek;
+
+    use super::tests_support::{dek, store};
+    use super::*;
+
+    fn delta(n: u8, from_holdout: bool) -> PersonaDelta {
+        PersonaDelta {
+            facet: Facet::Opinion,
+            memory_id: MemoryId::new(u64::from(n), [n; 10]),
+            correction_id: Some(MemoryId::new(100 + u64::from(n), [n; 10])),
+            weight: 0.1,
+            queued_at: Timestamp::new(1_700_000_000_000 + i64::from(n), 0),
+            from_holdout,
+        }
+    }
+
+    #[test]
+    fn a_delta_round_trips_through_the_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let queued = delta(1, false);
+        s.queue_delta(&d, &queued, [1u8; 24]).expect("queue");
+
+        let drained = s.drain_deltas(&d).expect("drain");
+        assert_eq!(drained, vec![queued]);
+    }
+
+    /// I7. A held-out correction that reached distillation would mean the score
+    /// is computed over data the model trained on.
+    #[test]
+    fn a_held_out_delta_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        assert!(matches!(
+            s.queue_delta(&dek(), &delta(1, true), [1u8; 24]),
+            Err(crate::Error::HoldoutLeak)
+        ));
+        assert_eq!(s.queued_delta_count().expect("count"), 0);
+    }
+
+    /// A delta applied twice would let one answer count twice.
+    #[test]
+    fn draining_empties_the_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        s.queue_delta(&d, &delta(1, false), [1u8; 24]).expect("a");
+        s.queue_delta(&d, &delta(2, false), [2u8; 24]).expect("b");
+        assert_eq!(s.queued_delta_count().expect("count"), 2);
+
+        assert_eq!(s.drain_deltas(&d).expect("drain").len(), 2);
+        assert_eq!(s.queued_delta_count().expect("count"), 0);
+        assert!(s.drain_deltas(&d).expect("again").is_empty());
+    }
+
+    #[test]
+    fn deltas_drain_in_the_order_they_were_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        s.queue_delta(&d, &delta(3, false), [3u8; 24]).expect("c");
+        s.queue_delta(&d, &delta(1, false), [1u8; 24]).expect("a");
+
+        let drained = s.drain_deltas(&d).expect("drain");
+        assert_eq!(drained[0].memory_id, MemoryId::new(1, [1u8; 10]));
+    }
+
+    #[test]
+    fn the_wrong_key_cannot_read_the_queue() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        s.queue_delta(&dek(), &delta(1, false), [1u8; 24])
+            .expect("queue");
+        let wrong = derive_dek(&[7u8; 32]);
+        assert!(matches!(
+            s.drain_deltas(&wrong),
+            Err(crate::Error::RowDecryptFailed { .. })
+        ));
+    }
+
+    /// A failed drain must not eat the queue: the corrections are the user's own
+    /// words and there is nowhere else to recover them from.
+    #[test]
+    fn a_failed_drain_leaves_the_queue_intact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        s.queue_delta(&d, &delta(1, false), [1u8; 24])
+            .expect("queue");
+        assert!(s.drain_deltas(&derive_dek(&[7u8; 32])).is_err());
+        assert_eq!(s.queued_delta_count().expect("count"), 1);
+        assert_eq!(s.drain_deltas(&d).expect("drain").len(), 1);
     }
 }

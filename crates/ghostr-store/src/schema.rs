@@ -257,6 +257,71 @@ BEGIN
 END;
 ";
 
+/// Migration to schema version 6: quests.
+///
+/// The claim, the committed answer, and any correction are sealed — a quest
+/// states something about its owner and a correction is their own words (I1).
+/// The commitment digest, the holdout flag, and the decoy flag are in the clear
+/// because they are what the scorer filters on, and a scoring pass that had to
+/// decrypt every row to find the held-out ones would decrypt the whole corpus
+/// to compute a number.
+///
+/// `answer_commitment` is stored at issue time and never updated. The trigger
+/// enforces that: a commitment that could be rewritten after the user answered
+/// would make the pre-commitment worthless (I6).
+pub const SCHEMA_V6: &str = r"
+CREATE TABLE quest (
+    id                TEXT PRIMARY KEY,
+    issued_for        TEXT NOT NULL,
+    issued_at         INTEGER NOT NULL,
+    persona_ordinal   INTEGER NOT NULL,
+    facet             TEXT NOT NULL,
+    kind_tag          TEXT NOT NULL,
+    difficulty        REAL NOT NULL,
+    confidence        REAL NOT NULL,
+    answer_commitment TEXT NOT NULL,
+    holdout           INTEGER NOT NULL,
+    decoy             INTEGER NOT NULL,
+    expires_at        INTEGER NOT NULL,
+    status            TEXT NOT NULL,
+    answered_at       INTEGER,
+    answer_seconds    REAL,
+    body_nonce        BLOB NOT NULL,
+    body_sealed       BLOB NOT NULL
+) STRICT;
+
+CREATE INDEX quest_issued_for_idx ON quest(issued_for);
+CREATE INDEX quest_status_idx ON quest(status);
+CREATE INDEX quest_holdout_idx ON quest(holdout, decoy);
+
+-- The commitment is the whole guarantee. Rewriting one after the fact would
+-- let a client adjust the ghost's answer once it had seen the user's.
+CREATE TRIGGER quest_commitment_is_immutable
+BEFORE UPDATE OF answer_commitment, holdout, decoy, persona_ordinal, issued_at
+ON quest
+BEGIN
+    SELECT RAISE(ABORT, 'a quest commitment is fixed at issue');
+END;
+
+-- Corrections waiting for the next distillation. Drained, not accumulated
+-- forever: a delta applied twice would let one answer count twice.
+--
+-- `from_holdout` is a column rather than an assumption, and the CHECK is the
+-- last line of defence for I7: a held-out correction that reached distillation
+-- would mean the fidelity score is computed over data the model trained on.
+CREATE TABLE persona_delta (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    facet        TEXT NOT NULL,
+    memory_id    TEXT NOT NULL,
+    queued_at    INTEGER NOT NULL,
+    from_holdout INTEGER NOT NULL CHECK (from_holdout = 0),
+    body_nonce   BLOB NOT NULL,
+    body_sealed  BLOB NOT NULL
+) STRICT;
+
+CREATE INDEX persona_delta_queued_idx ON persona_delta(queued_at);
+";
+
 /// One migration step, for the release notes and the migration log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -311,6 +376,12 @@ pub const MIGRATIONS: &[Migration] = &[
         from: 4,
         to: 5,
         description: "append-only persona versions",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 5,
+        to: 6,
+        description: "quests with immutable answer commitments, and the correction queue",
         touches_commitments: false,
     },
 ];

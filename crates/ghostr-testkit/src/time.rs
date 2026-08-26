@@ -7,9 +7,14 @@ use ghostr_core::time::{Clock, Rng, Timestamp};
 ///
 /// Lets a test walk a chain across a month, a DST boundary, or a westward
 /// flight in microseconds.
-#[derive(Debug)]
+///
+/// Cloning shares the time rather than copying it, so a test can keep a handle
+/// on the clock it handed to an engine — otherwise it could set the time once
+/// and never move it again, which rules out every case that only appears when
+/// time passes: an expiry, a streak, a rolling window.
+#[derive(Debug, Clone)]
 pub struct FixedClock {
-    now: std::sync::Mutex<Timestamp>,
+    now: std::sync::Arc<std::sync::Mutex<Timestamp>>,
     tz: Tz,
 }
 
@@ -18,7 +23,7 @@ impl FixedClock {
     #[must_use]
     pub fn at(now: Timestamp, tz: Tz) -> Self {
         Self {
-            now: std::sync::Mutex::new(now),
+            now: std::sync::Arc::new(std::sync::Mutex::new(now)),
             tz,
         }
     }

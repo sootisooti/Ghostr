@@ -4,8 +4,8 @@
 //! encrypted store. There is no journal file: Ghostr never writes a plaintext
 //! entry to disk, not even its own (I1). That is why
 //! [`SourceKind::Journal`](ghostr_core::source::SourceKind::Journal) carries no
-//! location, and why [`JournalAdapter::pull`] returns an empty batch — the
-//! journal is a push source with nothing to poll.
+//! location, and why [`JournalAdapter`]'s [`pull`](crate::IngestAdapter::pull)
+//! returns an empty batch — the journal is a push source with nothing to poll.
 //!
 //! # Importing a running journal
 //!
@@ -275,13 +275,13 @@ pub const fn kind() -> SourceKindTag {
     SourceKindTag::Journal
 }
 
-/// The journal source, as an [`IngestAdapter`].
+/// The journal source, as an [`IngestAdapter`](crate::IngestAdapter).
 ///
 /// A push source: entries arrive when the user makes them, so there is nothing
-/// to poll and [`JournalAdapter::pull`] returns an empty batch. It is registered
-/// all the same, because `ghostr source list` should show the journal alongside
-/// everything else rather than leaving the user to wonder where their entries
-/// are accounted for.
+/// to poll and [`pull`](crate::IngestAdapter::pull) returns an empty batch. It is
+/// registered all the same, because `ghostr source list` should show the journal
+/// alongside everything else rather than leaving the user to wonder where their
+/// entries are accounted for.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JournalAdapter;
 
