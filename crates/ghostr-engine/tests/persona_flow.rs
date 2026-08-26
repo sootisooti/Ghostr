@@ -91,6 +91,13 @@ fn a_month_of_notes_distils_into_a_persona() {
     assert!(!candidate.model.facets.voice.exemplars.is_empty());
     // The planted cast turns up.
     assert!(!candidate.model.facets.relationships.is_empty());
+    // So do the planted routines. A recurring task reopens under the same title
+    // every few days, and counting those reopenings is what makes "this keeps
+    // happening" evidence rather than an assertion.
+    assert!(
+        !candidate.model.facets.routines.is_empty(),
+        "the corpus plants routines; distillation must find them"
+    );
     // And the facets a model would supply are empty rather than guessed.
     assert!(candidate.model.facets.opinions.is_empty());
 }

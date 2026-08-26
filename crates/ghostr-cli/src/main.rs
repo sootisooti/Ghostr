@@ -105,6 +105,17 @@ enum Command {
     #[command(subcommand)]
     Footage(FootageCommand),
 
+    /// The daily verification loop.
+    #[command(subcommand)]
+    Quest(QuestCommand),
+
+    /// How well the ghost matches you, and what qualifies the number.
+    Fidelity {
+        /// The window: `30`, `90`, or `all`.
+        #[arg(long, default_value = "30")]
+        window: String,
+    },
+
     /// Submit the chain tip to OpenTimestamps. The only networked command.
     Anchor,
 
@@ -191,6 +202,43 @@ enum PersonaCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum QuestCommand {
+    /// Generate a day's quests, committing to every answer first.
+    Issue {
+        /// Which day: `today`, `yesterday`, or `YYYY-MM-DD`.
+        #[arg(default_value = "today")]
+        date: String,
+    },
+    /// Quests awaiting your verdict.
+    List {
+        /// How many to show.
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+    },
+    /// One quest in full.
+    Show {
+        /// The quest, by its full or short id.
+        id: String,
+    },
+    /// Answer a quest.
+    Answer {
+        /// The quest, by its full or short id.
+        id: String,
+        /// `confirm`, `correct`, `reject`, `unknown`, or `void`.
+        verdict: String,
+        /// The correction, the rejection note, or the reason it was broken.
+        ///
+        /// Required by `correct` and `void`, optional for `reject`, and
+        /// meaningless to the rest.
+        #[arg(long)]
+        text: Option<String>,
+        /// For `correct`: how far off the ghost was — `minor` or `major`.
+        #[arg(long, default_value = "minor")]
+        severity: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum EgressCommand {
     /// Every decision the gate made, newest first.
     Log {
@@ -249,6 +297,16 @@ fn run(cli: Cli) -> Result<()> {
         Command::Persona(PersonaCommand::Adopt) => cmd_persona_adopt(&dir),
         Command::Persona(PersonaCommand::Diff { from, to }) => cmd_persona_diff(&dir, from, to),
         Command::Persona(PersonaCommand::History { limit }) => cmd_persona_history(&dir, limit),
+        Command::Quest(QuestCommand::Issue { date }) => cmd_quest_issue(&dir, &date),
+        Command::Quest(QuestCommand::List { limit }) => cmd_quest_list(&dir, limit),
+        Command::Quest(QuestCommand::Show { id }) => cmd_quest_show(&dir, &id),
+        Command::Quest(QuestCommand::Answer {
+            id,
+            verdict,
+            text,
+            severity,
+        }) => cmd_quest_answer(&dir, &id, &verdict, text.as_deref(), &severity),
+        Command::Fidelity { window } => cmd_fidelity(&dir, &window),
         Command::Footage(FootageCommand::List) => cmd_footage_list(&dir),
         Command::Footage(FootageCommand::Show { id }) => cmd_footage_show(&dir, id),
         Command::Anchor => cmd_anchor(&dir),
@@ -386,6 +444,119 @@ fn cmd_memoria(dir: &std::path::Path, date: &str, dry_run: bool, remote: bool) -
             "  {} claim(s) dropped for want of evidence",
             outcome.dropped_claims
         );
+    }
+    Ok(())
+}
+
+fn cmd_quest_issue(dir: &std::path::Path, date: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let day = engine.resolve_date(date)?;
+    let issue = ops::issue_quests(&engine, day).context("issuing quests")?;
+    println!("{}", render::quest_issue(&issue));
+    Ok(())
+}
+
+fn cmd_quest_list(dir: &std::path::Path, limit: u32) -> Result<()> {
+    let engine = open(dir)?;
+    let quests = ops::open_quests(&engine, limit).context("reading open quests")?;
+    println!("{}", render::quest_list(&quests));
+    Ok(())
+}
+
+fn cmd_quest_show(dir: &std::path::Path, id: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let quest = ops::find_quest(&engine, id).context("reading the quest")?;
+    println!("{}", render::quest_show(&quest));
+    Ok(())
+}
+
+fn cmd_quest_answer(
+    dir: &std::path::Path,
+    id: &str,
+    verdict: &str,
+    text: Option<&str>,
+    severity: &str,
+) -> Result<()> {
+    // Parsed before the vault is opened: a typo in the verdict is the user's to
+    // fix, and making them wait through a key derivation to hear about it is
+    // rude.
+    let parsed = parse_verdict(verdict, text, severity)?;
+    let engine = open(dir)?;
+    let quest = ops::find_quest(&engine, id).context("reading the quest")?;
+    let outcome = ops::answer_quest(&engine, quest.id, parsed).context("recording the verdict")?;
+    println!("{}", render::quest_answered(&quest, &outcome));
+    Ok(())
+}
+
+/// Turns the CLI's words into a [`Verdict`](ghostr_core::quest::Verdict).
+///
+/// `correct` and `void` refuse to proceed without their text rather than
+/// substituting an empty string: a correction with no words is the ghost
+/// putting text in its owner's mouth, and a void with no reason cannot be
+/// reviewed later.
+fn parse_verdict(
+    verdict: &str,
+    text: Option<&str>,
+    severity: &str,
+) -> Result<ghostr_core::quest::Verdict> {
+    use ghostr_core::quest::{Severity, Verdict};
+
+    let words = |what: &str| -> Result<String> {
+        match text.map(str::trim).filter(|t| !t.is_empty()) {
+            Some(t) => Ok(t.to_owned()),
+            None => bail!("`{what}` needs --text"),
+        }
+    };
+
+    Ok(match verdict.trim().to_lowercase().as_str() {
+        "confirm" | "yes" => Verdict::Confirm,
+        "correct" => Verdict::Correct {
+            correction: words("correct")?,
+            severity: match severity.trim().to_lowercase().as_str() {
+                "major" => Severity::Major,
+                "minor" => Severity::Minor,
+                other => bail!("`{other}` is not a severity; try `minor` or `major`"),
+            },
+        },
+        "reject" | "no" => Verdict::Reject {
+            note: text
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned),
+        },
+        "unknown" | "dunno" => Verdict::Unknown,
+        "void" | "broken" => Verdict::Void {
+            reason: words("void")?,
+        },
+        other => {
+            bail!("`{other}` is not a verdict; try confirm, correct, reject, unknown, or void")
+        }
+    })
+}
+
+fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
+    use ghostr_core::fidelity::ScoreWindow;
+
+    let engine = open(dir)?;
+    let window = match window.trim().to_lowercase().as_str() {
+        "30" | "30d" => ScoreWindow::Rolling30,
+        "90" | "90d" => ScoreWindow::Rolling90,
+        "all" | "alltime" => ScoreWindow::AllTime,
+        other => bail!("`{other}` is not a window; try `30`, `90`, or `all`"),
+    };
+
+    match ops::fidelity(&engine, window) {
+        Ok(score) => println!("{}", render::fidelity(&score)),
+        // Not an error the user did anything wrong to cause. A new vault has
+        // nothing to score yet, and saying so beats a stack of context.
+        Err(ghostr_engine::Error::Quests(ghostr_quests::Error::InsufficientSample {
+            have,
+            need,
+        })) => println!(
+            "not enough evidence yet: {have} scored quest(s), need {need}
+               answer today's with `ghostr quest list`"
+        ),
+        Err(e) => return Err(anyhow::Error::new(e).context("scoring")),
     }
     Ok(())
 }

@@ -46,4 +46,4 @@ pub use generate::{
     DeterministicGenerator, QuestContext, QuestGenerator, commit_answer, verify_commitment,
 };
 pub use score::{ScoredQuest, Scorer, StandardScorer};
-pub use verdict::{StandardIntake, VerdictIntake, VerdictOutcome};
+pub use verdict::{CorrectionSlot, StandardIntake, VerdictIntake, VerdictOutcome};

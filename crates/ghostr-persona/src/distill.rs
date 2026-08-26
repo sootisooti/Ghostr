@@ -92,7 +92,7 @@ pub fn distill(
         });
     }
 
-    let facets = Facets {
+    let mut facets = Facets {
         voice: crate::voice::profile(corpus.first_party),
         // A model's work. Carried forward from the prior version rather than
         // dropped, so a distillation without a model preserves what an earlier
@@ -105,6 +105,7 @@ pub fn distill(
             .unwrap_or_default(),
         lore: prior.map(|p| p.facets.lore.clone()).unwrap_or_default(),
     };
+    apply_deltas(&mut facets, deltas);
 
     let model = PersonaModel {
         version: PersonaVersion {
@@ -120,6 +121,54 @@ pub fn distill(
 
     validate(&model)?;
     Ok(model)
+}
+
+/// Applies queued corrections to the carried-forward facets.
+///
+/// A correction lowers `strength` and records what contradicted it; it never
+/// deletes a claim. One answer is not allowed to overturn a stance backed by
+/// fifty memories — the weight has to genuinely shift first, which takes
+/// repeated corrections across several distillations (SPEC §4.5).
+///
+/// Only opinions and lore are touched. Voice, relationships, and routines are
+/// re-derived from the corpus on every distillation, so writing a correction
+/// into them would be erased by the next run; those facets change when the
+/// corpus does — and a correction *is* corpus, because the memory it produced
+/// entered it.
+fn apply_deltas(facets: &mut Facets, deltas: &[PersonaDelta]) {
+    use ghostr_core::quest::Facet;
+
+    for delta in deltas {
+        match delta.facet {
+            Facet::Opinion => {
+                for stance in facets
+                    .opinions
+                    .iter_mut()
+                    .filter(|s| s.evidence.contains(&delta.memory_id))
+                {
+                    stance.strength = (stance.strength - delta.weight).clamp(0.0, 1.0);
+                    // Held explicitly rather than resolved away: a stance that
+                    // has been argued with is a different thing from one that
+                    // has merely faded, and the diff should say which.
+                    if let Some(correction) = delta.correction_id
+                        && !stance.contradicted_by.contains(&correction)
+                    {
+                        stance.contradicted_by.push(correction);
+                    }
+                }
+            }
+            Facet::Lore => {
+                for fact in facets
+                    .lore
+                    .iter_mut()
+                    .filter(|l| l.evidence.contains(&delta.memory_id))
+                {
+                    fact.confidence = (fact.confidence - delta.weight).clamp(0.0, 1.0);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Rejects a model carrying any claim without evidence.
@@ -595,6 +644,7 @@ mod tests {
         let leaked = PersonaDelta {
             facet: Facet::Opinion,
             memory_id: memories[0].id,
+            correction_id: None,
             weight: 1.0,
             queued_at: Timestamp::new(0, 0),
             from_holdout: true,
@@ -617,6 +667,7 @@ mod tests {
         let leaked = PersonaDelta {
             facet: Facet::Opinion,
             memory_id: memories[0].id,
+            correction_id: None,
             weight: 1.0,
             queued_at: Timestamp::new(0, 0),
             from_holdout: false,
@@ -867,6 +918,124 @@ mod tests {
         assert_eq!(next.version.ordinal, 2);
     }
 
+    /// SPEC §4.5. A correction lowers a stance and records what argued with it.
+    /// It never deletes the stance: people are inconsistent, and a model that
+    /// resolves that away is modelling a simpler person than the one it clones.
+    #[test]
+    fn a_correction_weakens_a_stance_without_erasing_it() {
+        use ghostr_core::persona::Stance;
+
+        let memories = corpus_memories(30);
+        let mut prior = distil(&[], &memories).expect("prior");
+        prior.facets.opinions.push(Stance {
+            topic: "remote work".to_owned(),
+            position: "prefers it".to_owned(),
+            strength: 0.8,
+            stability: 0.7,
+            evidence: vec![memories[0].id],
+            last_seen: Timestamp::new(0, 0),
+            contradicted_by: Vec::new(),
+        });
+
+        let refs: Vec<&Memory> = memories.iter().collect();
+        let corpus = Corpus {
+            footage: &[],
+            first_party: &refs,
+        };
+        let correction = MemoryId::new(999, [9u8; 10]);
+        let delta = PersonaDelta {
+            facet: Facet::Opinion,
+            memory_id: memories[0].id,
+            correction_id: Some(correction),
+            weight: 0.3,
+            queued_at: Timestamp::new(0, 0),
+            from_holdout: false,
+        };
+
+        let next =
+            distill(Some(&prior), &corpus, &[delta], Timestamp::new(2_000, 0), 2).expect("distil");
+
+        let stance = &next.facets.opinions[0];
+        assert!((stance.strength - 0.5).abs() < 1e-6, "0.8 - 0.3");
+        assert_eq!(stance.contradicted_by, vec![correction]);
+        assert_eq!(stance.position, "prefers it", "the stance survives");
+    }
+
+    /// One answer must not overturn a stance backed by fifty memories, so a
+    /// delta against evidence the stance does not rest on changes nothing.
+    #[test]
+    fn a_delta_against_unrelated_evidence_leaves_a_stance_alone() {
+        use ghostr_core::persona::Stance;
+
+        let memories = corpus_memories(30);
+        let mut prior = distil(&[], &memories).expect("prior");
+        prior.facets.opinions.push(Stance {
+            topic: "remote work".to_owned(),
+            position: "prefers it".to_owned(),
+            strength: 0.8,
+            stability: 0.7,
+            evidence: vec![memories[0].id],
+            last_seen: Timestamp::new(0, 0),
+            contradicted_by: Vec::new(),
+        });
+
+        let refs: Vec<&Memory> = memories.iter().collect();
+        let corpus = Corpus {
+            footage: &[],
+            first_party: &refs,
+        };
+        let delta = PersonaDelta {
+            facet: Facet::Opinion,
+            memory_id: memories[7].id,
+            correction_id: None,
+            weight: 0.5,
+            queued_at: Timestamp::new(0, 0),
+            from_holdout: false,
+        };
+
+        let next =
+            distill(Some(&prior), &corpus, &[delta], Timestamp::new(2_000, 0), 2).expect("distil");
+        assert!((next.facets.opinions[0].strength - 0.8).abs() < 1e-6);
+    }
+
+    /// Repeated corrections do accumulate — that is how the weight genuinely
+    /// shifts — but strength floors at zero rather than going negative.
+    #[test]
+    fn corrections_accumulate_and_floor_at_zero() {
+        use ghostr_core::persona::Stance;
+
+        let memories = corpus_memories(30);
+        let mut prior = distil(&[], &memories).expect("prior");
+        prior.facets.opinions.push(Stance {
+            topic: "remote work".to_owned(),
+            position: "prefers it".to_owned(),
+            strength: 0.5,
+            stability: 0.7,
+            evidence: vec![memories[0].id],
+            last_seen: Timestamp::new(0, 0),
+            contradicted_by: Vec::new(),
+        });
+
+        let refs: Vec<&Memory> = memories.iter().collect();
+        let corpus = Corpus {
+            footage: &[],
+            first_party: &refs,
+        };
+        let delta = PersonaDelta {
+            facet: Facet::Opinion,
+            memory_id: memories[0].id,
+            correction_id: None,
+            weight: 0.3,
+            queued_at: Timestamp::new(0, 0),
+            from_holdout: false,
+        };
+        let deltas = vec![delta.clone(), delta];
+
+        let next =
+            distill(Some(&prior), &corpus, &deltas, Timestamp::new(2_000, 0), 2).expect("distil");
+        assert!((next.facets.opinions[0].strength - 0.0).abs() < f32::EPSILON);
+    }
+
     /// Ten corrections justify a distillation on their own; fewer wait for the
     /// weekly cadence, because a version bump on noise is one nobody reviews.
     #[test]
@@ -874,6 +1043,7 @@ mod tests {
         let delta = PersonaDelta {
             facet: Facet::Opinion,
             memory_id: MemoryId::new(1, [1u8; 10]),
+            correction_id: None,
             weight: 1.0,
             queued_at: Timestamp::new(0, 0),
             from_holdout: false,

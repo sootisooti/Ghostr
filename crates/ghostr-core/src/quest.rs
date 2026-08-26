@@ -159,6 +159,32 @@ impl QuestKind {
         matches!(self, Self::VoiceProbe { .. } | Self::Counterfactual { .. })
     }
 
+    /// What [`Quest::answer_commitment`] is a commitment to.
+    ///
+    /// The commitment stores only a digest, so verifying one needs the answer
+    /// back. Deriving it from the quest — rather than storing it in a second
+    /// column — is what keeps the two from drifting: there is no way to record
+    /// an answer that is not the one the claim states.
+    ///
+    /// Never display this before a verdict for a kind where
+    /// [`QuestKind::reveals_answer_upfront`] is false. It is the answer key.
+    #[must_use]
+    pub fn committed_answer(&self) -> &str {
+        match self {
+            Self::VoiceProbe { ghost_answer, .. } | Self::Counterfactual { ghost_answer, .. } => {
+                ghost_answer
+            }
+            Self::FactRecall { claim, .. } | Self::Prediction { claim, .. } => claim,
+            Self::Preference { a, b, ghost_choice } => match ghost_choice {
+                Choice::A => a,
+                Choice::B => b,
+            },
+            Self::Cloze {
+                ghost_completion, ..
+            } => ghost_completion,
+        }
+    }
+
     /// The variant's name, with no payload.
     ///
     /// The only thing safe to print: several variants carry the ghost's
@@ -315,6 +341,37 @@ mod tests {
         let rendered = format!("{verdict:?}");
         assert!(rendered.contains("Major"));
         assert!(!rendered.contains("sister"));
+    }
+
+    /// The commitment is verified by recomputing it from the quest itself, so
+    /// the answer has to come back off the kind rather than a second field that
+    /// could disagree with the claim (I6).
+    #[test]
+    fn the_committed_answer_follows_the_choice() {
+        let mut kind = QuestKind::Preference {
+            a: "coffee".to_owned(),
+            b: "tea".to_owned(),
+            ghost_choice: Choice::A,
+        };
+        assert_eq!(kind.committed_answer(), "coffee");
+        kind = QuestKind::Preference {
+            a: "coffee".to_owned(),
+            b: "tea".to_owned(),
+            ghost_choice: Choice::B,
+        };
+        assert_eq!(kind.committed_answer(), "tea");
+    }
+
+    #[test]
+    fn a_fact_recall_commits_to_the_claim_it_states() {
+        let kind = QuestKind::FactRecall {
+            claim: "you keep coming back to: the parser".to_owned(),
+            as_of: NaiveDate::from_ymd_opt(2026, 3, 1).expect("date"),
+        };
+        assert_eq!(
+            kind.committed_answer(),
+            "you keep coming back to: the parser"
+        );
     }
 
     #[test]

@@ -5,7 +5,10 @@ use ghostr_core::ids::PersonaVersion;
 use ghostr_core::persona::PersonaModel;
 use ghostr_core::quest::{Facet, Quest, QuestKind};
 use ghostr_core::time::{Rng, Timestamp};
-use ghostr_llm::model::CapabilityTier;
+// Re-exported below: a caller cannot build a `QuestContext` without naming this
+// type, so it belongs to this crate's surface whether or not the caller has
+// `ghostr-llm` in its own manifest.
+pub use ghostr_llm::model::CapabilityTier;
 use serde::{Deserialize, Serialize};
 
 /// Generates a day's quests.
@@ -60,6 +63,13 @@ pub struct QuestContext<'a> {
     pub engagement: EngagementStats,
     /// The holdout policy in force.
     pub holdout: HoldoutPolicy,
+    /// Sentences the user actually wrote, for cloze quests.
+    ///
+    /// Supplied by the caller because a persona carries exemplar *ids* and the
+    /// text lives in the store. A cloze's ground truth has to be something the
+    /// user really wrote — asking a model to invent the sentence would make the
+    /// answer key fiction.
+    pub voice_exemplars: &'a [(ghostr_core::ids::MemoryId, String)],
 }
 
 impl core::fmt::Debug for QuestContext<'_> {
@@ -210,16 +220,36 @@ const EXPIRY_HOURS: i64 = 48;
 
 impl QuestGenerator for DeterministicGenerator {
     fn generate(&self, ctx: &QuestContext<'_>, n: usize) -> crate::Result<Vec<Quest>> {
-        let mut candidates = Vec::new();
-        // Facets in priority order, so a scarce budget spends itself where a
-        // probe would tell us most.
-        for (facet, _) in self.prioritise(ctx) {
-            candidates.extend(candidates_for(ctx, facet));
-        }
+        // Facets in priority order, so a scarce budget starts where a probe
+        // would tell us most — but taken one at a time and cycled, not drained.
+        // Draining the top facet first issues ten clozes and calls that a day's
+        // coverage, and a score with one facet in it cannot say the thing a
+        // per-facet breakdown exists to say (SPEC §4.2).
+        let mut by_facet: Vec<Vec<Draft>> = self
+            .prioritise(ctx)
+            .into_iter()
+            .map(|(facet, _)| candidates_for(ctx, facet))
+            .filter(|drafts| !drafts.is_empty())
+            .collect();
 
         let mut out = Vec::new();
-        for (index, draft) in candidates.into_iter().take(n).enumerate() {
-            out.push(finish(ctx, draft, index)?);
+        while out.len() < n {
+            let before = out.len();
+            for drafts in &mut by_facet {
+                if out.len() >= n {
+                    break;
+                }
+                if drafts.is_empty() {
+                    continue;
+                }
+                let index = out.len();
+                out.push(finish(ctx, drafts.remove(0), index)?);
+            }
+            // Every facet is exhausted. Fewer quests than asked for is the
+            // honest answer; padding would mean asking something twice.
+            if out.len() == before {
+                break;
+            }
         }
         Ok(out)
     }
@@ -282,11 +312,15 @@ fn evidence_count(n: usize) -> f32 {
 }
 
 /// A quest before its identity and commitment are attached.
+///
+/// Carries no answer field. The answer is
+/// [`QuestKind::committed_answer`](ghostr_core::quest::QuestKind::committed_answer),
+/// read back off the kind itself — a separate field could disagree with the
+/// claim, and a commitment over an answer the quest does not state is a
+/// commitment nobody can check (I6).
 struct Draft {
     kind: QuestKind,
     facet: Facet,
-    /// The answer the ghost is committing to.
-    answer: String,
     difficulty: f32,
     confidence: f32,
     evidence: Vec<ghostr_core::ids::MemoryId>,
@@ -307,7 +341,6 @@ fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
                     ghost_choice: ghostr_core::quest::Choice::A,
                 },
                 facet,
-                answer: stance.position.clone(),
                 // A stance the corpus states plainly is an easy question; a
                 // weakly-held one is a hard one, and the score weights it so.
                 difficulty: 1.0 - stance.strength.clamp(0.0, 1.0),
@@ -326,7 +359,6 @@ fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
                     as_of: ctx.date,
                 },
                 facet,
-                answer: routine.pattern.clone(),
                 difficulty: 1.0 - routine.confidence.clamp(0.0, 1.0),
                 confidence: routine.confidence.clamp(0.0, 1.0),
                 evidence: routine.evidence.clone(),
@@ -343,21 +375,33 @@ fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
                     as_of: ctx.date,
                 },
                 facet,
-                answer: fact.statement.clone(),
                 difficulty: 1.0 - fact.confidence.clamp(0.0, 1.0),
                 confidence: fact.confidence.clamp(0.0, 1.0),
                 evidence: fact.evidence.clone(),
             })
             .collect(),
 
-        // Voice needs the exemplar's *text* to build a cloze, and a persona
-        // carries only ids. The engine supplies those separately; asking a
-        // model to invent the sentence would defeat the point, since the ground
-        // truth has to be something the user actually wrote.
-        //
+        Facet::Voice => ctx
+            .voice_exemplars
+            .iter()
+            .filter_map(|(id, text)| {
+                let kind = cloze_from(text, *id)?;
+                Some(Draft {
+                    kind,
+                    facet,
+                    // A cloze over the user's own sentence has exact ground
+                    // truth, so it is the easiest thing the ghost is asked and
+                    // the score weights it lowest.
+                    difficulty: 0.3,
+                    confidence: 0.6,
+                    evidence: vec![*id],
+                })
+            })
+            .collect(),
+
         // Relationship quests name a person, and naming one well needs the role
         // a model supplies. Absent rather than guessed.
-        Facet::Voice | Facet::Relationship => Vec::new(),
+        Facet::Relationship => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -371,7 +415,7 @@ fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
 /// Returns `None` when the sentence is too short to remove a span from without
 /// making the question unanswerable.
 #[must_use]
-pub fn cloze_from(text: &str, memory: ghostr_core::ids::MemoryId) -> Option<(QuestKind, String)> {
+pub fn cloze_from(text: &str, memory: ghostr_core::ids::MemoryId) -> Option<QuestKind> {
     use ghostr_core::memory::Span;
 
     let words: Vec<&str> = text.split_whitespace().collect();
@@ -390,17 +434,14 @@ pub fn cloze_from(text: &str, memory: ghostr_core::ids::MemoryId) -> Option<(Que
 
     let start = text.find(removed)?;
     let _ = memory;
-    Some((
-        QuestKind::Cloze {
-            context: text.to_owned(),
-            redacted: Span {
-                start: u32::try_from(start).unwrap_or(0),
-                end: u32::try_from(start + removed.len()).unwrap_or(0),
-            },
-            ghost_completion: removed.to_owned(),
+    Some(QuestKind::Cloze {
+        context: text.to_owned(),
+        redacted: Span {
+            start: u32::try_from(start).unwrap_or(0),
+            end: u32::try_from(start + removed.len()).unwrap_or(0),
         },
-        removed.to_owned(),
-    ))
+        ghost_completion: removed.to_owned(),
+    })
 }
 
 /// Attaches identity, holdout status, and the commitment.
@@ -453,7 +494,8 @@ fn finish(ctx: &QuestContext<'_>, draft: Draft, index: usize) -> crate::Result<Q
         verdict: None,
     };
 
-    quest.answer_commitment = commit_answer(&quest, &draft.answer, quest.confidence, &nonce)?;
+    let answer = quest.kind.committed_answer().to_owned();
+    quest.answer_commitment = commit_answer(&quest, &answer, quest.confidence, &nonce)?;
     Ok(quest)
 }
 
@@ -566,6 +608,14 @@ mod tests {
     }
 
     fn context<'a>(model: &'a PersonaModel, rng: &'a dyn Rng) -> QuestContext<'a> {
+        context_with(model, rng, &[])
+    }
+
+    fn context_with<'a>(
+        model: &'a PersonaModel,
+        rng: &'a dyn Rng,
+        voice_exemplars: &'a [(MemoryId, String)],
+    ) -> QuestContext<'a> {
         QuestContext {
             persona: model,
             version: model.version,
@@ -579,6 +629,7 @@ mod tests {
                 streak_days: 4,
             },
             holdout: HoldoutPolicy::default(),
+            voice_exemplars,
         }
     }
 
@@ -623,6 +674,26 @@ mod tests {
             verify_commitment(opinion, "prefers it", opinion.confidence).expect("verify"),
             "the committed answer did not verify"
         );
+    }
+
+    /// Every quest must be verifiable from itself alone. The store keeps only
+    /// the digest, so if the answer were not recoverable off the kind there
+    /// would be nothing to verify against at verdict time (I6).
+    #[test]
+    fn every_quest_verifies_against_its_own_kind() {
+        let model = persona();
+        let rng = SeededRng::new(11);
+        let quests = DeterministicGenerator
+            .generate(&context(&model, &rng), 8)
+            .expect("generate");
+        assert!(!quests.is_empty());
+        for quest in &quests {
+            assert!(
+                verify_commitment(quest, quest.kind.committed_answer(), quest.confidence)
+                    .expect("verify"),
+                "a quest could not reproduce its own commitment"
+            );
+        }
     }
 
     /// Changing the answer breaks the commitment — which is the entire point.
@@ -830,12 +901,46 @@ mod tests {
         );
     }
 
+    /// A persona carries exemplar ids; the sentences come from the caller. With
+    /// none supplied the generator asks no voice questions rather than inventing
+    /// a sentence to quiz the user on.
+    #[test]
+    fn voice_quests_appear_only_once_exemplar_text_is_supplied() {
+        let model = persona();
+        let rng = SeededRng::new(3);
+        assert!(
+            !DeterministicGenerator
+                .generate(&context(&model, &rng), 8)
+                .expect("generate")
+                .iter()
+                .any(|q| q.facet == Facet::Voice)
+        );
+
+        let exemplars = vec![(
+            MemoryId::new(1, [1u8; 10]),
+            "I spent the whole afternoon wrestling with the parser again".to_owned(),
+        )];
+        let rng = SeededRng::new(3);
+        let quests = DeterministicGenerator
+            .generate(&context_with(&model, &rng, &exemplars), 8)
+            .expect("generate");
+        let voice = quests
+            .iter()
+            .find(|q| q.facet == Facet::Voice)
+            .expect("a voice quest");
+        assert!(matches!(voice.kind, QuestKind::Cloze { .. }));
+        assert!(
+            verify_commitment(voice, voice.kind.committed_answer(), voice.confidence)
+                .expect("verify")
+        );
+    }
+
     /// Ground truth for a cloze is something the user actually wrote, so the
     /// span has to land on the real word.
     #[test]
     fn a_cloze_redacts_a_real_span_of_the_sentence() {
         let text = "I spent the whole afternoon wrestling with the parser again";
-        let (kind, answer) = cloze_from(text, MemoryId::new(1, [1u8; 10])).expect("long enough");
+        let kind = cloze_from(text, MemoryId::new(1, [1u8; 10])).expect("long enough");
 
         let QuestKind::Cloze {
             context, redacted, ..
@@ -845,7 +950,7 @@ mod tests {
         };
         assert_eq!(context, text);
         let span = &text[redacted.start as usize..redacted.end as usize];
-        assert_eq!(span, answer);
+        assert_eq!(span, kind.committed_answer());
     }
 
     #[test]

@@ -902,6 +902,10 @@ pub fn propose_persona(engine: &Engine) -> crate::Result<CandidateVersion> {
         .filter(|m| trusted.contains(&m.source_id))
         .collect();
 
+    // Read, not drained: a proposal the user never adopts must not consume the
+    // corrections it was built from. `adopt_persona` clears the queue.
+    let deltas = engine.store().peek_deltas(dek)?;
+
     let next_ordinal = head.as_ref().map_or(1, |h| h.version.ordinal + 1);
     ghostr_persona::propose(
         &DeterministicBuilder,
@@ -909,10 +913,7 @@ pub fn propose_persona(engine: &Engine) -> crate::Result<CandidateVersion> {
         DistillInput {
             footage: &recent,
             first_party: &first_party,
-            // Deltas arrive with the quest loop. Empty rather than absent, so
-            // the holdout check runs on every distillation from the start
-            // rather than being switched on later (I7).
-            deltas: &[],
+            deltas: &deltas,
             now: engine.now(),
             next_ordinal,
         },
@@ -930,6 +931,10 @@ pub fn adopt_persona(engine: &Engine, candidate: &CandidateVersion) -> crate::Re
     engine
         .store()
         .put_persona(dek, &candidate.model, engine.nonce())?;
+    // Cleared only now. The corrections are already baked into the adopted
+    // model, and leaving them queued would apply each of them a second time at
+    // the next distillation.
+    engine.store().drain_deltas(dek)?;
     Ok(())
 }
 
@@ -994,4 +999,396 @@ fn first_party_sources(engine: &Engine) -> crate::Result<std::collections::BTree
         .filter(|s| s.trust == TrustLevel::FirstParty)
         .map(|s| s.id)
         .collect())
+}
+
+/// How far back engagement and fidelity look by default.
+const QUEST_WINDOW_DAYS: i64 = 30;
+
+/// The source verdict-derived memories are filed under.
+///
+/// Its own source, not the vault's. A correction is the user answering a
+/// question the ghost asked, and folding that into "markdown vault" would make
+/// the corpus unable to tell what the user wrote unprompted from what the ghost
+/// prompted out of them (SPEC Q18).
+const VERDICT_SOURCE_TAG: &str = "verdict";
+
+/// What one `quest issue` produced.
+///
+/// Ids and counts only. The claims are the ghost's committed answers, and a
+/// summary that carried them would put the answer key wherever this is printed
+/// or logged (I6, I8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestIssue {
+    /// The day these were issued for.
+    pub date: NaiveDate,
+    /// The quests issued.
+    pub issued: Vec<ghostr_core::ids::QuestId>,
+    /// Which ghost made the claims.
+    pub persona_version: PersonaVersion,
+    /// How many stale quests this run closed.
+    pub expired: u64,
+}
+
+/// Issues a day's quests, committing to every answer before any can be shown.
+///
+/// The commitment is written to the store *before* this returns, so there is no
+/// window in which a quest exists and its commitment does not (SPEC I6). The
+/// store's trigger then makes it immutable.
+///
+/// Refuses a day that already has quests rather than adding more: two runs on
+/// one day would let a user re-roll until the questions looked easy.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if no persona has been
+/// adopted, or if the day already has quests.
+pub fn issue_quests(engine: &Engine, date: NaiveDate) -> crate::Result<QuestIssue> {
+    use ghostr_quests::generate::{HoldoutPolicy, QuestContext};
+    use ghostr_quests::{DeterministicGenerator, QuestGenerator as _};
+
+    let dek = engine.dek()?;
+    let now = engine.now();
+
+    let persona = engine
+        .store()
+        .persona_head(dek)?
+        .ok_or_else(|| crate::Error::Config {
+            detail: "no persona yet — run `ghostr persona propose` then `adopt`".to_owned(),
+        })?;
+
+    if engine.store().quests_issued_for(date)? > 0 {
+        return Err(crate::Error::Config {
+            detail: format!("{date} already has quests"),
+        });
+    }
+
+    // Before generating, not after: a stale quest still counted as open would
+    // depress the completion rate and shrink today's batch for a user who is
+    // actually keeping up.
+    let expired = engine.store().expire_quests(now)?;
+
+    let exemplars = voice_exemplars(engine, &persona)?;
+    let ctx = QuestContext {
+        persona: &persona,
+        version: persona.version,
+        date,
+        now,
+        rng: engine.rng(),
+        // Without a model the generator is limited to the mechanical kinds
+        // anyway, and saying so is more honest than claiming a tier the build
+        // has no way to reach.
+        tier: ghostr_quests::generate::CapabilityTier::Small,
+        engagement: engagement(engine, now)?,
+        holdout: HoldoutPolicy::default(),
+        voice_exemplars: &exemplars,
+    };
+
+    let generator = DeterministicGenerator;
+    let quests = generator.generate(&ctx, generator.daily_count(&ctx))?;
+
+    let mut issued = Vec::with_capacity(quests.len());
+    for quest in &quests {
+        engine.store().put_quest(dek, quest, engine.nonce())?;
+        issued.push(quest.id);
+    }
+
+    Ok(QuestIssue {
+        date,
+        issued,
+        persona_version: persona.version,
+        expired,
+    })
+}
+
+/// Quests awaiting a verdict, newest first.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the read fails.
+pub fn open_quests(engine: &Engine, limit: u32) -> crate::Result<Vec<ghostr_core::quest::Quest>> {
+    let dek = engine.dek()?;
+    engine.store().expire_quests(engine.now())?;
+    Ok(engine
+        .store()
+        .quests_with_status(dek, ghostr_core::quest::QuestStatus::Open, limit)?)
+}
+
+/// One quest by id.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if there is no such quest.
+pub fn get_quest(
+    engine: &Engine,
+    id: ghostr_core::ids::QuestId,
+) -> crate::Result<ghostr_core::quest::Quest> {
+    engine
+        .store()
+        .get_quest(engine.dek()?, id)?
+        .ok_or_else(|| crate::Error::Config {
+            detail: format!("no quest {}", id.display_short()),
+        })
+}
+
+/// One quest by a full id or the short form `quest list` prints.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if nothing matches, or
+/// [`Error::Store`](crate::Error::Store) if the needle is ambiguous.
+pub fn find_quest(engine: &Engine, needle: &str) -> crate::Result<ghostr_core::quest::Quest> {
+    engine
+        .store()
+        .find_quest(engine.dek()?, needle)?
+        .ok_or_else(|| crate::Error::Config {
+            detail: format!("no quest matching `{needle}`"),
+        })
+}
+
+/// Records a verdict, and everything that follows from it.
+///
+/// In order: verify the commitment, write the answer, store the correction as
+/// corpus, queue the training delta. The commitment check comes first because a
+/// quest that cannot reproduce its own commitment is one whose claim was edited
+/// after issue, and answering it would launder a broken guarantee (I6).
+///
+/// # Errors
+///
+/// Returns [`Error::Quests`](crate::Error::Quests) if the commitment does not
+/// verify, the quest is already answered, or it has expired.
+pub fn answer_quest(
+    engine: &Engine,
+    id: ghostr_core::ids::QuestId,
+    verdict: ghostr_core::quest::Verdict,
+) -> crate::Result<ghostr_quests::VerdictOutcome> {
+    use ghostr_quests::{CorrectionSlot, StandardIntake};
+
+    let dek = engine.dek()?;
+    let now = engine.now();
+    let quest = get_quest(engine, id)?;
+
+    let mut random = [0u8; 10];
+    engine.rng().fill(&mut random);
+    let mut salt = [0u8; 32];
+    engine.rng().fill(&mut salt);
+    let slot = CorrectionSlot {
+        source: verdict_source(engine)?,
+        id: MemoryId::new(now.utc_millis().unsigned_abs(), random),
+        salt,
+    };
+
+    let outcome = StandardIntake.decide(
+        &quest,
+        &verdict,
+        now,
+        ghostr_quests::generate::HoldoutPolicy::default().latency_floor_seconds,
+        slot,
+    )?;
+
+    let elapsed = (now.utc_millis() - quest.issued_at.utc_millis()) as f32 / 1_000.0;
+    let mut answered = quest.clone();
+    answered.status = ghostr_core::quest::QuestStatus::Answered;
+    answered.verdict = Some(verdict);
+    engine
+        .store()
+        .answer_quest(dek, &answered, now, elapsed.max(0.0), engine.nonce())?;
+
+    // Corpus first, then the delta that points at it. The other order would
+    // leave a queued delta naming a memory that does not exist if the process
+    // died between the two.
+    if let Some(memory) = &outcome.memory {
+        engine.store().put_memory(dek, memory, engine.nonce())?;
+    }
+    if let Some(delta) = &outcome.delta {
+        engine.store().queue_delta(dek, delta, engine.nonce())?;
+    }
+
+    Ok(outcome)
+}
+
+/// The fidelity score over a window.
+///
+/// Held-out, non-decoy, answered quests only — that set is assembled by the
+/// store from clear columns, so the scorer is never handed anything else
+/// (SPEC I7). Decoys are read separately and feed the integrity signals, which
+/// travel beside the number and are never folded into it.
+///
+/// # Errors
+///
+/// Returns [`Error::Quests`](crate::Error::Quests) if there are too few scored
+/// quests to say anything.
+pub fn fidelity(
+    engine: &Engine,
+    window: ghostr_core::fidelity::ScoreWindow,
+) -> crate::Result<ghostr_core::fidelity::FidelityScore> {
+    use ghostr_quests::{ScoredQuest, Scorer as _, StandardScorer};
+
+    let dek = engine.dek()?;
+    let since = window_start(engine, window);
+    let scorer = StandardScorer::default();
+
+    let held_out: Vec<ScoredQuest> = engine
+        .store()
+        .scoreable_quests(dek, since)?
+        .into_iter()
+        .map(|(quest, answer_seconds)| ScoredQuest {
+            score: scorer.score_quest(&quest),
+            quest,
+            answer_seconds,
+        })
+        .collect();
+
+    let decoys: Vec<ScoredQuest> = engine
+        .store()
+        .decoy_quests(dek, since)?
+        .into_iter()
+        .map(|(quest, answer_seconds)| ScoredQuest {
+            score: scorer.score_quest(&quest),
+            quest,
+            answer_seconds,
+        })
+        .collect();
+
+    let mut score = scorer.aggregate(&held_out, window)?;
+    score.integrity = scorer.integrity(&held_out, &decoys);
+    // Recomputed, because convergence depends on the decoy-confirm rate and the
+    // scorer could not see the decoys when it first ran.
+    score.converged = scorer.converged(&score);
+    score.committed_at_seq = engine.store().tip()?.map_or(0, |tip| tip.seq);
+    Ok(score)
+}
+
+/// Closes every quest past its expiry.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the write fails.
+pub fn expire_quests(engine: &Engine) -> crate::Result<u64> {
+    Ok(engine.store().expire_quests(engine.now())?)
+}
+
+/// The window's start instant.
+fn window_start(engine: &Engine, window: ghostr_core::fidelity::ScoreWindow) -> Timestamp {
+    use ghostr_core::fidelity::ScoreWindow;
+
+    let days = match window {
+        ScoreWindow::Rolling30 => 30,
+        ScoreWindow::Rolling90 => 90,
+        // Everything. Zero rather than a large negative, because a timestamp
+        // before the epoch is a value nothing else in the system produces.
+        _ => return Timestamp::new(0, 0),
+    };
+    let now = engine.now();
+    Timestamp::new(
+        now.utc_millis().saturating_sub(days * 86_400_000),
+        now.offset_seconds(),
+    )
+}
+
+/// Recent engagement, for the fatigue term and the adaptive daily count.
+fn engagement(
+    engine: &Engine,
+    now: Timestamp,
+) -> crate::Result<ghostr_quests::generate::EngagementStats> {
+    use ghostr_quests::generate::EngagementStats;
+
+    let since = Timestamp::new(
+        now.utc_millis()
+            .saturating_sub(QUEST_WINDOW_DAYS * 86_400_000),
+        now.offset_seconds(),
+    );
+    let counts = engine.store().quest_engagement(since)?;
+
+    // A user with no history is treated as fully engaged rather than fully
+    // fatigued. The alternative starts everyone at the three-quest floor and
+    // gives the loop no way to climb out of it.
+    let completion_rate = if counts.issued == 0 {
+        1.0
+    } else {
+        f64::from(counts.answered) as f32 / f64::from(counts.issued) as f32
+    };
+
+    let median = if counts.answer_seconds.is_empty() {
+        0.0
+    } else {
+        counts.answer_seconds[counts.answer_seconds.len() / 2]
+    };
+
+    Ok(EngagementStats {
+        completion_rate,
+        median_answer_seconds: median,
+        streak_days: streak(&counts.answered_days, now, engine.home_tz()?),
+    })
+}
+
+/// Consecutive days ending today or yesterday with at least one answer.
+///
+/// Yesterday counts as still alive: a streak that broke because the user had
+/// not yet opened the app today would be a lie told by a clock.
+fn streak(days: &[NaiveDate], now: Timestamp, tz: chrono_tz::Tz) -> u32 {
+    let today = now.date_in(&tz);
+    let Some(&most_recent) = days.first() else {
+        return 0;
+    };
+    if (today - most_recent).num_days() > 1 {
+        return 0;
+    }
+
+    let mut count = 1;
+    let mut cursor = most_recent;
+    for &day in days.iter().skip(1) {
+        if (cursor - day).num_days() == 1 {
+            count += 1;
+            cursor = day;
+        } else {
+            break;
+        }
+    }
+    count
+}
+
+/// Exemplar sentences for cloze quests.
+///
+/// A persona holds exemplar *ids*; the sentences live in the store. A cloze's
+/// ground truth has to be something the user really wrote, so a missing or
+/// shredded exemplar drops out rather than being replaced.
+fn voice_exemplars(
+    engine: &Engine,
+    persona: &PersonaModel,
+) -> crate::Result<Vec<(MemoryId, String)>> {
+    let dek = engine.dek()?;
+    let mut out = Vec::new();
+    for &id in &persona.facets.voice.exemplars {
+        match engine.store().get_memory(dek, id) {
+            Ok(Some(memory)) => out.push((id, memory.body.text)),
+            // A shredded exemplar is gone on purpose (SPEC Q6). Skipping it is
+            // the whole point of the shred.
+            Ok(None) | Err(ghostr_store::Error::Shredded { .. }) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(out)
+}
+
+/// The source verdict-derived memories are filed under, created on first use.
+fn verdict_source(engine: &Engine) -> crate::Result<SourceId> {
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+    use ghostr_store::sqlite::NewSourceRow;
+
+    let mut random = [0u8; 10];
+    engine.rng().fill(&mut random);
+    Ok(engine.store().upsert_source_with(
+        engine.dek()?,
+        &NewSourceRow {
+            id: SourceId::new(engine.now().utc_millis().unsigned_abs(), random),
+            kind_tag: VERDICT_SOURCE_TAG,
+            config: "",
+            // First-party: these are the user's own words, written deliberately
+            // about themselves. They are among the highest-quality signal the
+            // corpus receives, and voice profiling should draw on them.
+            trust: TrustLevel::FirstParty,
+            sensitivity: Sensitivity::Private,
+        },
+        engine.nonce(),
+    )?)
 }

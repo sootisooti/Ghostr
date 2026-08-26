@@ -253,8 +253,20 @@ pub enum ChangeKind {
 pub struct PersonaDelta {
     /// Which facet this bears on.
     pub facet: Facet,
-    /// The memory carrying the correction.
+    /// The evidence the corrected claim rested on.
+    ///
+    /// This locates the claim: a delta is applied to the facet entries whose
+    /// own `evidence` names this memory. It is deliberately *not* the
+    /// correction — a rejection with no explanation corrects nothing yet still
+    /// carries signal, and a delta that could only exist alongside written
+    /// words would silently drop those.
     pub memory_id: MemoryId,
+    /// The memory carrying the user's own words, when they wrote any.
+    ///
+    /// `None` for a bare rejection. Recorded in `contradicted_by` when present,
+    /// which is what keeps a weakened stance traceable to the sentence that
+    /// weakened it.
+    pub correction_id: Option<MemoryId>,
     /// How much weight to give it, in `0.0..=1.0`.
     pub weight: f32,
     /// When it was queued.

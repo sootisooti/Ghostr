@@ -71,6 +71,15 @@ pub enum Error {
         id: MemoryId,
     },
 
+    /// A correction from a held-out quest was offered to the training queue.
+    ///
+    /// A caller bug, and a load-bearing one: a held-out correction that reached
+    /// distillation means the fidelity score is being computed over data the
+    /// model trained on, and every score since is wrong (SPEC I7). Refused
+    /// rather than filtered, so the caller that produced it is visible.
+    #[error("a held-out correction was offered to the training queue")]
+    HoldoutLeak,
+
     /// The schema is newer than this build understands.
     ///
     /// Refuse rather than guess. A downgrade that writes with an old

@@ -25,8 +25,8 @@
 //!
 //! # Status
 //!
-//! Implemented for M1: memories, footage, sources, entities, the egress log,
-//! and the encrypted vector index. Quests and persona rows arrive with M2.
+//! Implemented: memories, footage, sources, entities, the egress log, the
+//! encrypted vector index, persona versions, and quests.
 
 #![forbid(unsafe_code)]
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as

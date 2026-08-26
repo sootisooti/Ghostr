@@ -56,6 +56,23 @@ pub struct VerdictOutcome {
     pub suspiciously_fast: bool,
 }
 
+/// Identifiers for the memory a correction might produce.
+///
+/// Allocated by the caller rather than minted here, because id allocation has
+/// to stay deterministic under test: time enters through
+/// [`Clock`](ghostr_core::time::Clock) and entropy through
+/// [`Rng`](ghostr_core::time::Rng), and both live in the composition root
+/// (ARCHITECTURE §4.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionSlot {
+    /// The source verdict-derived memories are filed under.
+    pub source: ghostr_core::ids::SourceId,
+    /// The id the memory would take.
+    pub id: ghostr_core::ids::MemoryId,
+    /// Its leaf salt.
+    pub salt: [u8; 32],
+}
+
 /// Turns a verdict into corpus and training signal.
 ///
 /// Pure: takes the quest and the verdict, returns what should happen. The
@@ -85,9 +102,16 @@ pub const CORRECTION_WEIGHT: f32 = 0.1;
 impl StandardIntake {
     /// Decides what a verdict produces.
     ///
-    /// `committed_answer` is what the ghost claimed, needed to verify the
-    /// commitment. The caller holds it because the quest stores only the
-    /// digest — which is the whole reason the digest is stored.
+    /// The quest is checked against *itself*: the answer comes from
+    /// [`QuestKind::committed_answer`](ghostr_core::quest::QuestKind::committed_answer),
+    /// so a claim edited between issue and verdict no longer reproduces the
+    /// commitment it was issued with. The commitment column is immutable in the
+    /// store; the claim it commits to is not, and this is where that gap is
+    /// closed (SPEC I6).
+    ///
+    /// `slot` supplies the identifiers a correction memory would need. It is
+    /// taken even when the verdict produces no memory, because the caller
+    /// cannot know in advance which verdicts carry words.
     ///
     /// # Errors
     ///
@@ -98,17 +122,21 @@ impl StandardIntake {
     pub fn decide(
         &self,
         quest: &ghostr_core::quest::Quest,
-        committed_answer: &str,
         verdict: &Verdict,
         answered_at: Timestamp,
         latency_floor_seconds: f32,
+        slot: CorrectionSlot,
     ) -> crate::Result<VerdictOutcome> {
         use ghostr_core::quest::QuestStatus;
 
-        // Verified before anything else is looked at. A mismatch means either
-        // the store was tampered with or the client is presenting a different
-        // claim than the one committed to, and both make the answer worthless.
-        if !crate::generate::verify_commitment(quest, committed_answer, quest.confidence)? {
+        // Verified before anything else is looked at. A mismatch means the
+        // stored claim is not the one that was committed to, and an answer to a
+        // question nobody committed to is worthless.
+        if !crate::generate::verify_commitment(
+            quest,
+            quest.kind.committed_answer(),
+            quest.confidence,
+        )? {
             return Err(crate::Error::CommitmentMismatch { id: quest.id });
         }
         if quest.verdict.is_some() || quest.status == QuestStatus::Answered {
@@ -120,13 +148,17 @@ impl StandardIntake {
 
         let elapsed = (answered_at.utc_millis() - quest.issued_at.utc_millis()) as f32 / 1_000.0;
 
+        let memory =
+            Self::correction_memory(quest, verdict, slot.source, answered_at, slot.id, slot.salt);
+        let correction_id = memory.as_ref().map(|m| m.id);
+
         Ok(VerdictOutcome {
-            memory: None,
+            memory,
             // I7. A held-out correction is scored and never trained on. The
             // check is here, at the point of application, rather than assumed
             // of every caller upstream.
             delta: (!quest.holdout)
-                .then(|| delta_for(quest, verdict, answered_at))
+                .then(|| delta_for(quest, verdict, answered_at, correction_id))
                 .flatten(),
             // Decoys are excluded from the score by construction: the claim was
             // deliberately wrong, so the ghost cannot be right about it.
@@ -213,6 +245,7 @@ fn delta_for(
     quest: &ghostr_core::quest::Quest,
     verdict: &Verdict,
     at: Timestamp,
+    correction_id: Option<ghostr_core::ids::MemoryId>,
 ) -> Option<PersonaDelta> {
     // A confirmation is not a correction. Queuing one would let agreement
     // accumulate weight, and a stance the user merely failed to object to
@@ -231,7 +264,11 @@ fn delta_for(
 
     Some(PersonaDelta {
         facet: quest.facet,
+        // The evidence the claim rested on, which is what locates the claim at
+        // distillation. A delta with nothing to point at cannot be applied, so
+        // there is nothing to queue.
         memory_id: quest.evidence.first().copied()?,
+        correction_id,
         weight,
         queued_at: at,
         // False by construction: this function is only reached for
@@ -251,15 +288,16 @@ mod tests {
 
     use super::*;
 
-    /// A quest with a real commitment over `answer`.
-    fn committed(answer: &str, holdout: bool, decoy: bool) -> ghostr_core::quest::Quest {
+    /// A quest carrying a real commitment over the claim it states.
+    fn committed(holdout: bool, decoy: bool) -> ghostr_core::quest::Quest {
         let mut q = base_quest(1, ghostr_core::quest::Facet::Opinion, None);
         q.status = ghostr_core::quest::QuestStatus::Open;
         q.holdout = holdout;
         q.decoy = decoy;
         q.evidence = vec![ghostr_core::ids::MemoryId::new(1, [1u8; 10])];
+        let answer = q.kind.committed_answer().to_owned();
         q.answer_commitment =
-            crate::generate::commit_answer(&q, answer, q.confidence, &q.nonce).expect("commit");
+            crate::generate::commit_answer(&q, &answer, q.confidence, &q.nonce).expect("commit");
         q
     }
 
@@ -267,23 +305,37 @@ mod tests {
         Timestamp::new(seconds * 1_000, 0)
     }
 
+    fn slot() -> CorrectionSlot {
+        CorrectionSlot {
+            source: SourceId::new(1, [9u8; 10]),
+            id: ghostr_core::ids::MemoryId::new(2, [2u8; 10]),
+            salt: [3u8; 32],
+        }
+    }
+
+    /// `decide` with the boilerplate folded away.
+    fn decide(
+        quest: &ghostr_core::quest::Quest,
+        verdict: &Verdict,
+        answered_at: Timestamp,
+    ) -> crate::Result<VerdictOutcome> {
+        StandardIntake.decide(quest, verdict, answered_at, 2.0, slot())
+    }
+
     /// SPEC I7. This is the point where "held out means never trained on"
     /// stops being a convention and becomes a check.
     #[test]
     fn a_held_out_verdict_never_produces_a_delta() {
-        let quest = committed("prefers it", true, false);
-        let outcome = StandardIntake
-            .decide(
-                &quest,
-                "prefers it",
-                &Verdict::Correct {
-                    correction: "actually I dislike it".to_owned(),
-                    severity: Severity::Major,
-                },
-                at(60),
-                2.0,
-            )
-            .expect("accept");
+        let quest = committed(true, false);
+        let outcome = decide(
+            &quest,
+            &Verdict::Correct {
+                correction: "actually I dislike it".to_owned(),
+                severity: Severity::Major,
+            },
+            at(60),
+        )
+        .expect("accept");
 
         assert!(
             outcome.delta.is_none(),
@@ -295,19 +347,16 @@ mod tests {
     /// The same correction on a non-holdout quest does train.
     #[test]
     fn a_non_holdout_correction_queues_a_delta() {
-        let quest = committed("prefers it", false, false);
-        let outcome = StandardIntake
-            .decide(
-                &quest,
-                "prefers it",
-                &Verdict::Correct {
-                    correction: "actually I dislike it".to_owned(),
-                    severity: Severity::Major,
-                },
-                at(60),
-                2.0,
-            )
-            .expect("accept");
+        let quest = committed(false, false);
+        let outcome = decide(
+            &quest,
+            &Verdict::Correct {
+                correction: "actually I dislike it".to_owned(),
+                severity: Severity::Major,
+            },
+            at(60),
+        )
+        .expect("accept");
 
         let delta = outcome.delta.expect("a delta");
         assert!(!delta.from_holdout);
@@ -319,42 +368,45 @@ mod tests {
     /// is refused, which is what makes the pre-commitment real.
     #[test]
     fn a_mismatched_commitment_is_refused() {
-        let mut quest = committed("prefers it", true, false);
+        let mut quest = committed(true, false);
         quest.answer_commitment = ghostr_core::hash::Hash32::zero();
 
-        let err = StandardIntake
-            .decide(&quest, "prefers it", &Verdict::Confirm, at(60), 2.0)
-            .expect_err("must refuse");
+        let err = decide(&quest, &Verdict::Confirm, at(60)).expect_err("must refuse");
         assert!(matches!(err, crate::Error::CommitmentMismatch { .. }));
     }
 
-    /// And presenting a different answer than the one committed to is the same
-    /// failure — this is the attack the commitment exists to stop.
+    /// And so is a claim edited between issue and verdict. The store keeps the
+    /// commitment immutable but not the sealed claim, so this is where a
+    /// rewritten question is caught — the attack the commitment exists to stop.
     #[test]
-    fn presenting_a_different_answer_is_refused() {
-        let quest = committed("prefers it", true, false);
+    fn a_claim_edited_after_issue_is_refused() {
+        let mut quest = committed(true, false);
+        quest.kind = ghostr_core::quest::QuestKind::FactRecall {
+            claim: "you saw nobody at all".to_owned(),
+            as_of: quest.issued_for,
+        };
         assert!(matches!(
-            StandardIntake.decide(&quest, "dislikes it", &Verdict::Confirm, at(60), 2.0),
+            decide(&quest, &Verdict::Confirm, at(60)),
             Err(crate::Error::CommitmentMismatch { .. })
         ));
     }
 
     #[test]
     fn an_already_answered_quest_is_refused() {
-        let mut quest = committed("prefers it", true, false);
+        let mut quest = committed(true, false);
         quest.verdict = Some(Verdict::Confirm);
         assert!(matches!(
-            StandardIntake.decide(&quest, "prefers it", &Verdict::Confirm, at(60), 2.0),
+            decide(&quest, &Verdict::Confirm, at(60)),
             Err(crate::Error::AlreadyAnswered { .. })
         ));
     }
 
     #[test]
     fn a_verdict_after_expiry_is_refused() {
-        let quest = committed("prefers it", true, false);
+        let quest = committed(true, false);
         let past_expiry = Timestamp::new(quest.expires_at.utc_millis() + 1, 0);
         assert!(matches!(
-            StandardIntake.decide(&quest, "prefers it", &Verdict::Confirm, past_expiry, 2.0),
+            decide(&quest, &Verdict::Confirm, past_expiry),
             Err(crate::Error::Expired { .. })
         ));
     }
@@ -364,10 +416,8 @@ mod tests {
     /// rubber-stamping benefits from finding out today.
     #[test]
     fn confirming_a_decoy_is_surfaced_and_not_scored() {
-        let quest = committed("prefers it", false, true);
-        let outcome = StandardIntake
-            .decide(&quest, "prefers it", &Verdict::Confirm, at(60), 2.0)
-            .expect("accept");
+        let quest = committed(false, true);
+        let outcome = decide(&quest, &Verdict::Confirm, at(60)).expect("accept");
 
         assert!(outcome.decoy_confirmed);
         assert!(!outcome.scored);
@@ -377,10 +427,8 @@ mod tests {
     /// remove the signal a reader needs in order to discount it.
     #[test]
     fn a_fast_verdict_is_flagged_but_still_counts() {
-        let quest = committed("prefers it", true, false);
-        let outcome = StandardIntake
-            .decide(&quest, "prefers it", &Verdict::Confirm, at(1), 2.0)
-            .expect("accept");
+        let quest = committed(true, false);
+        let outcome = decide(&quest, &Verdict::Confirm, at(1)).expect("accept");
 
         assert!(outcome.suspiciously_fast);
         assert!(outcome.scored, "it is flagged, not excluded");
@@ -390,20 +438,17 @@ mod tests {
     /// to object to would drift upward on its own.
     #[test]
     fn a_confirmation_queues_nothing() {
-        let quest = committed("prefers it", false, false);
-        let outcome = StandardIntake
-            .decide(&quest, "prefers it", &Verdict::Confirm, at(60), 2.0)
-            .expect("accept");
+        let quest = committed(false, false);
+        let outcome = decide(&quest, &Verdict::Confirm, at(60)).expect("accept");
         assert!(outcome.delta.is_none());
     }
 
     /// A single correction never overturns a stance backed by fifty memories.
     #[test]
     fn a_rejection_weighs_more_than_a_minor_correction_but_stays_small() {
-        let quest = committed("prefers it", false, false);
+        let quest = committed(false, false);
         let weight = |v: Verdict| {
-            StandardIntake
-                .decide(&quest, "prefers it", &v, at(60), 2.0)
+            decide(&quest, &v, at(60))
                 .expect("accept")
                 .delta
                 .map(|d| d.weight)
@@ -430,7 +475,7 @@ mod tests {
     /// signal the corpus receives.
     #[test]
     fn a_correction_becomes_a_memory_tagged_with_its_quest() {
-        let quest = committed("prefers it", true, false);
+        let quest = committed(true, false);
         let memory = StandardIntake::correction_memory(
             &quest,
             &Verdict::Correct {
@@ -453,11 +498,46 @@ mod tests {
         );
     }
 
+    /// A rejection with no explanation still carries signal, so it still queues
+    /// a delta — one that names no correction memory, because there is none.
+    #[test]
+    fn a_bare_rejection_queues_a_delta_with_no_correction() {
+        let quest = committed(false, false);
+        let outcome = decide(&quest, &Verdict::Reject { note: None }, at(60)).expect("accept");
+
+        assert!(outcome.memory.is_none());
+        let delta = outcome.delta.expect("a delta");
+        assert!(delta.correction_id.is_none());
+        assert_eq!(delta.memory_id, quest.evidence[0]);
+    }
+
+    /// When the user did write something, the delta points at it, so a weakened
+    /// stance stays traceable to the sentence that weakened it.
+    #[test]
+    fn a_written_correction_is_named_by_its_delta() {
+        let quest = committed(false, false);
+        let outcome = decide(
+            &quest,
+            &Verdict::Correct {
+                correction: "I would have said the opposite".to_owned(),
+                severity: Severity::Minor,
+            },
+            at(60),
+        )
+        .expect("accept");
+
+        let memory = outcome.memory.expect("a memory");
+        assert_eq!(
+            outcome.delta.expect("a delta").correction_id,
+            Some(memory.id)
+        );
+    }
+
     /// A verdict with no words of the user's own stores nothing. A placeholder
     /// would be the ghost putting text in its owner's mouth.
     #[test]
     fn a_verdict_carrying_no_words_stores_nothing() {
-        let quest = committed("prefers it", true, false);
+        let quest = committed(true, false);
         for verdict in [
             Verdict::Confirm,
             Verdict::Unknown,
