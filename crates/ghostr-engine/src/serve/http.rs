@@ -50,12 +50,18 @@ pub enum Method {
 pub struct Request<'a> {
     /// The method.
     pub method: Method,
-    /// The path, without any query string.
-    pub path: &'a str,
+    /// The path, percent-decoded, without any query string.
+    ///
+    /// Owned because decoding may change it. Decoding happens *before* the
+    /// traversal check, not after: `%2e%2e%2f` is `../` and a check run on the
+    /// raw form would not see it.
+    pub path: String,
     /// The `Authorization: Bearer` value, if one was sent.
     pub bearer: Option<&'a str>,
     /// The `Origin` header, if one was sent.
     pub origin: Option<&'a str>,
+    /// The `Host` header, which is what an `Origin` has to match.
+    pub host: Option<&'a str>,
     /// The body.
     pub body: &'a [u8],
 }
@@ -83,6 +89,8 @@ pub enum Status {
     Unprocessable,
     /// 500.
     ServerError,
+    /// 503.
+    Unavailable,
 }
 
 impl Status {
@@ -99,6 +107,7 @@ impl Status {
             Self::PayloadTooLarge => "413 Payload Too Large",
             Self::Unprocessable => "422 Unprocessable Content",
             Self::ServerError => "500 Internal Server Error",
+            Self::Unavailable => "503 Service Unavailable",
         }
     }
 }
@@ -144,6 +153,7 @@ pub fn parse(buf: &[u8]) -> Result<Result<Request<'_>, Incomplete>, Status> {
 
     let mut bearer = None;
     let mut origin = None;
+    let mut host = None;
     let mut content_length = 0usize;
     let mut seen_length = false;
     let mut count = 0usize;
@@ -189,6 +199,7 @@ pub fn parse(buf: &[u8]) -> Result<Result<Request<'_>, Incomplete>, Status> {
                 bearer = value.strip_prefix("Bearer ").map(str::trim);
             }
             "origin" => origin = Some(value),
+            "host" => host = Some(value),
             _ => {}
         }
     }
@@ -203,12 +214,13 @@ pub fn parse(buf: &[u8]) -> Result<Result<Request<'_>, Incomplete>, Status> {
         path,
         bearer,
         origin,
+        host,
         body: &buf[body_start..total],
     }))
 }
 
 /// Splits `METHOD SP path SP version`.
-fn parse_request_line(line: &[u8]) -> Result<(Method, &str), Status> {
+fn parse_request_line(line: &[u8]) -> Result<(Method, String), Status> {
     let text = std::str::from_utf8(line).map_err(|_| Status::BadRequest)?;
     let mut parts = text.split(' ');
     let method = match parts.next().ok_or(Status::BadRequest)? {
@@ -226,10 +238,43 @@ fn parse_request_line(line: &[u8]) -> Result<(Method, &str), Status> {
     // parameter, and a token in one would land in every log and history file
     // that ever saw the URL.
     let path = target.split(['?', '#']).next().unwrap_or("/");
+    let path = percent_decode(path)?;
     if !path.starts_with('/') || path.contains("..") {
         return Err(Status::BadRequest);
     }
     Ok((method, path))
+}
+
+/// Decodes `%XX` escapes.
+///
+/// Needed because identifiers in a path contain `:`, which every browser
+/// percent-encodes — so a server that skips this rejects every request naming
+/// one, and does it with a `400` that says nothing about why.
+///
+/// Refuses a malformed escape rather than passing it through: `%` followed by
+/// something that is not two hex digits is not a path anyone meant to send, and
+/// guessing at it is how a decoder ends up disagreeing with the one in front of
+/// it.
+fn percent_decode(path: &str) -> Result<String, Status> {
+    if !path.contains('%') {
+        return Ok(path.to_owned());
+    }
+
+    let raw = path.as_bytes();
+    let mut out = Vec::with_capacity(raw.len());
+    let mut at = 0;
+    while at < raw.len() {
+        if raw[at] == b'%' {
+            let hex = raw.get(at + 1..at + 3).ok_or(Status::BadRequest)?;
+            let text = std::str::from_utf8(hex).map_err(|_| Status::BadRequest)?;
+            out.push(u8::from_str_radix(text, 16).map_err(|_| Status::BadRequest)?);
+            at += 3;
+        } else {
+            out.push(raw[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| Status::BadRequest)
 }
 
 /// Finds the blank line ending the header block.
@@ -271,7 +316,8 @@ pub fn response(status: Status, content_type: &str, body: &[u8]) -> Vec<u8> {
          Referrer-Policy: no-referrer\r\n\
          Content-Security-Policy: default-src 'none'; \
 script-src 'unsafe-inline'; style-src 'unsafe-inline'; \
-connect-src 'self'; img-src data:; form-action 'none'; frame-ancestors 'none'\r\n\
+connect-src 'self'; img-src 'self' data:; manifest-src 'self'; \
+form-action 'none'; frame-ancestors 'none'; base-uri 'none'\r\n\
          \r\n",
         status.line(),
         body.len()
@@ -287,8 +333,46 @@ connect-src 'self'; img-src data:; form-action 'none'; frame-ancestors 'none'\r\
 /// memory content in a response the caller was not allowed to have (I8).
 #[must_use]
 pub fn error_response(status: Status) -> Vec<u8> {
-    let body = format!("{{\"error\":\"{}\"}}", status.line());
+    refusal(status, "")
+}
+
+/// The same, plus the name of the rule that refused.
+///
+/// A status code alone makes two unrelated refusals indistinguishable — a
+/// cross-origin request and a quest whose commitment does not verify are both
+/// `403`, and a screen that guesses between them tells the user the wrong
+/// thing. The `rule` names which check fired, never what was asked for, so it
+/// stays as content-free as the status it accompanies (I8).
+#[must_use]
+pub fn refusal(status: Status, rule: &str) -> Vec<u8> {
+    let body = if rule.is_empty() {
+        format!("{{\"error\":\"{}\"}}", status.line())
+    } else {
+        format!("{{\"error\":\"{}\",\"rule\":\"{rule}\"}}", status.line())
+    };
     response(status, "application/json; charset=utf-8", body.as_bytes())
+}
+
+/// Whether an `Origin` names the same origin as `Host`.
+///
+/// Browsers send `Origin` on **every** POST, not only cross-origin ones, so a
+/// server that refuses any request carrying one refuses its own page's writes.
+/// That failure is invisible from the outside: reads keep working and every
+/// write silently 403s.
+///
+/// An absent `Origin` is same-origin by omission — that is a plain GET, or a
+/// script or curl, neither of which a browser can be tricked into making on a
+/// user's behalf. `Origin: null`, which a sandboxed frame sends, matches no
+/// host and is refused.
+#[must_use]
+pub fn same_origin(origin: &str, host: Option<&str>) -> bool {
+    let Some(host) = host.filter(|h| !h.is_empty()) else {
+        return false;
+    };
+    origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .is_some_and(|named| named.eq_ignore_ascii_case(host))
 }
 
 #[cfg(test)]
@@ -377,6 +461,42 @@ mod tests {
         );
     }
 
+    /// Browsers attach `Origin` to every POST, so this decides whether the
+    /// page's own writes work at all.
+    #[test]
+    fn same_origin_compares_the_whole_authority() {
+        assert!(same_origin("http://127.0.0.1:7749", Some("127.0.0.1:7749")));
+        assert!(same_origin(
+            "https://box.local:7749",
+            Some("box.local:7749")
+        ));
+        // Case in a hostname is not significant.
+        assert!(same_origin("http://Box.Local:7749", Some("box.local:7749")));
+
+        // A different port is a different origin, and a check on the hostname
+        // alone would wave this through.
+        assert!(!same_origin(
+            "http://127.0.0.1:9999",
+            Some("127.0.0.1:7749")
+        ));
+        assert!(!same_origin("https://evil.example", Some("127.0.0.1:7749")));
+        // What a sandboxed frame sends.
+        assert!(!same_origin("null", Some("127.0.0.1:7749")));
+        // Nothing to compare against is not a match.
+        assert!(!same_origin("http://127.0.0.1:7749", None));
+        assert!(!same_origin("http://127.0.0.1:7749", Some("")));
+        // A prefix of the real host is not the real host.
+        assert!(!same_origin("http://127.0.0.1", Some("127.0.0.1:7749")));
+    }
+
+    #[test]
+    fn a_host_header_is_read() {
+        let r = get("GET / HTTP/1.1\r\nHost: 127.0.0.1:7749\r\n\r\n")
+            .expect("accepted")
+            .expect("complete");
+        assert_eq!(r.host, Some("127.0.0.1:7749"));
+    }
+
     #[test]
     fn an_unimplemented_method_is_refused() {
         for method in ["HEAD", "PUT", "DELETE", "OPTIONS", "TRACE"] {
@@ -394,6 +514,38 @@ mod tests {
             .expect("accepted")
             .expect("complete");
         assert_eq!(r.path, "/api/quests");
+    }
+
+    /// Every browser percent-encodes the `:` in an identifier, so a server that
+    /// skips this rejects every request naming one — with a `400` that says
+    /// nothing about why.
+    #[test]
+    fn a_percent_encoded_path_is_decoded() {
+        let r = get("POST /api/quests/qst%3Aabc123/answer HTTP/1.1\r\n\r\n")
+            .expect("accepted")
+            .expect("complete");
+        assert_eq!(r.path, "/api/quests/qst:abc123/answer");
+    }
+
+    /// Decoding has to happen *before* the traversal check, or the check is
+    /// looking at a string the router will never see.
+    #[test]
+    fn an_encoded_traversal_is_refused_too() {
+        assert_eq!(
+            get("GET /%2e%2e%2fetc/passwd HTTP/1.1\r\n\r\n"),
+            Err(Status::BadRequest)
+        );
+    }
+
+    #[test]
+    fn a_malformed_escape_is_refused_rather_than_guessed_at() {
+        for path in ["/a%", "/a%2", "/a%zz", "/a%2z"] {
+            assert_eq!(
+                get(&format!("GET {path} HTTP/1.1\r\n\r\n")),
+                Err(Status::BadRequest),
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -446,6 +598,32 @@ mod tests {
     #[test]
     fn a_request_line_without_a_version_is_refused() {
         assert_eq!(get("GET /\r\n\r\n"), Err(Status::BadRequest));
+    }
+
+    /// The policy has to permit the page's own furniture, or an installed copy
+    /// loses its Home Screen icon and falls back to a screenshot. Caught by a
+    /// browser rather than by reading: the icons are served from this origin,
+    /// and `img-src data:` alone silently refused them.
+    #[test]
+    fn the_policy_allows_this_origin_and_no_other() {
+        let text = String::from_utf8_lossy(&response(Status::Ok, "text/html", b"x")).into_owned();
+        let policy = text
+            .lines()
+            .find(|l| l.starts_with("Content-Security-Policy:"))
+            .expect("a policy");
+
+        for allowed in [
+            "img-src 'self'",
+            "manifest-src 'self'",
+            "connect-src 'self'",
+        ] {
+            assert!(policy.contains(allowed), "{allowed} missing from {policy}");
+        }
+        // Nothing remote, which is what makes the policy worth having: injected
+        // corpus text would have nowhere to send what it read (§T7).
+        assert!(!policy.contains("http://"), "{policy}");
+        assert!(!policy.contains("https://"), "{policy}");
+        assert!(policy.contains("default-src 'none'"), "{policy}");
     }
 
     /// No CORS headers, on any path. Their absence is what stops a page on

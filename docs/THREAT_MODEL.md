@@ -419,9 +419,23 @@ what becomes readable, at the moment of the decision rather than in a footnote.
 - **No rate limiting.** Guessing a 256-bit token is not a realistic attack, so
   there is nothing here to slow down; a request flood is a denial of service
   against yourself, on your own machine.
-- The server handles one connection at a time. That is a deliberate simplicity
-  — `SqliteStore` is not `Sync`, so there is no shared state to race — but it
-  means a stalled client blocks the next one until its ten-second timeout.
+- Connections are served concurrently but the vault is touched under a mutex,
+  so work against the store serialises. That is correct rather than merely
+  convenient — `SqliteStore` holds a connection that is `Send` but not `Sync`,
+  so there is one writer by construction. A request is read and parsed *before*
+  the lock is taken, which is what stops a silent client from stalling a real
+  one; concurrency is capped, and a connection over the cap is refused
+  immediately rather than queued.
+- **The page can write to the vault.** `POST /api/journal` is the only endpoint
+  that stores memory content, and it is what makes a phone a client rather than
+  a viewer. Under `--lan` it means anyone holding the token can put words in the
+  user's corpus, not merely read it — a corpus that then trains the persona.
+  Nothing here detects that.
+- The token is kept in the browser's `localStorage` rather than for one tab
+  only, because an app relaunched from a Home Screen otherwise asks for the link
+  again every morning and stops being used. It therefore survives on the device
+  until the site data is cleared. It is scoped to the served origin, and a
+  server restart invalidates every stored copy.
 
 ---
 

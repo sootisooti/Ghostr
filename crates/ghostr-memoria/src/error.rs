@@ -8,10 +8,19 @@ pub type Result<T, E = Error> = core::result::Result<T, E>;
 #[non_exhaustive]
 pub enum Error {
     /// A draft failed validation and cannot be sealed.
-    #[error("draft failed validation with {count} error(s)")]
+    ///
+    /// Names the rules it broke. A count alone tells a user that something is
+    /// wrong and gives them nowhere to go, and every one of these is either a
+    /// bug in the pipeline or a shape of corpus nobody anticipated — both worth
+    /// reading.
+    ///
+    /// The rule names carry field names and indices, never content (I8).
+    #[error("draft failed validation: {}", broken.join("; "))]
     ValidationFailed {
         /// How many rules were broken.
         count: usize,
+        /// Which rules, rendered.
+        broken: Vec<String>,
     },
 
     /// The window to seal is already sealed.

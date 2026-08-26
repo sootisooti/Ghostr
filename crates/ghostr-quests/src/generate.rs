@@ -63,6 +63,12 @@ pub struct QuestContext<'a> {
     pub engagement: EngagementStats,
     /// The holdout policy in force.
     pub holdout: HoldoutPolicy,
+    /// Answers already sitting unanswered on the user's screen.
+    ///
+    /// A question still open from yesterday and asked again today is the same
+    /// question twice, and it reads as the ghost not paying attention. The
+    /// caller supplies these because only it can see the open set.
+    pub avoid: &'a [String],
     /// Sentences the user actually wrote, for cloze quests.
     ///
     /// Supplied by the caller because a persona carries exemplar *ids* and the
@@ -236,7 +242,7 @@ impl QuestGenerator for DeterministicGenerator {
         // Two quests with the same answer in one day is one question asked
         // twice: it doubles the weight of whatever it probes and reads, to the
         // user, as the ghost not paying attention.
-        let mut asked: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut asked: std::collections::BTreeSet<String> = ctx.avoid.iter().cloned().collect();
 
         while out.len() < n {
             let before = out.len();
@@ -718,6 +724,7 @@ mod tests {
                 streak_days: 4,
             },
             holdout: HoldoutPolicy::default(),
+            avoid: &[],
             voice_exemplars,
         }
     }

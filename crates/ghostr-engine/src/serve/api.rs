@@ -12,13 +12,39 @@ use ghostr_core::ids::QuestId;
 use serde::Serialize;
 
 use super::Token;
-use super::http::{Method, Request, Status, error_response, response};
+use super::http::{Method, Request, Status, error_response, refusal, response};
 use crate::engine::Engine;
 
 /// `application/json`, spelled once.
 const JSON: &str = "application/json; charset=utf-8";
 /// `text/html`, spelled once.
 const HTML: &str = "text/html; charset=utf-8";
+/// The manifest's media type, which browsers are strict about.
+const MANIFEST_TYPE: &str = "application/manifest+json; charset=utf-8";
+/// `image/svg+xml`, for the browser tab.
+const SVG: &str = "image/svg+xml";
+/// `image/png`, for the Home Screen.
+const PNG: &str = "image/png";
+
+/// What makes an installed copy look like an app rather than a page.
+///
+/// `standalone` is what removes the browser chrome once it is on a Home
+/// Screen, which is the difference between a daily habit and a bookmark
+/// somebody opens twice.
+const MANIFEST: &str = r##"{
+  "name": "Ghostr",
+  "short_name": "ghost",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0d0e12",
+  "theme_color": "#0d0e12",
+  "icons": [
+    { "src": "/icon.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}"##;
 
 /// Dispatches one request.
 #[must_use]
@@ -26,18 +52,35 @@ pub fn route(engine: &Engine, token: &Token, request: &Request<'_>, ui: &str) ->
     // The page itself carries no data — it fetches everything — so it is served
     // without a token. Requiring one here would mean putting the token in the
     // URL, where it would land in browser history and every proxy log.
-    if request.method == Method::Get && (request.path == "/" || request.path == "/index.html") {
-        return response(Status::Ok, HTML, ui.as_bytes());
+    // The page and its furniture carry no vault data — the page fetches
+    // everything — so they are served without a token. Requiring one would mean
+    // putting the token in the URL path, where it would land in browser history
+    // and every proxy log; and an icon fetched by the Home Screen has no way to
+    // present one anyway.
+    if request.method == Method::Get {
+        match request.path.as_str() {
+            "/" | "/index.html" => return response(Status::Ok, HTML, ui.as_bytes()),
+            "/manifest.webmanifest" => {
+                return response(Status::Ok, MANIFEST_TYPE, MANIFEST.as_bytes());
+            }
+            "/icon.svg" => return response(Status::Ok, SVG, super::icon::SVG.as_bytes()),
+            "/icon.png" => return response(Status::Ok, PNG, &super::icon::png()),
+            _ => {}
+        }
     }
 
     // A cross-origin page must not be able to reach this, even holding a
     // guessed token. There are no CORS headers on any response, so a browser
     // will not surface the body — but refusing outright means a request that
     // *writes* never runs at all.
+    //
+    // Checked against `Host` rather than by presence: browsers attach `Origin`
+    // to every POST, same-origin ones included, so refusing any request that
+    // carries one refuses the page's own writes while every read keeps working.
     if let Some(origin) = request.origin
-        && !origin.is_empty()
+        && !super::http::same_origin(origin, request.host)
     {
-        return error_response(Status::Forbidden);
+        return refusal(Status::Forbidden, "cross_origin");
     }
 
     match request.bearer {
@@ -54,6 +97,8 @@ pub fn route(engine: &Engine, token: &Token, request: &Request<'_>, ui: &str) ->
         (Method::Get, "quests") => quests(engine),
         (Method::Get, "fidelity") => fidelity(engine),
         (Method::Post, "quests/issue") => issue(engine),
+        (Method::Get, "recap") => recap(engine),
+        (Method::Post, "journal") => journal(engine, request.body),
         (Method::Post, path) => match path.strip_prefix("quests/") {
             Some(id) => answer(engine, id, request.body),
             None => return error_response(Status::NotFound),
@@ -63,6 +108,7 @@ pub fn route(engine: &Engine, token: &Token, request: &Request<'_>, ui: &str) ->
 
     match result {
         Ok(body) => response(Status::Ok, JSON, body.as_bytes()),
+        Err(Status::Forbidden) => refusal(Status::Forbidden, "commitment_mismatch"),
         Err(status) => error_response(status),
     }
 }
@@ -80,6 +126,8 @@ fn classify(error: &crate::Error) -> Status {
             Status::Conflict
         }
         crate::Error::Quests(QuestError::CommitmentMismatch { .. }) => Status::Forbidden,
+        // The rule name is what separates this from a cross-origin refusal,
+        // which shares its status.
         crate::Error::Quests(QuestError::InsufficientSample { .. }) => Status::Unprocessable,
         crate::Error::Config { .. } => Status::Unprocessable,
         crate::Error::Locked => Status::Unauthorized,
@@ -320,6 +368,90 @@ fn parse_verdict(body: &AnswerBody) -> Result<ghostr_core::quest::Verdict, Statu
     })
 }
 
+/// What the user types on their phone.
+#[derive(serde::Deserialize)]
+struct JournalBody {
+    text: String,
+}
+
+/// What an entry produced. The id, never the words back.
+#[derive(Serialize)]
+struct JournalView {
+    id: String,
+    /// Where it landed, which is the thing worth confirming.
+    stored: &'static str,
+}
+
+/// Records a journal entry typed into the page.
+///
+/// This is the only endpoint that *writes memory content*, and it is what makes
+/// the phone a client rather than a window: a thought recorded where it
+/// happened, rather than remembered until the user is next at a keyboard.
+///
+/// The entry goes straight into the encrypted store. It is never written to a
+/// plaintext file, not even a temporary one (I1), and the response echoes the
+/// id rather than the text — there is no reason to send a memory back over a
+/// socket it just arrived on.
+fn journal(engine: &Engine, body: &[u8]) -> Result<String, Status> {
+    let body: JournalBody = serde_json::from_slice(body).map_err(|_| Status::BadRequest)?;
+    if body.text.trim().is_empty() {
+        return Err(Status::BadRequest);
+    }
+    let id = crate::ops::journal_add(engine, &body.text).map_err(|e| classify(&e))?;
+    encode(&JournalView {
+        id: id.to_string(),
+        stored: "encrypted, on this device",
+    })
+}
+
+/// The day, as a screen can show it.
+#[derive(Serialize)]
+struct RecapView {
+    date: String,
+    sealed: bool,
+    empty: bool,
+    highlights: Vec<String>,
+    people: usize,
+    mood: Option<MoodView>,
+    open_threads: Vec<String>,
+    closed_today: usize,
+}
+
+#[derive(Serialize)]
+struct MoodView {
+    valence: f32,
+    arousal: f32,
+    labels: Vec<String>,
+    /// `stated` or `inferred`. The user is the authority on how their day felt,
+    /// and a screen that did not say which was which would be presenting the
+    /// ghost's guess as their own words.
+    basis: String,
+}
+
+fn recap(engine: &Engine) -> Result<String, Status> {
+    let build = || -> crate::Result<RecapView> {
+        let tz = engine.home_tz()?;
+        let recap = crate::ops::recap(engine, engine.now().date_in(&tz))?;
+        let f = &recap.footage;
+        Ok(RecapView {
+            date: recap.date.to_string(),
+            sealed: recap.sealed,
+            empty: f.empty,
+            highlights: f.highlights.iter().map(|h| h.summary.clone()).collect(),
+            people: f.people.len(),
+            mood: (f.mood.confidence > 0.0).then(|| MoodView {
+                valence: f.mood.valence,
+                arousal: f.mood.arousal,
+                labels: f.mood.labels.clone(),
+                basis: format!("{:?}", f.mood.basis).to_lowercase(),
+            }),
+            open_threads: f.open_threads.iter().map(|t| t.title.clone()).collect(),
+            closed_today: f.closed_loops.len(),
+        })
+    };
+    build().map_err(|e| classify(&e)).and_then(|v| encode(&v))
+}
+
 /// A score, with everything that qualifies it.
 ///
 /// The interval, the sample size, and the integrity signals are not optional
@@ -454,12 +586,13 @@ mod tests {
         (engine, token, clock)
     }
 
-    fn request<'a>(method: Method, path: &'a str, bearer: Option<&'a str>) -> Request<'a> {
+    fn request<'a>(method: Method, path: &str, bearer: Option<&'a str>) -> Request<'a> {
         Request {
             method,
-            path,
+            path: path.to_owned(),
             bearer,
             origin: None,
+            host: Some("127.0.0.1:7749"),
             body: b"",
         }
     }
@@ -736,6 +869,131 @@ mod tests {
         ] {
             assert!(out.contains(field), "a score went out without {field}");
         }
+    }
+
+    /// Without these an installed copy is a bookmark: iOS falls back to a
+    /// screenshot of whatever the page looked like when it was saved, which is
+    /// usually a spinner.
+    #[test]
+    fn the_page_furniture_is_served_without_a_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, token, _clock) = ready(dir.path());
+        for (path, marker) in [
+            ("/manifest.webmanifest", "standalone"),
+            ("/icon.svg", "<svg"),
+        ] {
+            let out = text(&route(
+                &engine,
+                &token,
+                &request(Method::Get, path, None),
+                "",
+            ));
+            assert!(out.contains("200 OK"), "{path}");
+            assert!(out.contains(marker), "{path}");
+        }
+
+        let png = route(
+            &engine,
+            &token,
+            &request(Method::Get, "/icon.png", None),
+            "",
+        );
+        assert!(text(&png).contains("200 OK"));
+        assert!(
+            png.windows(4).any(|w| w == b"PNG\x0d" || w == b"\x89PNG"),
+            "the icon did not come back as a PNG"
+        );
+    }
+
+    /// The thing that makes a phone a client rather than a window: a thought
+    /// recorded where it happened.
+    #[test]
+    fn a_journal_entry_is_stored_and_not_echoed_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, token, _clock) = ready(dir.path());
+        const ENTRY: &str = "the train was late so I read on the platform instead";
+
+        let body = format!("{{\"text\":\"{ENTRY}\"}}");
+        let mut req = request(Method::Post, "/api/journal", Some(token.expose()));
+        req.body = body.as_bytes();
+        let out = text(&route(&engine, &token, &req, ""));
+
+        assert!(out.contains("200 OK"), "{out}");
+        // The id comes back, not the words. There is no reason to send a memory
+        // back over the socket it just arrived on.
+        assert!(!out.contains("platform"), "the entry was echoed back");
+
+        let dek = engine.dek().expect("dek");
+        assert!(
+            engine
+                .store()
+                .all_memories(dek)
+                .expect("memories")
+                .iter()
+                .any(|m| m.body.text == ENTRY),
+            "the entry was not stored"
+        );
+    }
+
+    /// I1. It goes straight into the encrypted store — never a plaintext file,
+    /// not even a temporary one.
+    #[test]
+    fn a_journal_entry_never_lands_in_plaintext_on_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        const ENTRY: &str = "met Nan at the tea shop about the lease";
+        {
+            let (engine, token, _clock) = ready(dir.path());
+            let body = format!("{{\"text\":\"{ENTRY}\"}}");
+            let mut req = request(Method::Post, "/api/journal", Some(token.expose()));
+            req.body = body.as_bytes();
+            assert!(text(&route(&engine, &token, &req, "")).contains("200 OK"));
+        }
+
+        let mut raw = Vec::new();
+        for entry in std::fs::read_dir(dir.path()).expect("read dir").flatten() {
+            raw.extend(std::fs::read(entry.path()).unwrap_or_default());
+        }
+        assert!(
+            !raw.windows(ENTRY.len()).any(|w| w == ENTRY.as_bytes()),
+            "a journal entry reached the disk in plaintext"
+        );
+    }
+
+    #[test]
+    fn an_empty_journal_entry_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, token, _clock) = ready(dir.path());
+        for body in ["{\"text\":\"\"}", "{\"text\":\"   \"}", "{}"] {
+            let mut req = request(Method::Post, "/api/journal", Some(token.expose()));
+            req.body = body.as_bytes();
+            assert!(
+                text(&route(&engine, &token, &req, "")).contains("400 Bad Request"),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recap_shows_the_day_without_sealing_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, token, _clock) = ready(dir.path());
+        let before = engine.store().tip().expect("tip").map_or(0, |t| t.seq);
+
+        let out = text(&route(
+            &engine,
+            &token,
+            &request(Method::Get, "/api/recap", Some(token.expose())),
+            "",
+        ));
+        assert!(out.contains("200 OK"), "{out}");
+        assert!(out.contains("highlights"));
+
+        // Looking at today must not close it (I2, I3).
+        assert_eq!(
+            engine.store().tip().expect("tip").map_or(0, |t| t.seq),
+            before,
+            "reading the recap advanced the chain"
+        );
     }
 
     /// I8. Status is a dashboard, not a window into the corpus.

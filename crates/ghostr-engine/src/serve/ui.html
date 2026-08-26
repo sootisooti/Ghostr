@@ -8,6 +8,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>ghost</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.png">
+<meta name="theme-color" content="#0d0e12" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f7f7f5" media="(prefers-color-scheme: light)">
 <style>
 :root {
   --bg: #0d0e12; --panel: #16181f; --line: #262a36;
@@ -61,13 +66,20 @@ textarea {
 .qual { color: var(--dim); font-size: .875rem; margin-top: .375rem; }
 .bar { height: 6px; background: var(--line); border-radius: 3px; margin: .75rem 0 .25rem; position: relative; overflow: hidden; }
 .bar i { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .35; }
-.bar u { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--accent); }
+/* Centred on its own position and inset, so the marker is still visible
+   when the estimate sits at 0% or 100% — which is exactly when a reader most
+   needs to see where it is. */
+.bar u { position: absolute; top: -3px; bottom: -3px; width: 3px; border-radius: 2px;
+         background: var(--accent); transform: translateX(-50%); }
+.bar { overflow: visible; }
 table { width: 100%; border-collapse: collapse; font-size: .875rem; margin-top: .5rem; }
 td { padding: .3125rem 0; border-bottom: 1px solid var(--line); }
 td:last-child { text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
 .flag { color: var(--warn); font-size: .875rem; margin-top: .5rem; }
 .flag.bad { color: var(--bad); }
 .empty { color: var(--dim); text-align: center; padding: 2rem 1rem; }
+.list { margin: .5rem 0 0; padding-left: 1.1rem; }
+.list li { margin: .25rem 0; overflow-wrap: anywhere; }
 nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex;
       background: var(--panel); border-top: 1px solid var(--line);
       padding-bottom: env(safe-area-inset-bottom); }
@@ -83,7 +95,8 @@ nav button[aria-current="true"] { color: var(--accent); }
   <div id="view"></div>
 </main>
 <nav>
-  <button data-tab="quests" aria-current="true">Quests</button>
+  <button data-tab="today" aria-current="true">Today</button>
+  <button data-tab="quests">Quests</button>
   <button data-tab="score">Fidelity</button>
   <button data-tab="vault">Vault</button>
 </nav>
@@ -94,15 +107,21 @@ nav button[aria-current="true"] { color: var(--accent); }
 // history and access logs stays in the tab. It is cleared from the address bar
 // as soon as it is read, and kept only for this tab.
 const KEY = "ghostr.token";
+// Kept in localStorage rather than sessionStorage: an app launched from the
+// Home Screen gets a fresh page every time iOS evicts it, and a loop that asks
+// you to re-open a link each morning is a loop that stops getting used. The
+// token is per-run anyway — restarting the server invalidates every stored copy,
+// and a stale one degrades to the "reopen the link" screen rather than to
+// silence.
 (function () {
   const m = location.hash.match(/(?:^|[#&])t=([a-f0-9]{64})/i);
   if (m) {
-    try { sessionStorage.setItem(KEY, m[1]); } catch (e) { window.__tok = m[1]; }
+    try { localStorage.setItem(KEY, m[1]); } catch (e) { window.__tok = m[1]; }
     history.replaceState(null, "", location.pathname);
   }
 })();
 function token() {
-  try { return sessionStorage.getItem(KEY) || window.__tok || ""; }
+  try { return localStorage.getItem(KEY) || window.__tok || ""; }
   catch (e) { return window.__tok || ""; }
 }
 
@@ -126,13 +145,20 @@ async function call(path, method, body) {
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-  if (!res.ok) { const e = new Error((data && data.error) || res.status); e.status = res.status; throw e; }
+  if (!res.ok) {
+    const e = new Error((data && data.error) || res.status);
+    e.status = res.status;
+    // Two refusals share 403. The rule name is what tells them apart, so the
+    // screen can say which one actually fired instead of guessing.
+    e.rule = data && data.rule;
+    throw e;
+  }
   return data;
 }
 
 const view = document.getElementById("view");
 const head = document.getElementById("head");
-let tab = "quests";
+let tab = "today";
 
 function show(html) { view.innerHTML = html; }
 function fail(e) {
@@ -221,7 +247,7 @@ function resultHtml(r) {
 }
 
 async function loadQuests() {
-  head.textContent = "today";
+  head.textContent = "quests";
   let list;
   try { list = await call("/api/quests"); } catch (e) { return fail(e); }
 
@@ -275,11 +301,68 @@ view.addEventListener("click", async (ev) => {
     card.querySelector('[data-role="result"]').innerHTML = resultHtml(r);
   } catch (e) {
     card.querySelector('[data-role="result"]').innerHTML =
-      `<div class="flag bad">${e.status === 409 ? "Already answered, or past its window."
-        : e.status === 403 ? "That quest cannot reproduce its own commitment. Refused."
+      `<div class="flag bad">${
+        e.status === 409 ? "Already answered, or past its window."
+        : e.rule === "commitment_mismatch" ? "That quest cannot reproduce its own commitment. Refused."
+        : e.rule === "cross_origin" ? "Refused: that request did not come from this page."
         : "Could not record that."}</div>`;
   }
 });
+
+/* ---------- today ---------- */
+
+async function loadToday() {
+  head.textContent = "today";
+  let r;
+  try { r = await call("/api/recap"); } catch (e) { return fail(e); }
+
+  const mood = r.mood
+    ? `<div class="note">${esc((r.mood.labels || []).join(", ") || "no labels")} ·
+        ${r.mood.basis === "stated" ? "you said so" : "the ghost inferred it"}</div>`
+    : "";
+
+  const highlights = r.highlights.length
+    ? `<ul class="list">${r.highlights.map((h) => `<li>${esc(h)}</li>`).join("")}</ul>`
+    : `<div class="note">Nothing yet. Write something below and it lands in the vault
+       encrypted, on this device.</div>`;
+
+  const threads = r.open_threads.length
+    ? `<div class="card"><div class="tag">open loops</div>
+       <ul class="list">${r.open_threads.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>`
+    : "";
+
+  show(`<div class="card">
+      <div class="meta"><span class="tag">${esc(r.date)}</span>
+        <span class="tag">${r.sealed ? "sealed" : "not sealed yet"}</span></div>
+      ${highlights}${mood}
+      ${r.people ? `<div class="note">${r.people} person(s) appeared</div>` : ""}
+    </div>
+    ${threads}
+    <div class="card">
+      <div class="tag">write something down</div>
+      <textarea id="entry" placeholder="what just happened" rows="3"></textarea>
+      <button class="primary wide" id="save">Save to the vault</button>
+      <div class="note" id="saved"></div>
+    </div>`);
+
+  const area = document.getElementById("entry");
+  const btn = document.getElementById("save");
+  btn.onclick = async () => {
+    const text = area.value.trim();
+    if (!text) { area.focus(); return; }
+    btn.disabled = true;
+    try {
+      await call("/api/journal", "POST", { text });
+      area.value = "";
+      document.getElementById("saved").textContent =
+        "Saved, encrypted, on this device. It becomes part of today's footage at the cutoff.";
+    } catch (e) {
+      document.getElementById("saved").textContent = "Could not save that.";
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
 
 /* ---------- fidelity ---------- */
 
@@ -309,6 +392,8 @@ async function loadScore() {
       </div>
       <div class="qual">95% interval ${pct(lo)}–${pct(hi)} ·
         ${s.converged ? "converged" : "not yet converged"}</div>
+      <div class="note">The bar is the interval, not the score. A narrow bar is
+        evidence; a wide one means the number has not earned its precision yet.</div>
       <div class="note">Brier ${s.brier.toFixed(3)} · ECE ${s.ece.toFixed(3)} · at chain seq ${s.committed_at_seq}</div>
     </div>
     ${s.by_facet.length ? `<div class="card"><div class="tag">by facet</div><table>${rows(s.by_facet)}</table></div>` : ""}
@@ -357,7 +442,8 @@ document.querySelector("nav").addEventListener("click", (ev) => {
 
 function render() {
   show(`<div class="card"><div class="empty">…</div></div>`);
-  if (tab === "quests") loadQuests();
+  if (tab === "today") loadToday();
+  else if (tab === "quests") loadQuests();
   else if (tab === "score") loadScore();
   else loadVault();
 }

@@ -159,7 +159,14 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome
         mood,
         open_threads: thread_update.open,
         closed_loops: thread_update.closed,
-        carried_threads: previous_open.iter().map(|t| t.id).collect(),
+        // The previous day's carry *plus* whatever today opened. A task
+        // written down and ticked off the same day closes a thread that was
+        // never carried in, and without it here the day refuses to seal at all.
+        carried_threads: previous_open
+            .iter()
+            .map(|t| t.id)
+            .chain(thread_update.opened.iter().copied())
+            .collect(),
         unresolved,
         memory_ids: memories.iter().map(|m| m.id).collect(),
         amendments,
@@ -174,6 +181,7 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome
         return Err(crate::Error::Memoria(
             ghostr_memoria::Error::ValidationFailed {
                 count: errors.len(),
+                broken: errors.iter().map(|e| format!("{e:?}")).collect(),
             },
         ));
     }
@@ -1086,6 +1094,15 @@ pub fn issue_quests(engine: &Engine, date: NaiveDate) -> crate::Result<QuestIssu
     let expired = engine.store().expire_quests(now)?;
 
     let exemplars = voice_exemplars(engine, &persona)?;
+    // Questions already waiting on the user's screen. Asking one of them again
+    // today would double the weight of whatever it probes and read, to a person
+    // opening the app, as the ghost having forgotten.
+    let avoid: Vec<String> = engine
+        .store()
+        .quests_with_status(dek, ghostr_core::quest::QuestStatus::Open, 200)?
+        .iter()
+        .map(|q| q.kind.committed_answer().to_owned())
+        .collect();
     let ctx = QuestContext {
         persona: &persona,
         version: persona.version,
@@ -1098,6 +1115,7 @@ pub fn issue_quests(engine: &Engine, date: NaiveDate) -> crate::Result<QuestIssu
         tier: ghostr_quests::generate::CapabilityTier::Small,
         engagement: engagement(engine, now)?,
         holdout: HoldoutPolicy::default(),
+        avoid: &avoid,
         voice_exemplars: &exemplars,
     };
 

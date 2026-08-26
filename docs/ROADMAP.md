@@ -162,8 +162,16 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
       emits fewer quests of the kinds it can do well (SPEC Q7), which on a stock
       build means `Cloze` and `FactRecall`.
 - [x] A loop fast enough to be a daily ritual: `ghostr serve` puts the day's
-      quests on a page you can open on a phone, one tap per verdict. The CLI's
+      quests, the day's recap, the score, and a box to write in on a page a
+      phone can install to its Home Screen, one tap per verdict. The CLI's
       `quest answer` remains for scripts.
+- [ ] A recurring task that is *completed* is invisible to routine distillation.
+      `routines()` counts threads still open at each cutoff, and a thread opened
+      and closed the same day appears in no `open_threads` anywhere — so the
+      commonest shape of a habit ("- [ ] run" then "- [x] run") produces no
+      routine. Fixing it means footage recording closed loops with their titles,
+      which changes a hashed commitment and needs a migration plan (CLAUDE.md
+      §4.7).
 
 **Exit criteria**
 - [x] 30-day run on a synthetic corpus produces a fidelity score with a Wilson

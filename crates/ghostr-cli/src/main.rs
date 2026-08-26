@@ -650,7 +650,7 @@ fn cmd_serve(dir: &std::path::Path, http: Option<&str>, lan: bool) -> Result<()>
     };
 
     println!("{}", render::serve_banner(dir, &bind, &token)?);
-    serve::serve(&engine, &bind, &token).context("serving")
+    serve::serve(engine, &bind, &token).context("serving")
 }
 
 /// Parses a bind address, allowing a bare port or a bare host.

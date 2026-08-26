@@ -84,12 +84,15 @@ pub struct DraftFootage {
     pub open_threads: Vec<Thread>,
     /// Threads that closed today.
     pub closed_loops: Vec<ThreadId>,
-    /// Threads carried in from the previous sealed day.
+    /// Threads this day could legitimately close: the previous day's carry,
+    /// plus everything this day opened.
     ///
     /// Not part of the footage — it is an input to composition, kept on the
     /// draft so `ClosedLoopNeverOpened` is checkable at all. A thread that
     /// closed today has already been removed from `open_threads`, so without
-    /// this the draft holds no record that it was ever open.
+    /// this the draft holds no record that it was ever open. That includes
+    /// threads opened *and* closed today, which is what a person does every
+    /// time they tick off a task they wrote down that morning.
     pub carried_threads: Vec<ThreadId>,
     /// What the extractor could not determine.
     pub unresolved: Vec<OpenQuestion>,

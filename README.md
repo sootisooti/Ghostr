@@ -123,9 +123,11 @@ open  http://127.0.0.1:7749/#t=10bdc441…
   this machine only
 ```
 
-The page is one file compiled into the binary — no CDN, no npm, no build step.
-The token is in the URL fragment, which browsers never send to a server and
-proxies never log.
+The page is one file compiled into the binary — no CDN, no npm, no build step —
+and it declares a manifest and an icon, so **Add to Home Screen** gives you an
+app rather than a bookmark. Four screens: today's recap with a box to write in,
+the day's quests, the score, and the vault's state. The token is in the URL
+fragment, which browsers never send to a server and proxies never log.
 
 Without a model the generator asks the kinds it can do well — clozes over
 sentences you wrote and recall claims about routines it counted — rather than
