@@ -239,6 +239,71 @@ fn held_out_corrections_never_enter_the_training_queue() {
     }
 }
 
+/// SPEC I7 has a second door: a held-out correction produces no delta, but it
+/// is *also* a memory, and distillation reads memories. Training on one would
+/// mean the ghost had seen the answer to a question it is about to be scored
+/// on — through the corpus rather than through the queue (SPEC Q18).
+#[test]
+fn a_held_out_correction_never_reaches_distillation() {
+    let home = tempfile::tempdir().unwrap();
+    let (engine, clock) = ready_vault(&home.path().join("vault"));
+    let dek = engine.dek().expect("dek");
+
+    ops::issue_quests(&engine, start_date()).expect("issue");
+    let open = ops::open_quests(&engine, 100).expect("open");
+    let held_out: Vec<_> = open.iter().filter(|q| q.holdout).map(|q| q.id).collect();
+    assert!(
+        !held_out.is_empty(),
+        "no holdout in the batch; nothing tested"
+    );
+
+    for quest in &open {
+        clock.advance(30);
+        ops::answer_quest(
+            &engine,
+            quest.id,
+            Verdict::Correct {
+                correction: "I would have put it the other way round".to_owned(),
+                severity: Severity::Major,
+            },
+        )
+        .expect("answer");
+    }
+
+    // The held-out corrections are stored — they are the user's own words — but
+    // under a source distillation does not read.
+    let quarantined: std::collections::BTreeSet<_> = engine
+        .store()
+        .all_sources(dek)
+        .expect("sources")
+        .into_iter()
+        .filter(|s| s.kind_tag == "verdict_holdout")
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(quarantined.len(), 1, "held-out corrections were stored");
+
+    let stored: Vec<_> = engine
+        .store()
+        .all_memories(dek)
+        .expect("memories")
+        .into_iter()
+        .filter(|m| quarantined.contains(&m.source_id))
+        .collect();
+    assert_eq!(
+        stored.len(),
+        held_out.len(),
+        "every held-out correction is kept, just quarantined"
+    );
+
+    let candidate = ops::propose_persona(&engine).expect("propose");
+    for memory in &stored {
+        assert!(
+            !candidate.model.derived_from.contains(&memory.id),
+            "a held-out correction reached distillation"
+        );
+    }
+}
+
 /// A correction becomes corpus and a queued delta; adopting a version clears
 /// the queue so the same correction cannot be counted twice.
 #[test]

@@ -95,16 +95,30 @@ network.) Either way the pipeline falls back to its deterministic path when a mo
 is absent, so a runtime being down costs the recap its polish and never costs
 the day its seal.
 
-M2 is under way. The persona model distils, versions, and diffs: voice,
-relationships, and routines are computed from the corpus exactly — sentence
-lengths and punctuation rates are arithmetic, not estimates — while opinions,
-boundaries, and lore wait for a model rather than being guessed. `ghostr-testkit`
-landed ahead of it: a synthetic corpus generator that hands back its own ground
-truth, a scripted model, a deterministic clock and RNG, and a permanent set of
-hostile fixtures.
+M2 is under way, and the daily loop now runs end to end on a stock build. The
+persona model distils, versions, and diffs: voice, relationships, and routines
+are computed from the corpus exactly — sentence lengths and punctuation rates
+are arithmetic, not estimates — while opinions, boundaries, and lore wait for a
+model rather than being guessed. On top of it, quests are issued with their
+answers already committed, answered, and scored:
 
-Quests, the fidelity score, and relays are still defined with `todo!()` bodies,
-so the shape is reviewable before it is built.
+```console
+$ ghostr quest issue                # commits to every answer, then asks
+$ ghostr quest list                 # the ghost's answer stays sealed
+$ ghostr quest answer qst:a1b2c3d4 correct --text "not how I'd put it"
+$ ghostr fidelity                   # never a bare percentage
+```
+
+Without a model the generator asks the kinds it can do well — clozes over
+sentences you wrote and recall claims about routines it counted — rather than
+inventing the three that need a model to write their prompt. What is *not* yet
+there: those three kinds, a keyboard loop fast enough to be a daily ritual, and
+committing the day's quest set into the footage Merkle tree. Relays are still
+defined with `todo!()` bodies, so the shape is reviewable before it is built.
+
+`ghostr-testkit` landed ahead of all of it: a synthetic corpus generator that
+hands back its own ground truth, a scripted model, a deterministic clock and
+RNG, and a permanent set of hostile fixtures.
 
 ```console
 $ cargo build --workspace        # 14 crates, compiles clean
@@ -122,8 +136,8 @@ $ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
 | [CLAUDE.md](CLAUDE.md) | Working conventions for this repo |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, CI, commit format, good first contributions |
 
-Milestone **M2** (the persona model, quests, and the fidelity score) is the next
-thing to be built. See the [roadmap](docs/ROADMAP.md).
+What remains of milestone **M2** is the model-written quest kinds and a quest UI
+worth using daily. See the [roadmap](docs/ROADMAP.md).
 
 ## Quickstart
 
@@ -147,6 +161,9 @@ $ ghostr footage list                      # sealed days, with their chain links
 $ ghostr footage show 1                    # highlights, people, mood, open threads
 $ ghostr persona distill                   # propose a model of you; read the diff
 $ ghostr persona show                      # what the ghost thinks you are like
+$ ghostr quest issue                       # today's claims, answers committed first
+$ ghostr quest list                        # answer them; the ghost's answer is sealed
+$ ghostr fidelity                          # the score, with what qualifies it
 $ ghostr egress log                        # everything that has left this device
 $ ghostr anchor                            # stamp the chain tip via OpenTimestamps
 $ ghostr verify                            # re-derive the chain from genesis
@@ -189,10 +206,12 @@ anchors 0 confirmed, 1 pending, 1 unanchored
 history intact
 ```
 
-**What M0 gives you, with no AI involved:** an encrypted local journal whose
+**What this gives you with no AI involved:** an encrypted local journal whose
 history cannot be silently altered, with a Bitcoin timestamp proving each day
-existed. The persona model, quests, and the fidelity score arrive in M2 — see the
-[roadmap](docs/ROADMAP.md).
+existed — plus a ghost distilled by counting rather than guessing, and a daily
+loop that checks it against you and reports a number with its evidence attached.
+What a model adds is the three quest kinds that need one to write their prompt,
+and opinions and lore in the persona — see the [roadmap](docs/ROADMAP.md).
 
 ## Platform constraints
 
@@ -208,8 +227,8 @@ These are non-negotiable and every design decision downstream respects them:
 
 ## Contributing
 
-The most useful contribution right now is disagreement. The design is unbuilt,
-which makes it cheap to change.
+The most useful contribution right now is disagreement. Most of the design is
+still cheap to change.
 
 Start with the **Open Questions** at the end of [docs/SPEC.md](docs/SPEC.md) —
 each one has a recommended answer and none of them are settled. Open an issue if

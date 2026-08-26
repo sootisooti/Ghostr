@@ -1,6 +1,6 @@
 # Ghostr — Product & Protocol Specification
 
-**Status:** Draft v0.1 · unimplemented · everything here is changeable
+**Status:** Draft v0.2 · M0 and M1 implemented, M2 under way · still changeable
 **Scope:** what Ghostr is, what it stores, how the loop runs, how memory is
 committed, and what goes on the wire.
 
@@ -521,8 +521,14 @@ answer_commitment = H_tag("ghostr/v1/quest-answer",
                           quest_id || canonical(ghost_answer) || confidence_bits || nonce)
 ```
 
-The nonce is stored alongside. On verdict intake, the app re-derives the
-commitment and refuses the verdict if it doesn't match. This is not primarily
+The nonce is stored alongside, and `ghost_answer` is read back off the claim
+itself rather than kept in a second column — a commitment to an answer the quest
+does not state is one nobody can check. On verdict intake the app re-derives the
+commitment and refuses the verdict if it doesn't match. Storage keeps the
+commitment, the holdout flag, and the decoy flag immutable after issue while the
+claim beside them stays writable, which is what gives that check something to
+catch: a question edited between issue and verdict no longer reproduces its own
+commitment. This is not primarily
 defence against an outside attacker — it's defence against *us*: it makes it
 structurally impossible for a future version of the client to peek at the user's
 answer and adjust the ghost's before scoring. The commitment is included in the
@@ -554,14 +560,24 @@ number is shown to anyone else.
 A `Verdict::Correct` produces:
 
 1. A new `Memory` (`kind: Utterance` for voice corrections, `kind: Fact` for
-   recall corrections, `TrustLevel::FirstParty`, high `salience`).
-2. A `PersonaDelta` queued against the implicated facet.
+   recall corrections, `TrustLevel::FirstParty`, high `salience`), tagged with
+   the quest that produced it so distillation can weight verdict-derived
+   content separately.
+2. A `PersonaDelta` queued against the implicated facet — **only** when the
+   quest was not held out (I7).
 
 Deltas are **not** applied immediately. They accumulate and are applied at the
 next persona distillation (§6.4), so a version bump reflects a batch of evidence
 rather than one bad morning. A single correction never overwrites a stance backed
 by fifty memories; it lowers `strength` and raises `contradicted_by` until the
-weight actually shifts.
+weight actually shifts. The queue is drained when a version is **adopted**, not
+when one is proposed: a diff the user reads and declines must not consume the
+corrections it was built from.
+
+A held-out correction still becomes a memory, because it is the user's own
+words and discarding it would be a loss. It is filed under a separate source
+that distillation does not read. Both halves of I7 are enforced at the point of
+application: no delta, and no corpus (Q18).
 
 ---
 
@@ -1389,13 +1405,24 @@ Showing it anchors the user's judgement; hiding it costs a useful signal.
 
 ---
 
-**Q18 — Are verdicts themselves memories?**
+**~~Q18 — Are verdicts themselves memories?~~ — resolved in M2.**
 
-If yes, answering quests changes the corpus that generates quests, which is a
-feedback loop worth being deliberate about.
+*Yes, and held-out ones are quarantined by source.* The recommendation stands
+and is now §4.5: a correction is first-party utterance data and among the
+highest-quality signal the corpus receives, tagged with the quest that produced
+it so distillation can weight it separately.
 
-> **Recommendation:** yes — a correction is first-party utterance data and some of
-> the highest-quality signal in the system (§4.5). But tag them with their origin
-> so distillation can weight them separately, and exclude verdict-derived memories
-> from the evidence pool for *held-out* quests. Otherwise the holdout leaks
-> through the corpus and I7 is quietly violated.
+The guard the recommendation asked for turned out to need a stronger form than
+"exclude them from the evidence pool for held-out quests". The leak is not only
+into a held-out quest's evidence; it is into the **persona itself**. A held-out
+correction produces no `PersonaDelta` — that was already enforced — but the
+memory it produces is read by distillation like any other, so the ghost would
+train on the answer to a question it is about to be scored on, through the
+corpus rather than through the queue.
+
+So held-out corrections are filed under their own source, and distillation
+reads every first-party source **except** that one. The split is by source
+rather than by trust level or by a naming convention, because a foreign key is
+checkable and a convention is something somebody has to remember. The words are
+kept, not dropped: they are the user's own, and the quest they answered still
+carries them.

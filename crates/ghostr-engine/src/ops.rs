@@ -997,6 +997,10 @@ fn first_party_sources(engine: &Engine) -> crate::Result<std::collections::BTree
         .all_sources(engine.dek()?)?
         .into_iter()
         .filter(|s| s.trust == TrustLevel::FirstParty)
+        // I7. Held-out corrections are first-party and are excluded anyway:
+        // training on one would mean the ghost had seen the answer to a
+        // question it is about to be scored on (SPEC Q18).
+        .filter(|s| s.kind_tag != VERDICT_HOLDOUT_SOURCE_TAG)
         .map(|s| s.id)
         .collect())
 }
@@ -1004,13 +1008,27 @@ fn first_party_sources(engine: &Engine) -> crate::Result<std::collections::BTree
 /// How far back engagement and fidelity look by default.
 const QUEST_WINDOW_DAYS: i64 = 30;
 
-/// The source verdict-derived memories are filed under.
+/// The source trainable verdict-derived memories are filed under.
 ///
 /// Its own source, not the vault's. A correction is the user answering a
 /// question the ghost asked, and folding that into "markdown vault" would make
 /// the corpus unable to tell what the user wrote unprompted from what the ghost
 /// prompted out of them (SPEC Q18).
 const VERDICT_SOURCE_TAG: &str = "verdict";
+
+/// The source held-out verdict-derived memories are filed under.
+///
+/// I7 has a second door, and this is what closes it. Held-out corrections
+/// already produce no [`PersonaDelta`](ghostr_core::persona::PersonaDelta) —
+/// but the correction is *also* a memory, and distillation reads memories. A
+/// held-out correction in the general corpus would train the ghost on the
+/// answer to a question it is about to be scored on, through the corpus rather
+/// than through the queue.
+///
+/// The words are kept rather than dropped: they are the user's own, and a
+/// separate source is a foreign key rather than a naming convention somebody
+/// has to remember (SPEC Q18).
+const VERDICT_HOLDOUT_SOURCE_TAG: &str = "verdict_holdout";
 
 /// What one `quest issue` produced.
 ///
@@ -1172,7 +1190,7 @@ pub fn answer_quest(
     let mut salt = [0u8; 32];
     engine.rng().fill(&mut salt);
     let slot = CorrectionSlot {
-        source: verdict_source(engine)?,
+        source: verdict_source(engine, quest.holdout)?,
         id: MemoryId::new(now.utc_millis().unsigned_abs(), random),
         salt,
     };
@@ -1371,7 +1389,12 @@ fn voice_exemplars(
 }
 
 /// The source verdict-derived memories are filed under, created on first use.
-fn verdict_source(engine: &Engine) -> crate::Result<SourceId> {
+///
+/// Two of them, split on holdout. Both are first-party — a held-out correction
+/// is no less the user's own words — so the split is by source rather than by
+/// trust: softening the trust level to keep it out of distillation would be
+/// lying about where the sentence came from.
+fn verdict_source(engine: &Engine, holdout: bool) -> crate::Result<SourceId> {
     use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
     use ghostr_store::sqlite::NewSourceRow;
 
@@ -1381,7 +1404,11 @@ fn verdict_source(engine: &Engine) -> crate::Result<SourceId> {
         engine.dek()?,
         &NewSourceRow {
             id: SourceId::new(engine.now().utc_millis().unsigned_abs(), random),
-            kind_tag: VERDICT_SOURCE_TAG,
+            kind_tag: if holdout {
+                VERDICT_HOLDOUT_SOURCE_TAG
+            } else {
+                VERDICT_SOURCE_TAG
+            },
             config: "",
             // First-party: these are the user's own words, written deliberately
             // about themselves. They are among the highest-quality signal the

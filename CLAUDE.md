@@ -7,10 +7,12 @@ down anywhere else.
 
 **Current state: M0 and M1 are implemented; M2 is under way.** The vault,
 ingest, the Memoria pipeline, the hash chain, `ghostr verify`, the egress gate,
-the encrypted vector index, and persona distillation all work — and all work
-with no model at all, because every model call falls back to a deterministic
-path. What remains of M2 is quests and the fidelity score
-([docs/ROADMAP.md](docs/ROADMAP.md)).
+the encrypted vector index, persona distillation, and the daily quest loop —
+issue, answer, score — all work, and all work with no model at all, because
+every model call falls back to a deterministic path. What remains of M2 is the
+three quest kinds that need a model to write their prompt, a quest UI fast
+enough to use daily, and committing the day's quest set into the footage Merkle
+tree ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.
