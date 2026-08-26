@@ -27,29 +27,23 @@
 //!
 //! # Status
 //!
-//! Scaffold. Types and signatures are defined; bodies are [`todo!`].
+//! Implemented: fidelity scoring, quest generation with answer commitments, and
+//! verdict intake. The three quest kinds that need a model to write their
+//! prompt arrive with the model path.
 
 #![forbid(unsafe_code)]
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
 // the exception: a failed assertion should panic loudly with a message, and
 // threading `Result` through test bodies buries what is actually being asserted.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
-// only for the scaffold phase and are removed crate-by-crate as bodies land.
-// `unused_variables` and `dead_code` fire because a diverging body never reads
-// its arguments and never calls its helpers; parameters keep real names rather
-// than `_` prefixes so the signatures stay readable. `clippy::todo` is denied
-// workspace-wide by CLAUDE.md §5 and this is the documented exception.
-// `cargo xtask scaffold-status` counts these markers so they cannot be quietly
-// forgotten.
-#![allow(unused_variables, dead_code, clippy::todo)]
-
 pub mod error;
 pub mod generate;
 pub mod score;
 pub mod verdict;
 
 pub use error::{Error, Result};
-pub use generate::{QuestContext, QuestGenerator};
-pub use score::{ScoredQuest, Scorer};
-pub use verdict::VerdictIntake;
+pub use generate::{
+    DeterministicGenerator, QuestContext, QuestGenerator, commit_answer, verify_commitment,
+};
+pub use score::{ScoredQuest, Scorer, StandardScorer};
+pub use verdict::{StandardIntake, VerdictIntake, VerdictOutcome};
