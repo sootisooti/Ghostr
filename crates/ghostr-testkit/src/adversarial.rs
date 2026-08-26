@@ -17,7 +17,7 @@
 //! # Third-party, always
 //!
 //! Injected content arrives as
-//! [`TrustLevel::ThirdParty`](ghostr_core::sensitivity::TrustLevel::ThirdParty)
+//! [`TrustLevel::ThirdParty`]
 //! because that is how it actually arrives — through a nostr feed or an RSS
 //! item, never from the user. A fixture that marked it first-party would be
 //! testing a case that cannot happen while claiming to test one that can.
