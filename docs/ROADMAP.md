@@ -161,9 +161,17 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
       `VoiceProbe`, `Counterfactual`, `Prediction`. Without one the generator
       emits fewer quests of the kinds it can do well (SPEC Q7), which on a stock
       build means `Cloze` and `FactRecall`.
-- [ ] The fast keyboard loop. `quest answer` works one quest at a time; a daily
-      ritual that takes 90 seconds gets done and one that takes 5 minutes does
-      not, and the current shape is closer to the second.
+- [x] A loop fast enough to be a daily ritual: `ghostr serve` puts the day's
+      quests, the day's recap, the score, and a box to write in on a page a
+      phone can install to its Home Screen, one tap per verdict. The CLI's
+      `quest answer` remains for scripts.
+- [ ] A recurring task that is *completed* is invisible to routine distillation.
+      `routines()` counts threads still open at each cutoff, and a thread opened
+      and closed the same day appears in no `open_threads` anywhere — so the
+      commonest shape of a habit ("- [ ] run" then "- [x] run") produces no
+      routine. Fixing it means footage recording closed loops with their titles,
+      which changes a hashed commitment and needs a migration plan (CLAUDE.md
+      §4.7).
 
 **Exit criteria**
 - [x] 30-day run on a synthetic corpus produces a fidelity score with a Wilson
@@ -187,6 +195,7 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
       anchored. Today a score names the chain `seq` it was computed at, which
       dates it but does not commit the quests themselves.
 - [ ] Median time to answer 5 quests, measured on real users: under 2 minutes.
+      The page exists; the measurement does not.
 
 **Not in M2:** relays, multi-device, publishing.
 
@@ -252,7 +261,7 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
   (SPEC Q9), per-facet convergence reporting, long-horizon `Prediction` scoring.
 - "Ghost speaks" mode with guardrails: `Boundary` facet enforcement, refusal on
   low-confidence topics, always-on disclosure.
-- Tauri desktop shell over the same local API the CLI uses.
+- Native desktop shell over the same local API the CLI and the served page use.
 - Direct OP_RETURN anchoring as an opt-in alternative to OTS (SPEC Q4).
 - Adapter authoring guide + `ghostr-testkit` conformance suite, so third-party
   sources are contributable without touching the core.

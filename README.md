@@ -109,6 +109,26 @@ $ ghostr quest answer qst:a1b2c3d4 correct --text "not how I'd put it"
 $ ghostr fidelity                   # never a bare percentage
 ```
 
+And on a screen, because a daily ritual that takes five minutes does not get
+done. `ghostr serve` binds a Unix socket by default; `--http` adds a loopback
+listener, and putting it on the wifi for a phone takes one more flag that exists
+to make you say so out loud:
+
+```console
+$ ghostr serve --http
+listening on ~/.local/share/ghostr/ghostr.sock
+  a unix socket: no port, no network, owner-only
+
+open  http://127.0.0.1:7749/#t=10bdc441…
+  this machine only
+```
+
+The page is one file compiled into the binary — no CDN, no npm, no build step —
+and it declares a manifest and an icon, so **Add to Home Screen** gives you an
+app rather than a bookmark. Four screens: today's recap with a box to write in,
+the day's quests, the score, and the vault's state. The token is in the URL
+fragment, which browsers never send to a server and proxies never log.
+
 Without a model the generator asks the kinds it can do well — clozes over
 sentences you wrote and recall claims about routines it counted — rather than
 inventing the three that need a model to write their prompt. What is *not* yet
@@ -164,6 +184,7 @@ $ ghostr persona show                      # what the ghost thinks you are like
 $ ghostr quest issue                       # today's claims, answers committed first
 $ ghostr quest list                        # answer them; the ghost's answer is sealed
 $ ghostr fidelity                          # the score, with what qualifies it
+$ ghostr serve --http                      # the same loop, on a screen
 $ ghostr egress log                        # everything that has left this device
 $ ghostr anchor                            # stamp the chain tip via OpenTimestamps
 $ ghostr verify                            # re-derive the chain from genesis

@@ -9,10 +9,10 @@ down anywhere else.
 ingest, the Memoria pipeline, the hash chain, `ghostr verify`, the egress gate,
 the encrypted vector index, persona distillation, and the daily quest loop —
 issue, answer, score — all work, and all work with no model at all, because
-every model call falls back to a deterministic path. What remains of M2 is the
-three quest kinds that need a model to write their prompt, a quest UI fast
-enough to use daily, and committing the day's quest set into the footage Merkle
-tree ([docs/ROADMAP.md](docs/ROADMAP.md)).
+every model call falls back to a deterministic path. `ghostr serve` puts the
+loop on a page a phone can open. What remains of M2 is the three quest kinds
+that need a model to write their prompt, and committing the day's quest set into
+the footage Merkle tree ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.
@@ -53,7 +53,7 @@ all ← engine ← cli
 | `ghostr-quests` | Generation, verdicts, scoring, fidelity math. |
 | `ghostr-anchor` | Commitment chain (pure) + OpenTimestamps (network). |
 | `ghostr-nostr` | Relay client, event codec for kinds 31780–31789. |
-| `ghostr-engine` | Composition root: wiring, scheduling, job queue, local API. |
+| `ghostr-engine` | Composition root: wiring, scheduling, job queue, local API, and the page it serves. |
 | `ghostr-cli` | The `ghostr` binary. |
 | `ghostr-testkit` | Fixtures, fake clock/rng/model. **dev-dependency only.** |
 
@@ -106,7 +106,8 @@ Ordered by how much damage they cause.
    in the *current* day's footage. (I2, I3)
 4. **Never bypass the egress gate.** No HTTP client to a provider outside
    `ghostr-llm`, no "quick test call", no `reqwest` in another crate's
-   `Cargo.toml`. (I4, I5)
+   `Cargo.toml`. (I4, I5) The local API in `ghostr-engine` is a *server*, not a
+   client: it accepts connections and never opens one.
 5. **Never send `Sensitivity::Secret` to a remote provider.** There is no
    override flag and there must never be one. `egress_allow` in a vault's
    config cannot name `embedding` either — there is no remote embedding path

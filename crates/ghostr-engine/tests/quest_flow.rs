@@ -391,6 +391,36 @@ fn an_expired_quest_is_closed_and_unanswerable() {
     ));
 }
 
+/// A question still open from yesterday, asked again today, is the same
+/// question twice — and to someone opening the app it reads as the ghost having
+/// forgotten what it already asked.
+#[test]
+fn a_question_already_waiting_is_not_asked_again() {
+    let home = tempfile::tempdir().unwrap();
+    let (engine, clock) = ready_vault(&home.path().join("vault"));
+
+    ops::issue_quests(&engine, start_date()).expect("day one");
+    let waiting: std::collections::BTreeSet<String> = ops::open_quests(&engine, 100)
+        .expect("open")
+        .iter()
+        .map(|q| q.kind.committed_answer().to_owned())
+        .collect();
+    assert!(!waiting.is_empty(), "nothing issued; the check is vacuous");
+
+    // A second day, with the first day's questions still unanswered.
+    clock.advance(86_400);
+    ops::issue_quests(&engine, start_date().succ_opt().expect("next day")).expect("day two");
+
+    let all = ops::open_quests(&engine, 200).expect("open");
+    let answers: Vec<&str> = all.iter().map(|q| q.kind.committed_answer()).collect();
+    let unique: std::collections::BTreeSet<&&str> = answers.iter().collect();
+    assert_eq!(
+        unique.len(),
+        answers.len(),
+        "the same question is open twice at once"
+    );
+}
+
 /// Two runs on one day would let a user re-roll until the questions looked easy.
 #[test]
 fn a_day_is_issued_once() {

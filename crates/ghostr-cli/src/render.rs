@@ -12,8 +12,10 @@ use ghostr_core::sensitivity::Sensitivity;
 use ghostr_engine::engine::{Engine, InitOutcome};
 use ghostr_engine::ops::CandidateVersion;
 use ghostr_engine::ops::{IngestReport, QuestIssue, Recap, VerifyReport};
+use ghostr_engine::serve::{Bind, Token};
 use ghostr_engine::sources::{SourcePlan, SyncReport};
 use ghostr_engine::types::{AnchorRecord, AnchorRecordState, Footage};
+use ghostr_quests::Presented;
 use ghostr_quests::VerdictOutcome;
 use ghostr_store::sqlite::{EgressRecord, PersonaSummary, StoredSource};
 
@@ -741,43 +743,27 @@ fn local(at: ghostr_core::time::Timestamp) -> String {
 
 /// What the user is asked, with nothing they should not see yet.
 ///
-/// For `VoiceProbe` and `Counterfactual` the ghost's answer *is* the question,
-/// so it is shown. For the rest it is withheld: printing it would be handing
-/// over the answer key, which is the one thing that makes the score a lie.
+/// The decision about what may be shown is not made here. It is made once, in
+/// [`ghostr_quests::present`], so that this renderer and the local API's cannot
+/// disagree about it — and the one that disagrees is always the newer one,
+/// written by someone who did not know the rule existed (I6).
 fn question(kind: &QuestKind) -> String {
-    match kind {
-        QuestKind::VoiceProbe {
+    match ghostr_quests::present(kind) {
+        Presented::Assertion {
             prompt,
             ghost_answer,
-        } => format!("on \"{prompt}\", the ghost says you'd say:\n\"{ghost_answer}\""),
-        QuestKind::Counterfactual {
-            scenario,
-            ghost_answer,
-        } => format!("in \"{scenario}\", the ghost says you'd:\n\"{ghost_answer}\""),
-        QuestKind::FactRecall { claim, as_of } => format!("{as_of}: {claim}"),
-        QuestKind::Prediction { claim, horizon } => format!("by {horizon}: {claim}"),
-        QuestKind::Preference { a, b, .. } => {
+        } => format!("on \"{prompt}\", the ghost says:\n\"{ghost_answer}\""),
+        Presented::Claim { text, when } => format!("{when}: {text}"),
+        Presented::Choice { a, b } => {
             format!("A: {a}\nB: {b}\n(the ghost has picked one; it is sealed until you answer)")
         }
-        QuestKind::Cloze {
-            context, redacted, ..
-        } => {
-            let start = redacted.start as usize;
-            let end = redacted.end as usize;
-            if start <= end
-                && end <= context.len()
-                && context.is_char_boundary(start)
-                && context.is_char_boundary(end)
-            {
-                format!("fill the gap: {}___{}", &context[..start], &context[end..])
-            } else {
-                // A span that does not land on a character boundary means the
-                // row is damaged. Showing the whole sentence would reveal the
-                // answer, so it shows nothing instead.
-                "fill the gap: (this quest's span is damaged; answer `void`)".to_owned()
-            }
+        Presented::Gap { before, after } => format!("fill the gap: {before}___{after}"),
+        // `Unrenderable` and any variant a later version adds land together:
+        // showing nothing is the only safe rendering of a shape this build does
+        // not understand.
+        Presented::Unrenderable | _ => {
+            "(this build cannot show this quest safely; answer `void`)".to_owned()
         }
-        other => format!("({} — this build cannot render it)", other.variant_name()),
     }
 }
 
@@ -902,5 +888,86 @@ pub(crate) fn fidelity(score: &FidelityScore) -> String {
             "not yet — see SPEC §5.3 for what is still missing"
         }
     ));
+    out
+}
+
+/// What `serve` prints when it starts.
+///
+/// The token is printed here and nowhere else — not into a log, not into a
+/// file. It is in the URL fragment rather than the path, because a browser
+/// never sends a fragment to a server and a proxy never logs one, so a token in
+/// a path would end up in every access log that saw the request.
+///
+/// # Errors
+///
+/// Returns an error if the local addresses cannot be read.
+pub(crate) fn serve_banner(
+    dir: &std::path::Path,
+    bind: &Bind,
+    token: &Token,
+) -> anyhow::Result<String> {
+    let mut out = format!(
+        "listening on {}\n",
+        dir.join(ghostr_engine::serve::SOCKET_FILENAME).display()
+    );
+    out.push_str("  a unix socket: no port, no network, owner-only\n");
+
+    match bind.http {
+        None => {
+            out.push_str(
+                "\nno browser listener. `ghostr serve --http` adds one on this machine only,\n\
+                 and `--http 0.0.0.0:7749 --lan` puts it on the wifi for a phone.\n",
+            );
+        }
+        Some(addr) => {
+            out.push('\n');
+            if ghostr_engine::serve::is_loopback(&addr) {
+                out.push_str(&format!("open  http://{addr}/#t={}\n", token.expose()));
+                out.push_str("  this machine only\n");
+            } else {
+                // The warning goes where the decision is being made, not into a
+                // footnote somebody reads afterwards.
+                out.push_str(&format!(
+                    "  THIS VAULT IS NOW ON THE NETWORK, at {addr}.\n\n  \
+                     Anyone who can reach that address and holds the token below can read\n  \
+                     your memories, your quests, and your score. The token is the only thing\n  \
+                     stopping them, and it is in plaintext HTTP — anyone watching the wifi\n  \
+                     sees it. Use this on a network you trust, and stop it when you are done.\n\n"
+                ));
+                for host in local_addresses(addr.port()) {
+                    out.push_str(&format!("open  http://{host}/#t={}\n", token.expose()));
+                }
+            }
+            out.push_str(
+                "\n  the token is in the URL fragment, which browsers never send to a\n  \
+                          server and proxies never log. It is printed once, here.\n",
+            );
+        }
+    }
+
+    out.push_str("\nctrl-c to stop\n");
+    Ok(out)
+}
+
+/// The addresses a phone on the same network could use.
+///
+/// Best effort: a wildcard bind reaches every interface, and naming them is
+/// more useful than printing `0.0.0.0` and leaving the user to find out their
+/// own address.
+fn local_addresses(port: u16) -> Vec<String> {
+    // Resolving the machine's own hostname is the one portable way to do this
+    // without a dependency. A machine whose hostname does not resolve gets the
+    // literal bind address instead, which still works once the user knows their
+    // own IP.
+    let mut out = Vec::new();
+    if let Ok(name) = std::env::var("HOSTNAME")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()))
+        && !name.is_empty()
+    {
+        out.push(format!("{name}.local:{port}"));
+    }
+    if out.is_empty() {
+        out.push(format!("<this machine's address>:{port}"));
+    }
     out
 }

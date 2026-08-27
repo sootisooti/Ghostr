@@ -40,6 +40,7 @@ pub mod error;
 pub mod model;
 pub mod ops;
 pub mod runtime;
+pub mod serve;
 pub mod sources;
 
 pub use engine::Engine;

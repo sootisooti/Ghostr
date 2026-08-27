@@ -137,6 +137,7 @@ pub fn threads(
 
     let mut open: Vec<Thread> = previous_open.to_vec();
     let mut closed = Vec::new();
+    let mut opened = Vec::new();
 
     for note in notes {
         for title in &note.extraction.open_threads {
@@ -144,8 +145,10 @@ pub fn threads(
                 existing.last_touched_seq = seq;
                 existing.memory_ids.push(note.memory.id);
             } else {
+                let id = next_id();
+                opened.push(id);
                 open.push(Thread {
-                    id: next_id(),
+                    id,
                     title: title.clone(),
                     opened_seq: seq,
                     last_touched_seq: seq,
@@ -178,8 +181,13 @@ pub fn threads(
             .then_with(|| a.title.cmp(&b.title))
     });
     closed.sort();
+    opened.sort();
 
-    ThreadUpdate { open, closed }
+    ThreadUpdate {
+        open,
+        closed,
+        opened,
+    }
 }
 
 /// How threads changed over one day.
@@ -189,6 +197,14 @@ pub struct ThreadUpdate {
     pub open: Vec<Thread>,
     /// Threads that closed today.
     pub closed: Vec<ghostr_core::ids::ThreadId>,
+    /// Every thread this pass opened, including ones it then closed.
+    ///
+    /// Ticking a task off the day you wrote it down is the commonest thing
+    /// anyone does with a checkbox, and such a thread is in neither `open` (it
+    /// closed) nor the previous day's carry (it did not exist yet). Without
+    /// this the validator sees a loop closing that was never opened, and
+    /// refuses to seal the day at all.
+    pub opened: Vec<ghostr_core::ids::ThreadId>,
 }
 
 #[cfg(test)]
@@ -306,5 +322,47 @@ mod tests {
         let beats = people(&notes(&mems), &|_| EntityId::new(1, [1u8; 10]));
         assert_eq!(beats.len(), 1);
         assert_eq!(beats[0].memory_ids, vec![mems[0].id]);
+    }
+
+    /// Ticking a task off the day you wrote it down is the commonest thing
+    /// anyone does with a checkbox — and until this was fixed it made the whole
+    /// day unsealable, because the loop closing had never been carried in.
+    #[test]
+    fn a_thread_opened_and_closed_the_same_day_is_reported_as_opened() {
+        let memory = memory(1, "- [ ] groceries\n- [x] groceries", 0.5);
+        let notes = vec![NoteExtraction {
+            memory: &memory,
+            extraction: extract(&memory.body.text),
+        }];
+        let next = std::cell::Cell::new(0u64);
+        let update = threads(&[], &notes, 1, &|| {
+            next.set(next.get() + 1);
+            ThreadId::new(next.get(), [1u8; 10])
+        });
+
+        assert_eq!(update.closed.len(), 1, "it closed");
+        assert!(
+            update.open.is_empty(),
+            "and is no longer open, which is why it needs reporting separately"
+        );
+        assert_eq!(
+            update.opened, update.closed,
+            "the day must still record having opened it"
+        );
+    }
+
+    /// A `- [x]` for something never written down is not an error — people tick
+    /// off things they never listed — so it must not be reported as opened.
+    #[test]
+    fn closing_something_never_opened_reports_no_open() {
+        let memory = memory(1, "- [x] something I never wrote down", 0.5);
+        let notes = vec![NoteExtraction {
+            memory: &memory,
+            extraction: extract(&memory.body.text),
+        }];
+        let update = threads(&[], &notes, 1, &|| ThreadId::new(1, [1u8; 10]));
+
+        assert!(update.opened.is_empty());
+        assert!(update.closed.is_empty(), "there was nothing to close");
     }
 }

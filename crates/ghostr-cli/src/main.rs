@@ -119,6 +119,24 @@ enum Command {
     /// Submit the chain tip to OpenTimestamps. The only networked command.
     Anchor,
 
+    /// Serve the local API, and the page that drives the daily loop.
+    Serve {
+        /// Also listen on TCP, so a browser can reach it.
+        ///
+        /// Takes an address. `--http` alone means loopback on the default port,
+        /// which only this machine can reach.
+        #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1:7749")]
+        http: Option<String>,
+
+        /// Acknowledge that a non-loopback bind puts the vault on a network.
+        ///
+        /// Required for any address other than loopback. Deliberately a second
+        /// flag: `--http 0.0.0.0:7749` is one typo away from `--http
+        /// 127.0.0.1:7749`, and the difference is who can read your journal.
+        #[arg(long)]
+        lan: bool,
+    },
+
     /// Re-derive the chain from genesis and check every link.
     Verify,
 
@@ -310,6 +328,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Footage(FootageCommand::List) => cmd_footage_list(&dir),
         Command::Footage(FootageCommand::Show { id }) => cmd_footage_show(&dir, id),
         Command::Anchor => cmd_anchor(&dir),
+        Command::Serve { http, lan } => cmd_serve(&dir, http.as_deref(), lan),
         Command::Verify => cmd_verify(&dir),
         Command::Status => cmd_status(&dir),
     }
@@ -596,6 +615,59 @@ fn cmd_anchor(dir: &std::path::Path) -> Result<()> {
     let record = ops::anchor(&engine, &client).context("anchoring the chain tip")?;
     println!("{}", render::anchor(&record));
     Ok(())
+}
+
+/// Serves the local API until interrupted.
+///
+/// The Unix socket is always bound; TCP is opt-in and a non-loopback bind needs
+/// a second flag. That ordering is the documented one (ARCHITECTURE §5): the
+/// local API is a socket, and a listener on a port is the exception a user asks
+/// for rather than the default they inherit.
+fn cmd_serve(dir: &std::path::Path, http: Option<&str>, lan: bool) -> Result<()> {
+    use ghostr_engine::serve::{self, Bind, Token};
+
+    let addr = match http {
+        Some(spec) => Some(resolve_addr(spec)?),
+        None => None,
+    };
+
+    if let Some(addr) = addr
+        && !serve::is_loopback(&addr)
+        && !lan
+    {
+        bail!(
+            "{addr} is reachable from the network, not just this machine.
+               Everything the page shows — your memories, your quests, your score —              would be readable by anyone who can reach that address and guess a token.
+               Pass --lan as well if that is what you meant."
+        );
+    }
+
+    let engine = open(dir)?;
+    let token = Token::mint(&engine);
+    let bind = Bind {
+        http: addr,
+        lan_acknowledged: lan,
+    };
+
+    println!("{}", render::serve_banner(dir, &bind, &token)?);
+    serve::serve(engine, &bind, &token).context("serving")
+}
+
+/// Parses a bind address, allowing a bare port or a bare host.
+fn resolve_addr(spec: &str) -> Result<std::net::SocketAddr> {
+    use ghostr_engine::serve::DEFAULT_PORT;
+
+    let spec = spec.trim();
+    if let Ok(addr) = spec.parse::<std::net::SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Ok(port) = spec.parse::<u16>() {
+        return Ok(std::net::SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    if let Ok(ip) = spec.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, DEFAULT_PORT));
+    }
+    bail!("`{spec}` is not an address; try `127.0.0.1:7749`, a bare port, or a bare address")
 }
 
 fn cmd_verify(dir: &std::path::Path) -> Result<()> {

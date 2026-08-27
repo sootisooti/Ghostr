@@ -151,12 +151,25 @@ impl core::fmt::Debug for QuestKind {
 impl QuestKind {
     /// Whether the ghost's answer must be shown before the user responds.
     ///
-    /// For `VoiceProbe` and `Counterfactual` the answer *is* the question, so it
-    /// has to be visible. For the rest, showing it would hand the user the
-    /// answer key.
+    /// Exactly two kinds withhold it: `Cloze` hides the completion and
+    /// `Preference` hides which option was picked, because showing either would
+    /// hand the user the answer key (SPEC §4.3). Everything else *is* an
+    /// assertion — a `VoiceProbe` claims what the user would say, a
+    /// `FactRecall` claims something happened — and an assertion the user
+    /// cannot read is not a question they can answer.
+    ///
+    /// Matched exhaustively on purpose, with no catch-all: adding a variant
+    /// should stop the build here and make someone decide, because the wrong
+    /// default leaks an answer key and nobody would notice.
     #[must_use]
     pub fn reveals_answer_upfront(&self) -> bool {
-        matches!(self, Self::VoiceProbe { .. } | Self::Counterfactual { .. })
+        match self {
+            Self::VoiceProbe { .. }
+            | Self::Counterfactual { .. }
+            | Self::FactRecall { .. }
+            | Self::Prediction { .. } => true,
+            Self::Cloze { .. } | Self::Preference { .. } => false,
+        }
     }
 
     /// What [`Quest::answer_commitment`] is a commitment to.
@@ -372,6 +385,42 @@ mod tests {
             kind.committed_answer(),
             "you keep coming back to: the parser"
         );
+    }
+
+    /// SPEC §4.3 names exactly two kinds that withhold. A claim the user cannot
+    /// read is not a question they can answer, so everything else shows.
+    #[test]
+    fn only_cloze_and_preference_withhold_their_answer() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 1).expect("date");
+        let withholds = |kind: &QuestKind| !kind.reveals_answer_upfront();
+
+        assert!(withholds(&QuestKind::Cloze {
+            context: "I always order a flat white".to_owned(),
+            redacted: crate::memory::Span { start: 17, end: 27 },
+            ghost_completion: "flat white".to_owned(),
+        }));
+        assert!(withholds(&QuestKind::Preference {
+            a: "coffee".to_owned(),
+            b: "tea".to_owned(),
+            ghost_choice: Choice::A,
+        }));
+
+        assert!(!withholds(&QuestKind::FactRecall {
+            claim: "you saw Nan on Tuesday".to_owned(),
+            as_of: date,
+        }));
+        assert!(!withholds(&QuestKind::Prediction {
+            claim: "you'll skip the gym".to_owned(),
+            horizon: date,
+        }));
+        assert!(!withholds(&QuestKind::VoiceProbe {
+            prompt: "on deadlines".to_owned(),
+            ghost_answer: "ship late over ship wrong".to_owned(),
+        }));
+        assert!(!withholds(&QuestKind::Counterfactual {
+            scenario: "offered the job".to_owned(),
+            ghost_answer: "you'd ask for a week".to_owned(),
+        }));
     }
 
     #[test]
