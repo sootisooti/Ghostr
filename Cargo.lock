@@ -730,9 +730,12 @@ dependencies = [
  "chrono",
  "ghostr-core",
  "ghostr-crypto",
+ "ghostr-testkit",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

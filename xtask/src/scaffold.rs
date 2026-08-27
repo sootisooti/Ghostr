@@ -16,8 +16,8 @@ pub(crate) fn run() -> Result<()> {
     let root = crate::workspace_root()?;
     let mut rows: Vec<(String, usize, bool)> = Vec::new();
 
-    // Only `crates/`. xtask is implemented rather than scaffolded, and scanning
-    // it would count the `todo!(` and `SCAFFOLD:` literals in this very file.
+    // Only `crates/`. xtask is tooling, not one of the crates the milestones
+    // track, so a count of it would mean nothing either way.
     let base = root.join("crates");
     for entry in std::fs::read_dir(&base)?.flatten() {
         let src = entry.path().join("src");
@@ -52,7 +52,7 @@ pub(crate) fn run() -> Result<()> {
     Ok(())
 }
 
-/// Counts `todo!(` occurrences and whether a `SCAFFOLD:` marker is present.
+/// Counts `todo!(` bodies and whether a `SCAFFOLD:` marker is present.
 fn scan(dir: &std::path::Path) -> Result<(usize, bool)> {
     let mut todos = 0;
     let mut marked = false;
@@ -68,11 +68,55 @@ fn scan(dir: &std::path::Path) -> Result<(usize, bool)> {
                 continue;
             }
             let text = std::fs::read_to_string(&path)?;
-            todos += text.matches("todo!(").count();
+            todos += count_todos(&text);
             if text.contains("// SCAFFOLD:") {
                 marked = true;
             }
         }
     }
     Ok((todos, marked))
+}
+
+/// Counts diverging bodies in one file's source.
+///
+/// Comment lines do not count. A number that rises when someone *writes about* a
+/// diverging body is a number people learn to ignore, which defeats the only
+/// thing this command is for — and the scaffold rules are exactly where the docs
+/// need to name the marker out loud.
+///
+/// Line-granular, and that is enough: a diverging body sits on its own line, so
+/// nothing real hides behind a `//` earlier on the same one.
+fn count_todos(text: &str) -> usize {
+    text.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .map(|line| line.matches("todo!(").count())
+        .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_diverging_body_counts() {
+        assert_eq!(count_todos("fn f() {\n    todo!(\"later\")\n}\n"), 1);
+    }
+
+    #[test]
+    fn writing_about_one_does_not() {
+        // Every comment form, because the scaffold rules use all of them.
+        let text = "\
+//! `privacy::gift_wrap` is `todo!()`, blocked on Q20.
+/// Returns before the `todo!(` is reached.
+// SCAFFOLD: one function is still `todo!()`.
+    // indented: still a comment
+fn f() {}
+";
+        assert_eq!(count_todos(text), 0);
+    }
+
+    #[test]
+    fn two_in_one_file_are_both_counted() {
+        assert_eq!(count_todos("todo!(1)\ntodo!(2)\n"), 2);
+    }
 }

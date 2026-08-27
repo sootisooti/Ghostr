@@ -1456,3 +1456,34 @@ reason.
 > `Backend { operation: "change_passphrase needs a caller-supplied salt" }` — a
 > refusal rather than a wrong rewrap, because a rewrap that loses the seed is not
 > recoverable.
+
+---
+
+**Q20 — Who holds the ephemeral key for a NIP-59 gift wrap?**
+
+Gift wrap is three layers: a rumor, a **seal** (kind 13) encrypted to the
+recipient and signed by the real author, and a **wrap** (kind 1059) encrypted and
+signed by a throwaway key that exists only for that one event. The throwaway key
+is the point — it is what hides the author from a relay.
+
+`ghostr-nostr` cannot hold it. §11.3 and ARCHITECTURE §3 rule 4 put secret key
+bytes in `ghostr-crypto` alone, so `privacy::gift_wrap` cannot derive a key from
+entropy handed to it, and it cannot sign the wrap either. The scaffold's
+signature — `gift_wrap(event, ephemeral_entropy)` returning an unsigned event —
+also names no recipient, so there is nobody to encrypt to.
+
+> **Recommendation:** add one method to `Signer`:
+> `gift_wrap(&self, key, recipient, rumor, ephemeral_entropy, nonces) ->
+> Result<SignedEvent>`, returning the finished wrap. The ephemeral key is born
+> and zeroized inside `ghostr-crypto`, never crosses a crate boundary, and never
+> reaches a domain type — the same treatment the identity key gets. `ghostr-nostr`
+> keeps [`PrivacyMode::GiftWrapped`] as the policy decision and delegates the
+> cryptography, which is the split every other seam in this tree already uses.
+>
+> The alternative — a general "sign with this ephemeral key" primitive — is
+> rejected: it is a signing oracle for arbitrary bytes under an
+> attacker-chosen key, and its only caller would be this one.
+>
+> Until this is settled `gift_wrap` is `todo!()` and `PrivacyMode::GiftWrapped`
+> cannot be selected. NIP-59 is opt-in and not on the M3 exit criteria
+> ([ROADMAP](ROADMAP.md)), so nothing else is blocked.

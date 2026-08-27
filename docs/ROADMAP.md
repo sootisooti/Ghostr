@@ -206,11 +206,13 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
 > **Ships:** your ghost on nostr — encrypted backup and sync across your devices,
 > your feed as a source, and an optional public attestation.
 
-**Progress:** the crypto half is done. `ghostr-crypto` carries NIP-44 v2 (checked
-against all 128 reference vectors), NIP-19 `nprofile`/`naddr`, the NIP-01 event
-id, and a `Signer` the local keystore implements — so an event can be signed and
-a payload encrypted before `ghostr-nostr` has a single line in it. What remains
-below is the relay surface itself.
+**Progress:** the crypto and the codec are done. `ghostr-crypto` carries NIP-44
+v2 (checked against all 128 reference vectors), NIP-19 `nprofile`/`naddr`, the
+NIP-01 event id, and a `Signer` the local keystore implements. `ghostr-nostr`
+turns payloads into events and back: the `ghostr/v1/...` `d`-tag namespace, the
+NIP-78 mirror, per-kind account separation, and ghost disclosure enforced by the
+builder. What remains is the transport — the relay websocket — plus NIP-59 gift
+wrap, which is blocked on [SPEC §14 Q20](SPEC.md#14-open-questions).
 
 **Scope**
 - `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with
@@ -236,14 +238,24 @@ below is the relay surface itself.
       is rejected by the store's uniqueness constraint.
 - [ ] No plaintext identity data on any relay — asserted by a test that inspects
       published event bodies (SPEC I9).
-- [ ] Every ghost-authored event carries disclosure tags; a test proves an event
-      without them cannot be constructed.
+- [x] Every ghost-authored event carries disclosure tags; a test proves an event
+      without them cannot be constructed — `GhostNoteBuilder` is the only
+      constructor and emits them unconditionally
+      (`a_ghost_note_cannot_be_built_without_disclosure`).
 - [ ] Injected instructions in an ingested nostr note do not alter footage or
       produce a persona claim — adversarial corpus fixture in CI.
-- [ ] Ciphertext lengths are bucketed; publish times jittered.
+- [x] Ciphertext lengths are bucketed; publish times jittered. Bucketing is
+      NIP-44 v2's own plaintext padding rather than a second pass over the
+      ciphertext — `nip44_bucketing_already_quantises_length` is what holds that
+      claim to account, and a ciphertext-side padder would only have corrupted
+      the payload.
 - [ ] Anchor receipts default to local-only; publishing requires an explicit flag
       and uses the anchor key (SPEC Q5).
-- [ ] The kind block is checked against the live registry; NIP submitted.
+- [x] The kind block is checked against the live registry — fetched
+      2026-08-27, no kind in 31700–31899 is registered, so 31780–31789 is free.
+      **NIP not yet submitted**, so the block is unclaimed rather than ours; the
+      `ghostr/v1/...` `d` tag is the real identifier and the NIP-78 mirror is
+      what makes that true in practice (SPEC Q3).
 
 **Not in M3:** GUI, third-party verifier tooling.
 
