@@ -11,13 +11,16 @@
 
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use ghostr_core::identity::{Account, KeyRef, Npub, PublicKey};
 use serde::{Deserialize, Serialize};
 
+use crate::event::{Signature, UnsignedEvent};
 use crate::kdf::{Argon2Params, Dek, WrappedSeed, derive_dek, derive_kek, unwrap_seed, wrap_seed};
-use crate::nip06::{MasterKey, Mnemonic};
+use crate::nip06::{DerivedKey, MasterKey, Mnemonic};
+use crate::nip44::ConversationKey;
 use crate::secret::SecretString;
-use crate::signer::Keystore;
+use crate::signer::{Keystore, Signer};
 
 /// The keystore file format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +50,7 @@ pub struct FileKeystore {
 
 /// The material that exists only while unlocked.
 struct Unlocked {
-    keys: Vec<crate::nip06::DerivedKey>,
+    keys: Vec<DerivedKey>,
     dek: Dek,
 }
 
@@ -157,19 +160,28 @@ impl FileKeystore {
         Npub::from_encoded(self.file.npub.clone())
     }
 
+    /// The derived key for one account.
+    ///
+    /// Private, and returns a borrow rather than a copy: this is the only path
+    /// from a [`KeyRef`] to actual secret bytes, and every caller is in this
+    /// file (ARCHITECTURE §3 rule 4).
+    fn derived(&self, account: Account) -> crate::Result<&DerivedKey> {
+        self.unlocked
+            .as_ref()
+            .ok_or(crate::Error::Locked)?
+            .keys
+            .iter()
+            .find(|k| k.account == account)
+            .ok_or(crate::Error::InvalidDerivationPath)
+    }
+
     /// The public key for one account. Requires unlocking.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
     pub fn account_pubkey(&self, account: Account) -> crate::Result<PublicKey> {
-        let unlocked = self.unlocked.as_ref().ok_or(crate::Error::Locked)?;
-        unlocked
-            .keys
-            .iter()
-            .find(|k| k.account == account)
-            .map(|k| k.public)
-            .ok_or(crate::Error::Locked)
+        Ok(self.derived(account)?.public)
     }
 }
 
@@ -264,9 +276,73 @@ impl Keystore for FileKeystore {
     }
 
     fn change_passphrase(&mut self, new_passphrase: SecretString) -> crate::Result<()> {
+        // Not implementable at this signature, and refused rather than faked.
+        // A rewrap needs a fresh salt and nonce; drawing them here would put
+        // `OsRng` outside the composition root, which CLAUDE.md §6 forbids, and
+        // reusing the stored salt would wrap a new KEK under an old one's
+        // parameters. Resolving that means changing the trait — SPEC §14 Q19.
+        let _ = new_passphrase;
         Err(crate::Error::Backend {
-            operation: "change_passphrase arrives with M1",
+            operation: "change_passphrase needs a caller-supplied salt",
         })
+    }
+}
+
+/// The local signer.
+///
+/// `FileKeystore` is both [`Keystore`] and [`Signer`] because the secret bytes
+/// it unwraps never leave it: the keys live in the private unlocked state, and
+/// every operation that needs one happens here. A remote signer implements only
+/// this half.
+#[async_trait]
+impl Signer for FileKeystore {
+    fn public_key(&self, key: KeyRef) -> crate::Result<PublicKey> {
+        self.account_pubkey(key.account)
+    }
+
+    async fn sign_event(&self, key: KeyRef, event: &UnsignedEvent) -> crate::Result<Signature> {
+        let derived = self.derived(key.account)?;
+
+        // The event names its author and NIP-01 verifies against *that* key, so
+        // signing with a different one produces something nobody can validate.
+        // Caught here, where both keys are in hand, rather than at a relay.
+        if derived.public != event.pubkey {
+            return Err(crate::Error::KeyMismatch);
+        }
+
+        // The id comes from the body, every time. This is the whole reason
+        // `sign_event` takes an event rather than a digest.
+        derived.sign(event.id().as_bytes())
+    }
+
+    async fn nip44_encrypt(
+        &self,
+        key: KeyRef,
+        recipient: &PublicKey,
+        plaintext: &[u8],
+        nonce: [u8; 32],
+    ) -> crate::Result<String> {
+        let conversation = self.conversation_key(key, recipient).await?;
+        crate::nip44::encrypt(&conversation, plaintext, &nonce)
+    }
+
+    async fn nip44_decrypt(
+        &self,
+        key: KeyRef,
+        sender: &PublicKey,
+        payload: &str,
+    ) -> crate::Result<Vec<u8>> {
+        let conversation = self.conversation_key(key, sender).await?;
+        crate::nip44::decrypt(&conversation, payload)
+    }
+
+    async fn conversation_key(
+        &self,
+        key: KeyRef,
+        peer: &PublicKey,
+    ) -> crate::Result<ConversationKey> {
+        let derived = self.derived(key.account)?;
+        ConversationKey::derive(derived.secret_bytes(), peer)
     }
 }
 
@@ -290,6 +366,175 @@ mod tests {
         )
         .expect("create");
         (ks, pass)
+    }
+
+    /// The seam M3 stands on: an event signed through the trait must verify
+    /// through the same rules a relay applies.
+    #[tokio::test]
+    async fn a_signed_event_verifies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(pass).expect("unlock");
+
+        let key = ks.key_ref(Account::Ghost).expect("key_ref");
+        let event = UnsignedEvent {
+            pubkey: Signer::public_key(&ks, key).expect("pubkey"),
+            created_at: 1_756_252_800,
+            // SPEC §9: the Ghostr manifest kind.
+            kind: 31780,
+            tags: vec![vec!["d".to_owned(), "2026-08-27".to_owned()]],
+            content: String::new(),
+        };
+        let sig = ks.sign_event(key, &event).await.expect("sign");
+
+        let signed = crate::event::SignedEvent {
+            id: event.id(),
+            event,
+            sig,
+        };
+        signed.verify().expect("verify");
+    }
+
+    /// Signing an event that names someone else as its author produces something
+    /// no relay will accept, so the signer refuses instead of producing it.
+    #[tokio::test]
+    async fn signing_under_the_wrong_account_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(pass).expect("unlock");
+
+        let ghost = ks.key_ref(Account::Ghost).expect("key_ref");
+        let identity = ks.key_ref(Account::Identity).expect("key_ref");
+        let event = UnsignedEvent {
+            // Claims the identity account...
+            pubkey: Signer::public_key(&ks, identity).expect("pubkey"),
+            created_at: 1_756_252_800,
+            kind: 31780,
+            tags: Vec::new(),
+            content: String::new(),
+        };
+
+        // ...but is offered to the ghost key.
+        assert!(matches!(
+            ks.sign_event(ghost, &event).await,
+            Err(crate::Error::KeyMismatch)
+        ));
+    }
+
+    /// Locking is not advisory. Every secret-bearing method must fail closed,
+    /// which is the property an idle auto-lock depends on (THREAT_MODEL §T6).
+    #[tokio::test]
+    async fn a_locked_keystore_signs_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(pass).expect("unlock");
+        let key = ks.key_ref(Account::Ghost).expect("key_ref");
+        let peer = Signer::public_key(&ks, key).expect("pubkey");
+        let event = UnsignedEvent {
+            pubkey: peer,
+            created_at: 1_756_252_800,
+            kind: 31780,
+            tags: Vec::new(),
+            content: String::new(),
+        };
+
+        ks.lock();
+
+        assert!(matches!(
+            ks.sign_event(key, &event).await,
+            Err(crate::Error::Locked)
+        ));
+        assert!(matches!(
+            ks.nip44_encrypt(key, &peer, b"x", [3u8; 32]).await,
+            Err(crate::Error::Locked)
+        ));
+        assert!(matches!(
+            ks.conversation_key(key, &peer).await,
+            Err(crate::Error::Locked)
+        ));
+        assert!(matches!(
+            Signer::public_key(&ks, key),
+            Err(crate::Error::Locked)
+        ));
+    }
+
+    /// Self-encryption: the ghost encrypting app data to its own key, which is
+    /// how every private Ghostr kind gets its content (SPEC I9).
+    #[tokio::test]
+    async fn a_payload_round_trips_through_the_signer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(pass).expect("unlock");
+
+        let key = ks.key_ref(Account::Ghost).expect("key_ref");
+        let own = Signer::public_key(&ks, key).expect("pubkey");
+        let payload = ks
+            .nip44_encrypt(key, &own, b"footage digest", [42u8; 32])
+            .await
+            .expect("encrypt");
+
+        assert!(!payload.contains("footage"));
+        assert_eq!(
+            ks.nip44_decrypt(key, &own, &payload)
+                .await
+                .expect("decrypt"),
+            b"footage digest"
+        );
+    }
+
+    /// ECDH is symmetric, and NIP-44 relies on it: the recipient derives the
+    /// same conversation key from the other side of the pair.
+    #[tokio::test]
+    async fn the_conversation_key_is_the_same_from_either_side() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(pass).expect("unlock");
+
+        let ghost = ks.key_ref(Account::Ghost).expect("key_ref");
+        let identity = ks.key_ref(Account::Identity).expect("key_ref");
+        let ghost_pub = Signer::public_key(&ks, ghost).expect("pubkey");
+        let identity_pub = Signer::public_key(&ks, identity).expect("pubkey");
+
+        let forward = ks
+            .conversation_key(ghost, &identity_pub)
+            .await
+            .expect("fwd");
+        let backward = ks
+            .conversation_key(identity, &ghost_pub)
+            .await
+            .expect("back");
+        assert_eq!(forward.expose(), backward.expose());
+
+        // And a message written by one is readable by the other.
+        let payload = ks
+            .nip44_encrypt(ghost, &identity_pub, b"hello", [5u8; 32])
+            .await
+            .expect("encrypt");
+        assert_eq!(
+            ks.nip44_decrypt(identity, &ghost_pub, &payload)
+                .await
+                .expect("decrypt"),
+            b"hello"
+        );
+    }
+
+    /// The stub is honest about being a stub, and says why (SPEC §14 Q19).
+    #[test]
+    fn change_passphrase_refuses_rather_than_rewrapping_badly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(pass).expect("unlock");
+
+        let before = std::fs::read(dir.path().join(KEYSTORE_FILENAME)).expect("read");
+        assert!(
+            ks.change_passphrase(SecretString::new("a new one entirely".to_owned()))
+                .is_err()
+        );
+        // Refusing must not have half-written the file.
+        assert_eq!(
+            std::fs::read(dir.path().join(KEYSTORE_FILENAME)).expect("read"),
+            before
+        );
     }
 
     #[test]

@@ -78,9 +78,21 @@ hkdf = "0.12"
 hmac = "0.12"
 argon2 = "0.5"
 chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+# NIP-44 v2 is ChaCha20 *without* Poly1305 — it authenticates with HMAC-SHA256
+# over the nonce and ciphertext instead. Already in the tree underneath
+# `chacha20poly1305`, so declaring it adds no supply-chain surface
+# (THREAT_MODEL §T8).
+chacha20 = { version = "0.9", default-features = false }
+# Constant-time base64. The NIP-44 payload carries a MAC, and a decoder whose
+# timing varies with the bytes is an oracle on it. Already in the tree.
+base64ct = { version = "1", features = ["alloc"] }
 secp256k1 = { version = "0.31", features = ["std", "rand"] }
 bip39 = { version = "2", default-features = false, features = ["std"] }
 bech32 = "0.11"
+# `mlock`/`munlock` for MemoryLock, in ghostr-crypto only. Already in the tree
+# transitively (via tempfile and rusqlite), so this adds no new supply-chain
+# surface — only a direct edge to a crate the build already compiles.
+libc = "0.2"
 hex = "0.4"
 subtle = "2"
 

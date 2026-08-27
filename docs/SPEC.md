@@ -1426,3 +1426,33 @@ rather than by trust level or by a naming convention, because a foreign key is
 checkable and a convention is something somebody has to remember. The words are
 kept, not dropped: they are the user's own, and the quest they answered still
 carries them.
+
+---
+
+**Q19 — Where does a passphrase change get its salt?**
+
+`Keystore::change_passphrase(new_passphrase)` cannot be implemented at that
+signature. Re-wrapping the seed needs a fresh Argon2id salt and a fresh
+XChaCha20 nonce; the method is handed neither, and drawing them inside
+`ghostr-crypto` would put `OsRng` outside the composition root, which §11.4 and
+CLAUDE.md §6 both forbid. Reusing the stored salt is worse than it looks: it
+wraps a new KEK under parameters chosen for an old one, and it lets anyone who
+kept a copy of the old file confirm a guess against both wrappings at the cost of
+one derivation.
+
+The same gap exists on `Signer::nip44_encrypt`, which needs a per-message nonce.
+That one is resolved here: the nonce is a parameter, matching
+`FileKeystore::create`, which already takes its salt and nonce for exactly this
+reason.
+
+> **Recommendation:** the same treatment —
+> `change_passphrase(new_passphrase, salt, nonce)`. It keeps entropy in the
+> composition root, makes the operation reproducible under a seeded RNG in tests,
+> and is consistent with every other function in the crate that needs randomness.
+> The alternative worth considering is requiring the **old** passphrase as well,
+> which would additionally stop a passer-by from re-keying an unlocked vault; the
+> cost is that it can no longer be offered as "you are already unlocked, pick a
+> new passphrase". Until this is settled the method returns
+> `Backend { operation: "change_passphrase needs a caller-supplied salt" }` — a
+> refusal rather than a wrong rewrap, because a rewrap that loses the seed is not
+> recoverable.

@@ -31,12 +31,18 @@ pub trait Signer: Send + Sync {
 
     /// Signs an event, computing its id first.
     ///
+    /// The id is derived from the event body here, never accepted from the
+    /// caller: a signer that signs a digest it was handed will happily
+    /// authenticate a body it never saw.
+    ///
     /// Async because the signer may be a remote process or a hardware device
     /// waiting on a physical confirmation.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Locked`](crate::Error::Locked) if locked, or
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked,
+    /// [`Error::KeyMismatch`](crate::Error::KeyMismatch) if `key` is not the
+    /// event's stated author, or
     /// [`Error::RemoteSigner`](crate::Error::RemoteSigner) if a remote signer is
     /// unreachable or declined.
     async fn sign_event(&self, key: KeyRef, event: &UnsignedEvent) -> crate::Result<Signature>;
@@ -46,6 +52,13 @@ pub trait Signer: Send + Sync {
     /// Conversation key derivation stays inside the implementation, because it
     /// needs the secret key. Pass the signer's own public key as `recipient` for
     /// self-encryption.
+    ///
+    /// `nonce` is a parameter rather than drawn here, for the same reason
+    /// [`FileKeystore::create`](crate::FileKeystore::create) takes its salt:
+    /// entropy is confined to the composition root, which holds the
+    /// [`Rng`](ghostr_core::time::Rng) (CLAUDE.md §6). It **must** be fresh for
+    /// every message under one conversation key — NIP-44 derives the keystream
+    /// from it, so a repeat is a two-time pad.
     ///
     /// # Errors
     ///
@@ -57,6 +70,7 @@ pub trait Signer: Send + Sync {
         key: KeyRef,
         recipient: &PublicKey,
         plaintext: &[u8],
+        nonce: [u8; 32],
     ) -> crate::Result<String>;
 
     /// NIP-44 v2 decryption.

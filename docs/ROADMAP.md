@@ -206,6 +206,12 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
 > **Ships:** your ghost on nostr — encrypted backup and sync across your devices,
 > your feed as a source, and an optional public attestation.
 
+**Progress:** the crypto half is done. `ghostr-crypto` carries NIP-44 v2 (checked
+against all 128 reference vectors), NIP-19 `nprofile`/`naddr`, the NIP-01 event
+id, and a `Signer` the local keystore implements — so an event can be signed and
+a payload encrypted before `ghostr-nostr` has a single line in it. What remains
+below is the relay surface itself.
+
 **Scope**
 - `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with
   the NIP-78 (30078) mirror, NIP-65 relay lists, NIP-59 gift wrap (opt-in),

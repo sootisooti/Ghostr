@@ -36,9 +36,26 @@ pub enum Error {
     #[error("bech32 value is malformed or has the wrong prefix")]
     InvalidBech32,
 
+    /// A NIP-19 entity was too large to encode.
+    ///
+    /// NIP-19 gives every TLV record a one-byte length and asks that the whole
+    /// string stay under 5000 characters, so an over-long identifier or too many
+    /// relay hints simply cannot be represented. Reported rather than truncated:
+    /// a silently shortened relay URL decodes cleanly into the wrong relay.
+    #[error("NIP-19 entity is too large to encode")]
+    Bech32TooLong,
+
     /// A public key was not a valid secp256k1 x-only point.
     #[error("public key is not a valid curve point")]
     InvalidPublicKey,
+
+    /// The key asked to sign is not the one the event names as its author.
+    ///
+    /// Signing anyway would produce an event that verifies against nobody:
+    /// NIP-01 checks a signature against the `pubkey` *inside* the event, not
+    /// against whoever held the pen.
+    #[error("signing key does not match the event's author")]
+    KeyMismatch,
 
     /// A signature did not verify.
     #[error("signature verification failed")]

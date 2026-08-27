@@ -21,21 +21,25 @@
 //! Unlike every other crate in the workspace this one does not
 //! `forbid(unsafe_code)`, because locking key material out of swap needs it. It
 //! is still denied workspace-wide, so each site must opt in explicitly and carry
-//! a safety comment.
+//! a safety comment. There is exactly one such pair, in
+//! [`secret::MemoryLock`].
 //!
 //! # Status
 //!
-//! Scaffold. Types and signatures are defined; bodies are [`todo!`].
-
-// SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
-// only for the scaffold phase and are removed crate-by-crate as bodies land.
-// `unused_variables` and `dead_code` fire because a diverging body never reads
-// its arguments and never calls its helpers; parameters keep real names rather
-// than `_` prefixes so the signatures stay readable. `clippy::todo` is denied
-// workspace-wide by CLAUDE.md §5 and this is the documented exception.
-// `cargo xtask scaffold-status` counts these markers so they cannot be quietly
-// forgotten.
-#![allow(unused_variables, dead_code, clippy::todo)]
+//! Implemented. Every NIP this crate names is checked against that NIP's own
+//! vectors: NIP-06 against the NIP's derivation vector, NIP-19 against its
+//! `npub` and `nprofile` examples, and NIP-44 v2 against all 128 cases in the
+//! reference suite vendored under `vectors/`.
+//!
+//! [`FileKeystore`] implements both seams: it is the [`Keystore`] that unwraps
+//! the seed and the [`Signer`] that uses it, because the secret bytes never
+//! leave it.
+//!
+//! What is deliberately absent: NIP-46 remote signing has a [`Signer`] shape but
+//! no transport; `nevent` and `nrelay` are not encoded, because nothing in
+//! Ghostr references a non-addressable event; and
+//! [`Keystore::change_passphrase`] refuses rather than rewrapping, because its
+//! signature cannot carry the salt a rewrap needs (SPEC §14 Q19).
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
 // the exception: a failed assertion should panic loudly with a message, and
 // threading `Result` through test bodies buries what is actually being asserted.
