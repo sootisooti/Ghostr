@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use chrono_tz::Tz;
-use ghostr_core::footage::{ChainTip, Commitment, Footage};
+use ghostr_core::footage::{ChainTip, Commitment, CommitmentVersion, Footage};
 use ghostr_core::hash::Hash32;
 use ghostr_core::identity::PublicKey;
 use ghostr_core::ids::{ChainId, MemoryId, SourceId};
@@ -20,13 +20,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::{MemoryQuery, RedactionReason, TimeRange};
-use crate::schema::{SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, meta_key};
+use crate::schema::{
+    SCHEMA_V1, SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, meta_key,
+};
 
 /// The database filename inside the data directory.
 pub const DB_FILENAME: &str = "ghostr.db";
 
 /// The schema version this build writes.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// A SQLite-backed Ghostr store.
 pub struct SqliteStore {
@@ -169,6 +171,7 @@ impl SqliteStore {
             (3, SCHEMA_V4),
             (4, SCHEMA_V5),
             (5, SCHEMA_V6),
+            (6, SCHEMA_V7),
         ] {
             if current <= from {
                 self.conn
@@ -811,8 +814,9 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO footage
              (seq, date, tz, window_start, window_end, empty, merkle_root, prev_link,
-              link, leaf_count, sealed_at, sealed_off, body_nonce, body_sealed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              link, leaf_count, sealed_at, sealed_off, body_nonce, body_sealed,
+              commitment_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 i64::try_from(footage.seq).unwrap_or(i64::MAX),
                 footage.date.to_string(),
@@ -828,6 +832,7 @@ impl SqliteStore {
                 i64::from(footage.sealed_at.offset_seconds()),
                 nonce.to_vec(),
                 sealed,
+                commitment_version_tag(footage.commitment.version),
             ],
         )
         .map_err(|e| match e {
@@ -886,7 +891,7 @@ impl SqliteStore {
             .query_row(
                 "SELECT seq, date, tz, window_start, window_end, empty, merkle_root,
                         prev_link, link, leaf_count, sealed_at, sealed_off,
-                        body_nonce, body_sealed
+                        body_nonce, body_sealed, commitment_version
                  FROM footage WHERE seq = ?1",
                 [i64::try_from(seq).unwrap_or(i64::MAX)],
                 |r| Ok(RawFootage::from_row(r)),
@@ -1294,6 +1299,7 @@ struct RawFootage {
     leaf_count: i64,
     sealed_at: i64,
     sealed_off: i64,
+    commitment_version: String,
     nonce: Vec<u8>,
     sealed: Vec<u8>,
 }
@@ -1315,6 +1321,7 @@ impl RawFootage {
             sealed_off: r.get(11)?,
             nonce: r.get(12)?,
             sealed: r.get(13)?,
+            commitment_version: r.get(14)?,
         })
     }
 
@@ -1365,6 +1372,7 @@ impl RawFootage {
                     operation: "parse link",
                 })?,
                 leaf_count: u32::try_from(self.leaf_count).unwrap_or(0),
+                version: commitment_version_from(&self.commitment_version),
             },
             sealed_at: Timestamp::new(self.sealed_at, i32::try_from(self.sealed_off).unwrap_or(0)),
         })
@@ -1934,6 +1942,45 @@ mod tests {
     }
 
     /// SPEC I2: a sealed footage is immutable, enforced by the schema rather
+    /// The migration, at the point it actually happens. A footage row written
+    /// before the column existed takes the default — and the default has to be
+    /// the truth about it: sealed over metadata and memories, with no quests.
+    ///
+    /// Getting this backwards would report tampering on every chain that
+    /// predates the change, and those roots are already in Bitcoin, so there is
+    /// no re-seal available to fix it (CLAUDE.md §4.7).
+    #[test]
+    fn a_footage_row_from_before_the_column_reads_as_the_old_rules() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = SqliteStore::open(dir.path()).expect("open");
+
+        // Inserted without naming the column, exactly as the older build's
+        // statement did.
+        s.conn
+            .execute(
+                "INSERT INTO footage
+                 (seq, date, tz, window_start, window_end, empty, merkle_root, prev_link,
+                  link, leaf_count, sealed_at, sealed_off, body_nonce, body_sealed)
+                 VALUES (1,'2026-01-01','UTC',0,1,1,'aa','bb','cc',1,0,0,x'00',x'00')",
+                [],
+            )
+            .expect("insert");
+
+        let stored: String = s
+            .conn
+            .query_row(
+                "SELECT commitment_version FROM footage WHERE seq = 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read");
+        assert_eq!(stored, "memories_only");
+        assert_eq!(
+            commitment_version_from(&stored),
+            CommitmentVersion::MemoriesOnly
+        );
+    }
+
     /// than by application code — because the application is what might be wrong.
     #[test]
     fn the_schema_refuses_to_update_or_delete_sealed_footage() {
@@ -3250,6 +3297,170 @@ impl SqliteStore {
             })
     }
 
+    /// Quests not yet committed to any sealed day.
+    ///
+    /// What the next cutoff will put in its tree. Selected by "not yet
+    /// committed" rather than by date, so a quest issued for a day that has
+    /// already sealed lands in the *next* day's tree instead of retroactively
+    /// changing a root nobody can recompute (I2, I3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn quests_awaiting_commitment(
+        &self,
+        dek: &Dek,
+    ) -> crate::Result<Vec<ghostr_core::quest::Quest>> {
+        self.quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed FROM quest
+             WHERE committed_seq IS NULL ORDER BY id",
+            params![],
+        )
+    }
+
+    /// Verdicts not yet committed to any sealed day, with when they were given.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn verdicts_awaiting_commitment(&self, dek: &Dek) -> crate::Result<Vec<AnsweredQuest>> {
+        self.answered_quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed, COALESCE(answered_at, 0)
+             FROM quest
+             WHERE status = 'answered' AND verdict_committed_seq IS NULL
+             ORDER BY id",
+            params![],
+        )
+    }
+
+    /// The quests a sealed day committed to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn quests_committed_at(
+        &self,
+        dek: &Dek,
+        seq: u64,
+    ) -> crate::Result<Vec<ghostr_core::quest::Quest>> {
+        self.quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed FROM quest
+             WHERE committed_seq = ?1 ORDER BY id",
+            params![i64::try_from(seq).unwrap_or(i64::MAX)],
+        )
+    }
+
+    /// The verdicts a sealed day committed to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn verdicts_committed_at(&self, dek: &Dek, seq: u64) -> crate::Result<Vec<AnsweredQuest>> {
+        self.answered_quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed, COALESCE(answered_at, 0)
+             FROM quest
+             WHERE status = 'answered' AND verdict_committed_seq = ?1
+             ORDER BY id",
+            params![i64::try_from(seq).unwrap_or(i64::MAX)],
+        )
+    }
+
+    /// Stamps quests and verdicts as committed to a sealed day.
+    ///
+    /// Only ever fills a `NULL`. A stamp that could be moved would let a day's
+    /// leaf set be rewritten after the fact, which is the thing the stamp exists
+    /// to prevent (I2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the write fails.
+    pub fn mark_committed(
+        &self,
+        seq: u64,
+        quests: &[ghostr_core::ids::QuestId],
+        verdicts: &[ghostr_core::ids::QuestId],
+    ) -> crate::Result<()> {
+        let seq = i64::try_from(seq).unwrap_or(i64::MAX);
+        for (column, ids) in [
+            ("committed_seq", quests),
+            ("verdict_committed_seq", verdicts),
+        ] {
+            for id in ids {
+                self.conn
+                    .execute(
+                        &format!(
+                            "UPDATE quest SET {column} = ?2
+                             WHERE id = ?1 AND {column} IS NULL"
+                        ),
+                        params![id.to_string(), seq],
+                    )
+                    .map_err(|_| crate::Error::Backend {
+                        operation: "stamp a committed quest",
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs a query over answered quests, keeping millisecond precision.
+    fn answered_quest_query(
+        &self,
+        dek: &Dek,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> crate::Result<Vec<AnsweredQuest>> {
+        // Not `timed_quest_query`: that one reads its fourth column as `f32`
+        // for answer durations, and epoch milliseconds do not survive a 24-bit
+        // mantissa. A timestamp in a hash preimage that is off by a second is a
+        // root nobody can reproduce.
+        let mut stmt = self.conn.prepare(sql).map_err(|_| crate::Error::Backend {
+            operation: "prepare answered query",
+        })?;
+        let rows = stmt
+            .query_map(params, |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|_| crate::Error::Backend {
+                operation: "query answered",
+            })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, nonce, sealed, at) = row.map_err(|_| crate::Error::Backend {
+                operation: "read answered row",
+            })?;
+            out.push((open_quest(dek, &id, nonce, &sealed)?, Timestamp::new(at, 0)));
+        }
+        Ok(out)
+    }
+
+    /// Every quest issued for a day, for the day's Merkle tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the read fails.
+    pub fn quests_for_day(
+        &self,
+        dek: &Dek,
+        date: NaiveDate,
+    ) -> crate::Result<Vec<ghostr_core::quest::Quest>> {
+        self.quest_query(
+            dek,
+            "SELECT id, body_nonce, body_sealed FROM quest
+             WHERE issued_for = ?1 ORDER BY id",
+            params![date.to_string()],
+        )
+    }
+
     /// Marks every open quest past its expiry as expired.
     ///
     /// Returns how many were closed.
@@ -3336,6 +3547,9 @@ impl SqliteStore {
         Ok(out)
     }
 }
+
+/// A quest and when its verdict was given.
+pub type AnsweredQuest = (ghostr_core::quest::Quest, Timestamp);
 
 /// Recent engagement with the quest loop.
 ///
@@ -3576,6 +3790,30 @@ fn open_quest(
     let plaintext = open_row(dek, sealed, &nonce, aad.as_bytes())
         .map_err(|_| crate::Error::RowDecryptFailed { table: "quest" })?;
     decode_row(&plaintext, "quest")
+}
+
+/// The stored form of a commitment version.
+const fn commitment_version_tag(version: CommitmentVersion) -> &'static str {
+    match version {
+        CommitmentVersion::MemoriesOnly => "memories_only",
+        CommitmentVersion::WithQuests => "with_quests",
+        // `CommitmentVersion` is `#[non_exhaustive]`. A version this build does
+        // not recognise must not be written under a name that means something
+        // else, so it stores as a value no verifier will accept.
+        _ => "unknown",
+    }
+}
+
+/// Reads a stored commitment version.
+///
+/// An unrecognised value reads as the original, which is the safe direction: a
+/// day verified under too few leaf kinds fails loudly, where one verified under
+/// too many would fail in a way that looks like tampering.
+fn commitment_version_from(tag: &str) -> CommitmentVersion {
+    match tag {
+        "with_quests" => CommitmentVersion::WithQuests,
+        _ => CommitmentVersion::MemoriesOnly,
+    }
 }
 
 /// The stored form of a quest status.
@@ -4514,6 +4752,74 @@ mod quest_tests {
             ),
             Err(crate::Error::AppendOnlyViolation { .. })
         ));
+    }
+
+    /// A stamp is filled once. One that could be moved would let a sealed day's
+    /// leaf set be rewritten afterwards, which is the thing it exists to stop.
+    #[test]
+    fn a_commitment_stamp_is_never_moved() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+
+        assert!(
+            !s.quests_awaiting_commitment(&d)
+                .expect("pending")
+                .is_empty()
+        );
+        s.mark_committed(7, &[q.id], &[]).expect("stamp");
+        assert!(
+            s.quests_awaiting_commitment(&d)
+                .expect("pending")
+                .is_empty()
+        );
+        assert_eq!(s.quests_committed_at(&d, 7).expect("at 7").len(), 1);
+
+        // A second attempt, naming a different day, must change nothing.
+        s.mark_committed(9, &[q.id], &[]).expect("second");
+        assert_eq!(s.quests_committed_at(&d, 7).expect("at 7").len(), 1);
+        assert!(s.quests_committed_at(&d, 9).expect("at 9").is_empty());
+    }
+
+    /// A quest and its verdict are stamped separately, because they usually
+    /// happen on different days.
+    #[test]
+    fn a_verdict_is_stamped_apart_from_its_quest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = store(dir.path());
+        let d = dek();
+        let q = quest(1, true, false);
+        s.put_quest(&d, &q, [1u8; 24]).expect("put");
+        s.mark_committed(1, &[q.id], &[]).expect("stamp the quest");
+
+        let mut answered = q.clone();
+        answered.status = QuestStatus::Answered;
+        answered.verdict = Some(Verdict::Confirm);
+        s.answer_quest(
+            &d,
+            &answered,
+            Timestamp::new(1_700_000_050_000, 0),
+            9.5,
+            [2u8; 24],
+        )
+        .expect("answer");
+
+        // The quest is committed; its verdict is not yet.
+        assert!(s.quests_awaiting_commitment(&d).expect("q").is_empty());
+        let pending = s.verdicts_awaiting_commitment(&d).expect("v");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].1.utc_millis(),
+            1_700_000_050_000,
+            "the answer time survives with millisecond precision"
+        );
+
+        s.mark_committed(2, &[], &[q.id])
+            .expect("stamp the verdict");
+        assert!(s.verdicts_awaiting_commitment(&d).expect("v").is_empty());
+        assert_eq!(s.verdicts_committed_at(&d, 2).expect("at 2").len(), 1);
     }
 
     #[test]

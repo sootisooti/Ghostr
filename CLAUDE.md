@@ -10,9 +10,9 @@ ingest, the Memoria pipeline, the hash chain, `ghostr verify`, the egress gate,
 the encrypted vector index, persona distillation, and the daily quest loop —
 issue, answer, score — all work, and all work with no model at all, because
 every model call falls back to a deterministic path. `ghostr serve` puts the
-loop on a page a phone can open. What remains of M2 is the three quest kinds
-that need a model to write their prompt, and committing the day's quest set into
-the footage Merkle tree ([docs/ROADMAP.md](docs/ROADMAP.md)).
+loop on a page a phone can open, and the day's quests and verdicts are committed
+into its Merkle root. What remains of M2 is the three quest kinds that need a
+model to write their prompt ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.

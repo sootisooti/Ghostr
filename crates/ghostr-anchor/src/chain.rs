@@ -62,6 +62,25 @@ pub fn memory_leaf(salt: &[u8; 32], canonical_bytes: &[u8]) -> Hash32 {
     leaf(LeafKind::Memory, salt, canonical_bytes)
 }
 
+/// A quest's leaf, blinded with the quest's own nonce.
+///
+/// The same nonce that blinds the answer commitment. Reusing it is safe because
+/// the two live in different hash domains — `quest-leaf` against
+/// `quest-answer` — and it means one secret per quest rather than two that must
+/// be kept in step.
+#[must_use]
+pub fn quest_leaf(nonce: &[u8; 32], canonical_bytes: &[u8]) -> Hash32 {
+    leaf(LeafKind::Quest, nonce, canonical_bytes)
+}
+
+/// A verdict's leaf, in the day it was given.
+///
+/// Blinded with the quest's nonce for the same reason, and in a third domain.
+#[must_use]
+pub fn verdict_leaf(nonce: &[u8; 32], canonical_bytes: &[u8]) -> Hash32 {
+    leaf(LeafKind::Verdict, nonce, canonical_bytes)
+}
+
 /// The metadata leaf, which every day has even when it is empty.
 ///
 /// Its presence is why an empty day still produces a non-empty tree, and

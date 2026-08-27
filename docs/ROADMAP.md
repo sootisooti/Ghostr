@@ -191,9 +191,9 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
       and the pipeline degrades by kind rather than emitting bad quests (Q7).
 - [x] `persona diff` between two versions is readable by someone who isn't a
       developer.
-- [ ] Quest sets and verdicts are committed into the day's Merkle tree and
-      anchored. Today a score names the chain `seq` it was computed at, which
-      dates it but does not commit the quests themselves.
+- [x] Quest sets and verdicts are committed into the day's Merkle tree and
+      anchored. A day commits to what was pending at its cutoff, and the leaf
+      set is versioned so chains sealed before this survive it (SPEC §7.3).
 - [ ] Median time to answer 5 quests, measured on real users: under 2 minutes.
       The page exists; the measurement does not.
 

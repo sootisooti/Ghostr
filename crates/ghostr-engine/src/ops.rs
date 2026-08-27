@@ -185,7 +185,24 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome
             },
         ));
     }
-    let (root, leaves) = build_root(&memories, seq, date, &tz)?;
+    // Everything the quest loop has produced since the last cutoff. Selected by
+    // "not yet committed" rather than by a date window: a verdict recorded after
+    // a day sealed but timestamped inside it would otherwise join that day's
+    // leaves retroactively, and a root that changes after sealing is one nobody
+    // can recompute (I2, I3).
+    let issued = engine.store().quests_awaiting_commitment(dek)?;
+    let answered = engine.store().verdicts_awaiting_commitment(dek)?;
+    let (root, leaves, leaf_count) = build_root(
+        &memories,
+        &QuestActivity {
+            issued: &issued,
+            answered: &answered,
+        },
+        ghostr_core::footage::CommitmentVersion::current(),
+        seq,
+        date,
+        &tz,
+    )?;
     let prev_link = match engine.store().tip()? {
         Some(tip) => tip.link,
         None => engine.store().genesis_link()?,
@@ -211,13 +228,22 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome
             merkle_root: root,
             prev_link,
             link,
-            leaf_count: u32::try_from(leaves.len() + 1).unwrap_or(u32::MAX),
+            leaf_count,
+            version: ghostr_core::footage::CommitmentVersion::current(),
         },
         sealed_at: engine.now(),
     };
 
     let nonce = engine.nonce();
     engine.store().seal_footage(dek, &footage, &leaves, nonce)?;
+    // Stamped only after the seal succeeded. The other order would mark quests
+    // as committed to a day that then failed to seal, and nothing would ever
+    // commit to them again.
+    engine.store().mark_committed(
+        seq,
+        &issued.iter().map(|q| q.id).collect::<Vec<_>>(),
+        &answered.iter().map(|(q, _)| q.id).collect::<Vec<_>>(),
+    )?;
     Ok(MemoriaOutcome {
         footage,
         dropped_claims,
@@ -237,12 +263,43 @@ pub struct MemoriaOutcome {
 }
 
 /// Builds the day's Merkle root and the per-memory leaves.
+/// A quest and when its verdict was given.
+type AnsweredQuest = (ghostr_core::quest::Quest, Timestamp);
+
+/// A day's root, the memory leaves it can prove inclusion against, and how many
+/// leaves went into it.
+type SealedRoot = (Hash32, Vec<(MemoryId, Hash32)>, u32);
+
+/// The day's quest activity, as it goes into the tree.
+struct QuestActivity<'a> {
+    /// Quests this day is committing to.
+    issued: &'a [ghostr_core::quest::Quest],
+    /// Verdicts this day is committing to, whichever day asked.
+    answered: &'a [AnsweredQuest],
+}
+
+/// Builds the day's Merkle root.
+///
+/// The leaf set depends on the version being sealed under, and that is the
+/// whole point: a day sealed before quests reached the tree must keep
+/// verifying, because its root is already in Bitcoin and cannot be recomputed
+/// (CLAUDE.md §4.7).
+///
+/// `meta_leaf` is deliberately untouched by this change. It counts memories and
+/// nothing else, so a day with no quests produces a byte-identical root under
+/// either version — which is why the two versions agree on every day that
+/// predates the feature, and disagree only where there is something new to
+/// commit to.
 fn build_root(
     memories: &[Memory],
+    quests: &QuestActivity<'_>,
+    version: ghostr_core::footage::CommitmentVersion,
     seq: u64,
     date: NaiveDate,
     tz: &chrono_tz::Tz,
-) -> crate::Result<(Hash32, Vec<(MemoryId, Hash32)>)> {
+) -> crate::Result<SealedRoot> {
+    use ghostr_core::footage::CommitmentVersion;
+
     let mut leaves = Vec::with_capacity(memories.len());
     let mut digests = Vec::with_capacity(memories.len() + 1);
 
@@ -266,7 +323,168 @@ fn build_root(
         digests.push(leaf);
     }
 
-    Ok((ghostr_anchor::root(digests)?, leaves))
+    if version >= CommitmentVersion::WithQuests {
+        for quest in quests.issued {
+            digests.push(ghostr_anchor::quest_leaf(
+                &quest.nonce,
+                &ghostr_core::canonical::to_canonical_cbor(&quest_payload(quest)?)?,
+            ));
+        }
+        for (quest, answered_at) in quests.answered {
+            let Some(verdict) = &quest.verdict else {
+                continue;
+            };
+            digests.push(ghostr_anchor::verdict_leaf(
+                &quest.nonce,
+                &ghostr_core::canonical::to_canonical_cbor(&VerdictLeafPayload {
+                    quest_id: quest.id,
+                    verdict: verdict_tag(verdict),
+                    severity: severity_tag(verdict),
+                    answered_at: answered_at.utc_millis(),
+                })?,
+            ));
+        }
+    }
+
+    // Counted here rather than derived by the caller: the caller no longer
+    // knows how many leaves there are, and a `leaf_count` that disagreed with
+    // the tree would produce inclusion proofs of the wrong shape.
+    let count = u32::try_from(digests.len()).unwrap_or(u32::MAX);
+    Ok((ghostr_anchor::root(digests)?, leaves, count))
+}
+
+/// Re-derives a sealed day's quest and verdict leaves.
+///
+/// Reads the same rows the seal read, in the same order. If a quest was edited,
+/// deleted, or added after the fact, the digests differ and the root stops
+/// matching — which is the whole point of putting them in the tree.
+fn quest_digests(engine: &Engine, footage: &Footage) -> crate::Result<Vec<Hash32>> {
+    let dek = engine.dek()?;
+    let mut out = Vec::new();
+
+    for quest in engine.store().quests_committed_at(dek, footage.seq)? {
+        out.push(ghostr_anchor::quest_leaf(
+            &quest.nonce,
+            &ghostr_core::canonical::to_canonical_cbor(&quest_payload(&quest)?)?,
+        ));
+    }
+    for (quest, answered_at) in engine.store().verdicts_committed_at(dek, footage.seq)? {
+        let Some(verdict) = &quest.verdict else {
+            continue;
+        };
+        out.push(ghostr_anchor::verdict_leaf(
+            &quest.nonce,
+            &ghostr_core::canonical::to_canonical_cbor(&VerdictLeafPayload {
+                quest_id: quest.id,
+                verdict: verdict_tag(verdict),
+                severity: severity_tag(verdict),
+                answered_at: answered_at.utc_millis(),
+            })?,
+        ));
+    }
+    Ok(out)
+}
+
+/// The canonical form of a quest, as issued.
+fn quest_payload(quest: &ghostr_core::quest::Quest) -> crate::Result<QuestLeafPayload> {
+    use ghostr_core::canonical::ratio_to_fixed;
+
+    Ok(QuestLeafPayload {
+        id: quest.id,
+        issued_for: quest.issued_for.to_string(),
+        persona_ordinal: quest.persona_version.ordinal,
+        persona_content: quest.persona_version.content.to_hex(),
+        kind: quest.kind.variant_name(),
+        facet: format!("{:?}", quest.facet),
+        difficulty: ratio_to_fixed(quest.difficulty, "difficulty")?,
+        confidence: ratio_to_fixed(quest.confidence, "confidence")?,
+        answer_commitment: quest.answer_commitment.to_hex(),
+        holdout: quest.holdout,
+        decoy: quest.decoy,
+    })
+}
+
+/// How far off a correction was, for a preimage.
+const fn severity_tag(verdict: &ghostr_core::quest::Verdict) -> Option<&'static str> {
+    use ghostr_core::quest::{Severity, Verdict};
+
+    match verdict {
+        Verdict::Correct { severity, .. } => Some(match severity {
+            Severity::Minor => "minor",
+            Severity::Major => "major",
+        }),
+        _ => None,
+    }
+}
+
+/// What a quest leaf commits to: the quest **as issued**.
+///
+/// # Why the claim itself is not in here
+///
+/// A leaf may be revealed to a third party to prove inclusion, and its preimage
+/// is revealed with it. Putting the claim in would mean proving "a quest existed
+/// on this day" could not be done without disclosing what it asked — and quests
+/// are about the user's own life.
+///
+/// The commitment covers it anyway, transitively:
+/// [`verify_commitment`](ghostr_quests::verify_commitment) proves a claim
+/// reproduces `answer_commitment`, and this leaf proves `answer_commitment` was
+/// in the day's root. Two steps, each already implemented, and the second one
+/// discloses nothing.
+///
+/// # Why the verdict is not in here either
+///
+/// It has not happened yet. A quest stays answerable for 48 hours, so its
+/// verdict usually lands after its day has sealed — and a sealed footage is
+/// immutable (I2). The verdict gets its own leaf, in the day it was given.
+///
+/// Fixed point rather than floats, because canonical CBOR rejects floats: one
+/// value must have exactly one encoding (SPEC §7.1).
+#[derive(serde::Serialize)]
+struct QuestLeafPayload {
+    id: ghostr_core::ids::QuestId,
+    issued_for: String,
+    persona_ordinal: u32,
+    persona_content: String,
+    kind: &'static str,
+    facet: String,
+    difficulty: u32,
+    confidence: u32,
+    answer_commitment: String,
+    holdout: bool,
+    decoy: bool,
+}
+
+/// What a verdict leaf commits to.
+///
+/// The shape of the answer, not its words. A correction's text became a memory
+/// on this same day, so it is already a leaf in this same tree — committing it
+/// twice would buy nothing and would put the user's own sentence into a preimage
+/// that gets revealed to prove a verdict happened.
+#[derive(serde::Serialize)]
+struct VerdictLeafPayload {
+    quest_id: ghostr_core::ids::QuestId,
+    verdict: &'static str,
+    severity: Option<&'static str>,
+    answered_at: i64,
+}
+
+/// The stable name of a verdict, for a preimage.
+///
+/// Hand-written rather than derived: a `Debug` rendering is a formatting
+/// decision, and one of those changing would silently fork every chain sealed
+/// after it.
+const fn verdict_tag(verdict: &ghostr_core::quest::Verdict) -> &'static str {
+    use ghostr_core::quest::Verdict;
+
+    match verdict {
+        Verdict::Confirm => "confirm",
+        Verdict::Correct { .. } => "correct",
+        Verdict::Reject { .. } => "reject",
+        Verdict::Unknown => "unknown",
+        Verdict::Void { .. } => "void",
+        _ => "unrecognised",
+    }
 }
 
 /// What a memory leaf commits to.
@@ -568,6 +786,15 @@ pub fn verify(engine: &Engine) -> crate::Result<VerifyReport> {
         )];
         digests.extend(stored.iter().map(|(_, leaf)| *leaf));
 
+        // Each day is re-derived under the rules it was *sealed* under, not the
+        // rules this build prefers. A day sealed before quests reached the tree
+        // has none in its root, and its root is already in Bitcoin — recomputing
+        // it with today's leaf set would report tampering where there is none
+        // (CLAUDE.md §4.7).
+        if f.commitment.version >= ghostr_core::footage::CommitmentVersion::WithQuests {
+            digests.extend(quest_digests(engine, f)?);
+        }
+
         match ghostr_anchor::root(digests) {
             Ok(root) if root == f.commitment.merkle_root => {}
             _ => {
@@ -767,6 +994,7 @@ fn preview(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
             prev_link: Hash32::from_bytes([0u8; 32]),
             link: Hash32::from_bytes([0u8; 32]),
             leaf_count: 0,
+            version: ghostr_core::footage::CommitmentVersion::current(),
         },
         sealed_at: engine.now(),
     })
@@ -1436,4 +1664,207 @@ fn verdict_source(engine: &Engine, holdout: bool) -> crate::Result<SourceId> {
         },
         engine.nonce(),
     )?)
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use ghostr_core::footage::CommitmentVersion;
+    use ghostr_core::hash::{Tag, tagged_hash};
+    use ghostr_core::ids::{PersonaVersion, QuestId};
+    use ghostr_core::quest::{Facet, Quest, QuestKind, QuestStatus, Verdict};
+
+    use super::*;
+
+    fn quest(n: u8) -> Quest {
+        Quest {
+            id: QuestId::new(1_700_000_000_000 + u64::from(n), [n; 10]),
+            issued_for: NaiveDate::from_ymd_opt(2026, 3, 1).expect("date"),
+            issued_at: Timestamp::new(1_700_000_000_000, 0),
+            persona_version: PersonaVersion {
+                ordinal: 12,
+                content: tagged_hash(Tag::Persona, b"v12"),
+            },
+            kind: QuestKind::FactRecall {
+                claim: "you argued with the timezone code again".to_owned(),
+                as_of: NaiveDate::from_ymd_opt(2026, 3, 1).expect("date"),
+            },
+            facet: Facet::Routine,
+            difficulty: 0.4,
+            evidence: Vec::new(),
+            confidence: 0.7,
+            answer_commitment: tagged_hash(Tag::QuestAnswer, &[n]),
+            nonce: [n; 32],
+            holdout: true,
+            decoy: false,
+            expires_at: Timestamp::new(1_700_000_100_000, 0),
+            status: QuestStatus::Open,
+            verdict: None,
+        }
+    }
+
+    fn root_of(
+        quests: &QuestActivity<'_>,
+        version: CommitmentVersion,
+    ) -> ghostr_core::hash::Hash32 {
+        build_root(
+            &[],
+            quests,
+            version,
+            1,
+            NaiveDate::from_ymd_opt(2026, 3, 1).expect("date"),
+            &chrono_tz::Tz::UTC,
+        )
+        .expect("root")
+        .0
+    }
+
+    /// The property the whole migration rests on. A day with nothing new to
+    /// commit to hashes identically under either version — which is why every
+    /// chain sealed before quests reached the tree survives this change
+    /// untouched, rather than needing a re-seal that immutability forbids.
+    #[test]
+    fn a_day_with_no_quests_hashes_the_same_under_either_version() {
+        let none = QuestActivity {
+            issued: &[],
+            answered: &[],
+        };
+        assert_eq!(
+            root_of(&none, CommitmentVersion::MemoriesOnly),
+            root_of(&none, CommitmentVersion::WithQuests),
+        );
+    }
+
+    /// And the other half: where there *is* something new, the versions must
+    /// disagree. Otherwise the first test passes for the boring reason that the
+    /// quests were never being committed at all.
+    #[test]
+    fn a_day_with_quests_hashes_differently_under_each_version() {
+        let issued = [quest(1), quest(2)];
+        let activity = QuestActivity {
+            issued: &issued,
+            answered: &[],
+        };
+        assert_ne!(
+            root_of(&activity, CommitmentVersion::MemoriesOnly),
+            root_of(&activity, CommitmentVersion::WithQuests),
+        );
+    }
+
+    /// A verdict changes the root too, or committing to it bought nothing.
+    #[test]
+    fn a_verdict_changes_the_root() {
+        let issued = [quest(1)];
+        let mut answered_quest = quest(2);
+        answered_quest.status = QuestStatus::Answered;
+        answered_quest.verdict = Some(Verdict::Confirm);
+        let answered = [(answered_quest, Timestamp::new(1_700_000_050_000, 0))];
+
+        let without = QuestActivity {
+            issued: &issued,
+            answered: &[],
+        };
+        let with = QuestActivity {
+            issued: &issued,
+            answered: &answered,
+        };
+        assert_ne!(
+            root_of(&without, CommitmentVersion::WithQuests),
+            root_of(&with, CommitmentVersion::WithQuests),
+        );
+    }
+
+    /// The commitment is what a verifier checks, so a quest whose commitment
+    /// differs must land on a different leaf even when everything else matches.
+    #[test]
+    fn the_answer_commitment_is_inside_the_leaf() {
+        let mut a = quest(1);
+        let mut b = quest(1);
+        b.answer_commitment = tagged_hash(Tag::QuestAnswer, b"a different answer");
+        assert_ne!(a.answer_commitment, b.answer_commitment);
+
+        // Same nonce, same everything else: only the commitment moves.
+        a.status = QuestStatus::Open;
+        b.status = QuestStatus::Open;
+        let first = [a];
+        let second = [b];
+        assert_ne!(
+            root_of(
+                &QuestActivity {
+                    issued: &first,
+                    answered: &[]
+                },
+                CommitmentVersion::WithQuests
+            ),
+            root_of(
+                &QuestActivity {
+                    issued: &second,
+                    answered: &[]
+                },
+                CommitmentVersion::WithQuests
+            ),
+        );
+    }
+
+    /// I6, structurally. A leaf that carried the claim could not be revealed to
+    /// prove inclusion without disclosing what the quest asked — and a quest is
+    /// about the user's own life.
+    #[test]
+    fn a_quest_leaf_preimage_carries_no_claim_text() {
+        const CLAIM: &str = "you argued with the timezone code again";
+        let payload = quest_payload(&quest(1)).expect("payload");
+        let encoded = ghostr_core::canonical::to_canonical_cbor(&payload).expect("cbor");
+        assert!(
+            !encoded.windows(CLAIM.len()).any(|w| w == CLAIM.as_bytes()),
+            "the claim reached the leaf preimage"
+        );
+    }
+
+    /// A verdict leaf must not carry the user's correction either. The text
+    /// became a memory on the same day, so it is already a leaf in this tree.
+    #[test]
+    fn a_verdict_leaf_preimage_carries_no_correction_text() {
+        const WORDS: &str = "I would have said the opposite";
+        let verdict = Verdict::Correct {
+            correction: WORDS.to_owned(),
+            severity: ghostr_core::quest::Severity::Major,
+        };
+        let encoded = ghostr_core::canonical::to_canonical_cbor(&VerdictLeafPayload {
+            quest_id: quest(1).id,
+            verdict: verdict_tag(&verdict),
+            severity: severity_tag(&verdict),
+            answered_at: 1_700_000_050_000,
+        })
+        .expect("cbor");
+        assert!(
+            !encoded.windows(WORDS.len()).any(|w| w == WORDS.as_bytes()),
+            "a correction reached the leaf preimage"
+        );
+        assert!(
+            encoded.windows(5).any(|w| w == b"major"),
+            "severity is kept"
+        );
+    }
+
+    /// The names in a preimage are frozen. A `Debug` rendering would be a
+    /// formatting decision, and one of those changing silently forks every
+    /// chain sealed after it.
+    #[test]
+    fn verdict_names_are_frozen() {
+        assert_eq!(verdict_tag(&Verdict::Confirm), "confirm");
+        assert_eq!(verdict_tag(&Verdict::Unknown), "unknown");
+        assert_eq!(verdict_tag(&Verdict::Reject { note: None }), "reject");
+        assert_eq!(
+            verdict_tag(&Verdict::Void {
+                reason: "broken".to_owned()
+            }),
+            "void"
+        );
+        assert_eq!(
+            verdict_tag(&Verdict::Correct {
+                correction: "no".to_owned(),
+                severity: ghostr_core::quest::Severity::Minor,
+            }),
+            "correct"
+        );
+    }
 }

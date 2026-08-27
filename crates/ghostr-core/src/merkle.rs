@@ -27,6 +27,13 @@ pub enum LeafKind {
     Memory,
     /// A quest and its answer commitment, blinded with the quest nonce.
     Quest,
+    /// A verdict, in the day it was given rather than the day its quest was
+    /// issued.
+    ///
+    /// Those are often different days — a quest stays answerable for 48 hours —
+    /// and a sealed footage is immutable (I2), so a verdict cannot be added to
+    /// the tree of the day that asked. It is committed where it happened.
+    Verdict,
     /// The footage metadata: sequence, dates, window, counts.
     Meta,
 }
@@ -38,6 +45,7 @@ impl LeafKind {
         match self {
             Self::Memory => Tag::MemoryLeaf,
             Self::Quest => Tag::QuestLeaf,
+            Self::Verdict => Tag::VerdictLeaf,
             Self::Meta => Tag::MetaLeaf,
         }
     }

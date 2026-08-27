@@ -40,7 +40,8 @@ pub mod ots;
 pub mod verify;
 
 pub use chain::{
-    CHAIN_VERSION, ChainRecord, genesis, link, memory_leaf, meta_leaf, root, verify_run,
+    CHAIN_VERSION, ChainRecord, genesis, link, memory_leaf, meta_leaf, quest_leaf, root,
+    verdict_leaf, verify_run,
 };
 pub use error::{Error, Result};
 pub use ots::{AnchorState, CalendarConfig, OtsClient, Submission, default_calendars};

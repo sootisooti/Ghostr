@@ -322,6 +322,41 @@ CREATE TABLE persona_delta (
 CREATE INDEX persona_delta_queued_idx ON persona_delta(queued_at);
 ";
 
+/// Schema v7: which leaf set each day's root was built over.
+///
+/// The column that makes changing the commitment scheme survivable. A day is
+/// verified under the rules it was *sealed* under, so adding a leaf kind does
+/// not invalidate chains that predate it — which would be unrecoverable, since
+/// the old roots are already in Bitcoin (CLAUDE.md §4.7).
+///
+/// Existing rows take the default, which is the truth about them: every day
+/// sealed before this column existed was sealed over metadata and memories.
+///
+/// It is a clear column, and belongs in the clear: it describes public
+/// structure, exactly like `leaf_count` beside it. It is also outside every
+/// preimage, so adding it moves no hash — the immutability trigger below
+/// therefore has nothing to object to on existing rows.
+pub const SCHEMA_V7: &str = r"
+ALTER TABLE footage ADD COLUMN commitment_version TEXT NOT NULL DEFAULT 'memories_only';
+
+-- Which sealed day committed to this quest, and to its verdict.
+--
+-- Two columns because they are two events, usually on different days: a quest
+-- stays answerable for 48 hours, so the day that asked has often sealed by the
+-- time the answer arrives (I2).
+--
+-- Stamped at the cutoff and never cleared. Selecting a day's leaves by *these*
+-- rather than by a timestamp window is what makes the root reproducible: a
+-- verdict recorded after a day sealed but carrying a timestamp inside it would
+-- otherwise join that day's leaf set retroactively, and the day would stop
+-- verifying through no fault of anyone.
+ALTER TABLE quest ADD COLUMN committed_seq INTEGER;
+ALTER TABLE quest ADD COLUMN verdict_committed_seq INTEGER;
+
+CREATE INDEX quest_uncommitted_idx ON quest(committed_seq);
+CREATE INDEX quest_verdict_uncommitted_idx ON quest(verdict_committed_seq);
+";
+
 /// One migration step, for the release notes and the migration log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Migration {
@@ -382,6 +417,15 @@ pub const MIGRATIONS: &[Migration] = &[
         from: 5,
         to: 6,
         description: "quests with immutable answer commitments, and the correction queue",
+        touches_commitments: false,
+    },
+    Migration {
+        from: 6,
+        to: 7,
+        description: "commit quests and verdicts into the day's Merkle tree",
+        // It records *how* a commitment was built without touching one. Every
+        // existing root, link, and anchor is byte-identical afterwards, which
+        // is the whole reason the column exists.
         touches_commitments: false,
     },
 ];

@@ -584,6 +584,7 @@ pub(crate) mod fixtures {
                 prev_link: Hash32::zero(),
                 link: Hash32::zero(),
                 leaf_count: 1,
+                version: ghostr_core::footage::CommitmentVersion::current(),
             },
             sealed_at: Timestamp::new(0, 0),
         }

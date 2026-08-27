@@ -742,6 +742,7 @@ Tags in use:
 ```
 ghostr/v1/memory-leaf
 ghostr/v1/quest-leaf
+ghostr/v1/verdict-leaf
 ghostr/v1/meta-leaf
 ghostr/v1/node
 ghostr/v1/footage-root
@@ -755,8 +756,40 @@ ghostr/v1/quest-answer
 ```
 memory_leaf(m)  = H_tag("ghostr/v1/memory-leaf",  m.salt || canonical_cbor(m))
 quest_leaf(q)   = H_tag("ghostr/v1/quest-leaf",   q.nonce || canonical_cbor(q_public_fields))
+verdict_leaf(v) = H_tag("ghostr/v1/verdict-leaf", q.nonce || canonical_cbor(v_public_fields))
 meta_leaf(f)    = H_tag("ghostr/v1/meta-leaf",    canonical_cbor(f.metadata))
 ```
+
+`q_public_fields` is the quest **as issued**, and deliberately holds no claim
+text:
+
+```
+{ id, issued_for, persona_ordinal, persona_content, kind, facet,
+  difficulty, confidence, answer_commitment, holdout, decoy }
+```
+
+A leaf is revealed along with its preimage when proving inclusion, so putting
+the claim in would mean "a quest existed on this day" could not be shown without
+disclosing what it asked. The commitment covers the claim transitively instead:
+recomputing `answer_commitment` from a claim proves the two match (§4.3), and
+this leaf proves that commitment was in the day's root. Two steps, and the
+second discloses nothing.
+
+`v_public_fields` is the shape of an answer, not its words:
+
+```
+{ quest_id, verdict, severity, answered_at }
+```
+
+A correction's text became a memory on the day it was given, so it is already a
+leaf in the same tree. Committing it twice would buy nothing and would put the
+user's own sentence into a preimage that gets revealed to prove a verdict
+happened.
+
+Both leaves are blinded with the quest's nonce — the same one that blinds the
+answer commitment. Reusing it is safe because the three live in separate hash
+domains, and it means one secret per quest rather than three that have to be
+kept in step.
 
 The salt is essential. A memory is often low-entropy — "saw Nan today" has maybe
 30 bits of guessable content. An unsalted commitment to it is a hash anyone can
@@ -770,8 +803,33 @@ distinct leaf and internal prefixes (already handled by the tag separation
 above):
 
 ```
-root_n = merkle_root([ meta_leaf, memory_leaf*, quest_leaf* ])
+root_n = merkle_root([ meta_leaf, memory_leaf*, quest_leaf*, verdict_leaf* ])
 ```
+
+**A day commits to what was pending at its cutoff**, not to what its date
+window happens to contain. A quest stays answerable for 48 hours, so its verdict
+usually arrives after the day that asked has sealed — and a sealed footage is
+immutable (I2). So the quest is committed by the day that was open when it was
+issued, the verdict by the day that was open when it was given, and each is
+stamped with the `seq` that took it. Selecting by timestamp instead would let a
+late verdict join an already-sealed day's leaf set and break a root nobody can
+recompute.
+
+**The leaf set is versioned.** Each sealed day records which one it was built
+over:
+
+| Version | Leaves |
+| --- | --- |
+| `memories_only` | `meta_leaf`, `memory_leaf*` |
+| `with_quests` | the above, plus `quest_leaf*` and `verdict_leaf*` |
+
+A day is verified under the rules it was *sealed* under. Without that, adding a
+leaf kind would invalidate every chain that predates it — and those roots are
+already in Bitcoin, so there is no re-seal available to fix them. The version is
+recorded outside every preimage, so adding it moved no existing hash; and
+`meta_leaf` counts memories only, so a day with no quests hashes identically
+under either version, which is why chains sealed before this existed survive it
+untouched.
 
 Then each day links to the last:
 

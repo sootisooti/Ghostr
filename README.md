@@ -131,10 +131,10 @@ fragment, which browsers never send to a server and proxies never log.
 
 Without a model the generator asks the kinds it can do well — clozes over
 sentences you wrote and recall claims about routines it counted — rather than
-inventing the three that need a model to write their prompt. What is *not* yet
-there: those three kinds, a keyboard loop fast enough to be a daily ritual, and
-committing the day's quest set into the footage Merkle tree. Relays are still
-defined with `todo!()` bodies, so the shape is reviewable before it is built.
+inventing the three that need a model to write their prompt. Each day's quests and verdicts go into that day's Merkle root, so a streak
+cannot be invented after the fact any more than a memory can. What is *not* yet
+there: those three model-written kinds. Relays are still defined with `todo!()`
+bodies, so the shape is reviewable before it is built.
 
 `ghostr-testkit` landed ahead of all of it: a synthetic corpus generator that
 hands back its own ground truth, a scripted model, a deterministic clock and
