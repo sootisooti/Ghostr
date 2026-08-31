@@ -1,8 +1,10 @@
 # Ghostr — Threat Model
 
-**Status:** Draft v0.2 · M0, M1, and the M2 quest loop are implemented; relays
-and multi-device are not. Controls in those areas are **design commitments, not
-shipped controls**, and are marked "(planned)" where they are.
+**Status:** Draft v0.2 · M0, M1 and M2 are implemented, and M3's crypto, event
+codec and relay transport are in. Multi-device sync and restore are not, and the
+transport is not yet wired into the engine — so nothing publishes yet in
+practice. Controls not yet shipped are **design commitments** and are marked
+"(planned)" where they are.
 
 Ghostr concentrates the most sensitive corpus a person owns — what they said,
 who they saw, how they felt, what they believe — into one encrypted store with an
@@ -119,6 +121,34 @@ body, not beside the commitment digest.
 
 **Does not get:** any plaintext. Ever. (SPEC I9)
 
+**Also does:** a relay is not only an observer. It chooses what to return, so it
+can serve an event nobody signed, an event signed by a key that is not the one
+asked for, a *modified* copy of a real event that keeps the original id and
+signature, or a reply about an event that was never sent. A client that trusts
+what a relay hands back has no integrity at all — the encryption protects
+confidentiality on the way out and nothing on the way in.
+
+**Mitigations (implemented):**
+- **Every inbound event is signature-verified before it is returned**, on both
+  `fetch` and a live `subscribe`. `verify` checks that the id matches the body
+  *and* that the signature matches the id, so a relay can neither alter content
+  nor reuse a signature from elsewhere. A tampered event is dropped, not
+  surfaced. `a_tampered_event_from_a_relay_is_dropped` fails if the check is
+  removed.
+- **A publish receipt is only believed when it names the event that was sent.**
+  A relay answering `OK` about some other id — its own earlier reply, or another
+  client's — would otherwise be read as this publish succeeding, letting a relay
+  report storing something it dropped.
+- **Publishing is refused for any scope the vault has not enabled**, and the
+  default set is empty, so a fresh vault publishes nothing. Enabling encrypted
+  backup does not enable the ghost to post. `PublishScope::Revocation` is the
+  sole exception and is always permitted: a revocation the user cannot publish
+  because they disabled publishing is a revocation that does not happen.
+- **A relay cannot hold a thread.** Connect and read deadlines are set on the
+  socket *before* the websocket handshake, because the handshake itself reads —
+  a deadline applied afterwards never covers a relay that accepts the connection
+  and then says nothing.
+
 **Mitigations (planned):**
 - NIP-44 v2 self-encryption for all private kinds. The relay holds ciphertext it
   has no key for.
@@ -130,7 +160,8 @@ body, not beside the commitment digest.
 - NIP-59 gift wrap (kind 1059) available for users who need kind and author
   hidden too — costs discoverability, opt-in.
 - Multi-relay publish with no single relay holding a complete set.
-- **Relay publishing is entirely off until M3, and off by default after.**
+- **Relay publishing is off by default** — now enforced by the scope set rather
+  than by the absence of a transport.
 
 **Residual risk:**
 - **Liveness leaks.** A daily cadence of same-kind events from one pubkey says

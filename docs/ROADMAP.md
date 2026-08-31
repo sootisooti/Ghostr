@@ -215,8 +215,17 @@ v2 (checked against all 128 reference vectors), NIP-19 `nprofile`/`naddr`, the
 NIP-01 event id, and a `Signer` the local keystore implements. `ghostr-nostr`
 turns payloads into events and back: the `ghostr/v1/...` `d`-tag namespace, the
 NIP-78 mirror, per-kind account separation, and ghost disclosure enforced by the
-builder. What remains is the transport — the relay websocket — plus NIP-59 gift
-wrap, which is blocked on [SPEC §14 Q20](SPEC.md#14-open-questions).
+builder.
+
+The transport is now in: `WebsocketRelayClient` publishes, fetches and
+subscribes over blocking websockets — one thread per relay rather than an async
+reactor, matching `ureq` for anchoring and `std::net` for `serve`. Every event a
+relay returns is signature-verified before it is handed back, publishing is
+refused for any scope the vault has not enabled, and an `OK` is only believed
+when it names the event that was actually sent. What remains of M3 is wiring the
+transport into the engine — sync, restore, and the replica rules — plus NIP-59
+gift wrap, which is blocked on
+[SPEC §14 Q20](SPEC.md#14-open-questions).
 
 **Scope**
 - `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with
