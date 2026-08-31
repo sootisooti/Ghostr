@@ -11,14 +11,22 @@ use ghostr_core::identity::{Account, KeyRef, PublicKey};
 
 use crate::event::{Signature, UnsignedEvent};
 use crate::kdf::Dek;
-use crate::nip44::ConversationKey;
 use crate::secret::SecretString;
 
 /// Anything that can produce a nostr signature.
 ///
-/// Note what is absent: no method returns key material. Callers name a key with
-/// a [`KeyRef`] and ask for an operation, which is why a remote signer is a
+/// Note what is absent: **no method returns key material.** Callers name a key
+/// with a [`KeyRef`] and ask for an operation, which is why a remote signer is a
 /// drop-in rather than a rewrite.
+///
+/// That is a constraint on this trait's shape, not a description of its
+/// implementations. A method returning a derived secret is one a bunker or a
+/// hardware wallet could only refuse, and a method the intended implementations
+/// must refuse is a hole rather than a seam — see the note below the trait.
+///
+/// `ghostr-nostr/tests/external_signer.rs` crosses the seam for real: it drives
+/// the event codec through an implementation with no vault, no store and no
+/// keystore file.
 #[async_trait]
 pub trait Signer: Send + Sync {
     /// The public key for a reference.
@@ -85,21 +93,22 @@ pub trait Signer: Send + Sync {
         sender: &PublicKey,
         payload: &str,
     ) -> crate::Result<Vec<u8>>;
-
-    /// Derives a conversation key without performing an operation.
-    ///
-    /// For callers that encrypt many payloads to one recipient and should not
-    /// redo ECDH per item.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
-    async fn conversation_key(
-        &self,
-        key: KeyRef,
-        peer: &PublicKey,
-    ) -> crate::Result<ConversationKey>;
 }
+
+// There is deliberately no `conversation_key` on this trait.
+//
+// It used to be here, as an optimisation for callers encrypting many payloads
+// to one recipient. It returned a `ConversationKey`, which is key material —
+// contradicting this trait's own opening line, seventy lines above, in the same
+// file.
+//
+// The contradiction is not cosmetic. A NIP-46 bunker or a hardware wallet exists
+// precisely so derived secrets never leave it; such a signer could only refuse
+// the method, and a trait method the intended implementations must refuse is not
+// a seam, it is a hole. Nothing outside `ghostr-crypto` ever called it.
+//
+// `FileKeystore` keeps it as an inherent method, where it is a local
+// implementation detail rather than a promise made to every signer.
 
 /// Holds wrapped secrets and hands out references to them.
 ///

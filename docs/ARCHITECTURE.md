@@ -151,8 +151,6 @@ pub trait Signer: Send + Sync {
         &self, key: KeyRef, to: &PublicKey, pt: &[u8], nonce: [u8; 32],
     ) -> Result<String>;
     async fn nip44_decrypt(&self, key: KeyRef, from: &PublicKey, ct: &str) -> Result<Vec<u8>>;
-    /// For callers encrypting many payloads to one recipient.
-    async fn conversation_key(&self, key: KeyRef, peer: &PublicKey) -> Result<ConversationKey>;
 }
 
 /// Holds wrapped secrets. Unlock derives the KEK; Drop zeroizes it.
@@ -164,12 +162,24 @@ pub trait Keystore: Send + Sync {
 }
 ```
 
-`Signer` returns `KeyRef`-addressed results and never hands out bytes. That is
-what makes a remote signer a drop-in rather than a rewrite.
+`Signer` returns `KeyRef`-addressed results and **never hands out bytes**. That
+is what makes a remote signer a drop-in rather than a rewrite, and it is a rule
+about the trait's *shape* rather than a description of its implementations: a
+method returning a derived secret is one a bunker or a hardware wallet could only
+refuse, and a method the intended implementations must refuse is a hole rather
+than a seam. `conversation_key` was such a method and has been removed;
+`FileKeystore` keeps it inherently, where it is a local detail.
 
 `FileKeystore` implements both traits. They are separate because a remote signer
 implements only the first — but locally the secret bytes never leave the
 keystore, so the thing that holds them is also the thing that uses them.
+
+The substitution is tested rather than asserted:
+`ghostr-nostr/tests/external_signer.rs` drives the event codec through a signer
+with no vault, no store and no keystore file, behind `dyn Signer`. Note what it
+never supplies: **the DEK.** That comes from the vault seed (SPEC §14 Q21),
+which is precisely what lets the identity key live on a device this process
+cannot read.
 
 ### 4.2 `ghostr-llm` — the boundary that matters most
 

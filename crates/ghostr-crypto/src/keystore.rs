@@ -550,7 +550,7 @@ impl Signer for FileKeystore {
         plaintext: &[u8],
         nonce: [u8; 32],
     ) -> crate::Result<String> {
-        let conversation = self.conversation_key(key, recipient).await?;
+        let conversation = self.conversation_key(key, recipient)?;
         crate::nip44::encrypt(&conversation, plaintext, &nonce)
     }
 
@@ -560,15 +560,20 @@ impl Signer for FileKeystore {
         sender: &PublicKey,
         payload: &str,
     ) -> crate::Result<Vec<u8>> {
-        let conversation = self.conversation_key(key, sender).await?;
+        let conversation = self.conversation_key(key, sender)?;
         crate::nip44::decrypt(&conversation, payload)
     }
+}
 
-    async fn conversation_key(
-        &self,
-        key: KeyRef,
-        peer: &PublicKey,
-    ) -> crate::Result<ConversationKey> {
+impl FileKeystore {
+    /// Derives the NIP-44 conversation key with `peer`.
+    ///
+    /// Inherent rather than part of [`Signer`], and not public: it returns key
+    /// material, which is exactly what a remote or hardware signer exists never
+    /// to do. Here it is a local shortcut so `nip44_encrypt` and `nip44_decrypt`
+    /// share one derivation; on the trait it would have been a method every
+    /// external implementation must refuse.
+    fn conversation_key(&self, key: KeyRef, peer: &PublicKey) -> crate::Result<ConversationKey> {
         let derived = self.derived(key.account)?;
         ConversationKey::derive(derived.secret_bytes(), peer)
     }
@@ -677,7 +682,7 @@ mod tests {
             Err(crate::Error::Locked)
         ));
         assert!(matches!(
-            ks.conversation_key(key, &peer).await,
+            ks.conversation_key(key, &peer),
             Err(crate::Error::Locked)
         ));
         assert!(matches!(
@@ -723,14 +728,8 @@ mod tests {
         let ghost_pub = Signer::public_key(&ks, ghost).expect("pubkey");
         let identity_pub = Signer::public_key(&ks, identity).expect("pubkey");
 
-        let forward = ks
-            .conversation_key(ghost, &identity_pub)
-            .await
-            .expect("fwd");
-        let backward = ks
-            .conversation_key(identity, &ghost_pub)
-            .await
-            .expect("back");
+        let forward = ks.conversation_key(ghost, &identity_pub).expect("fwd");
+        let backward = ks.conversation_key(identity, &ghost_pub).expect("back");
         assert_eq!(forward.expose(), backward.expose());
 
         // And a message written by one is readable by the other.
