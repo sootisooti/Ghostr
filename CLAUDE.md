@@ -13,8 +13,9 @@ every model call falls back to a deterministic path. `ghostr serve` puts the
 loop on a page a phone can open. The three model-written quest kinds
 (`VoiceProbe`, `Counterfactual`, `Prediction`) land through
 `ghostr_quests::llm`, and the day's quest set is committed into the footage
-Merkle tree. M3 has its crypto and its event codec; what remains is the relay
-transport ([docs/ROADMAP.md](docs/ROADMAP.md)).
+Merkle tree. M3 has its crypto, its event codec and its relay
+transport; what remains is wiring that transport into the engine — sync and
+restore ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.

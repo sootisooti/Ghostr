@@ -115,6 +115,13 @@ opentimestamps = "0.2"
 # is most corporate networks — cannot anchor, and the failure looks like a
 # calendar outage rather than a trust-store problem.
 ureq = { version = "2", default-features = false, features = ["tls", "native-certs", "json"] }
+# Websocket for the relay transport. Blocking, over `std::net::TcpStream`, to
+# match every other I/O path in this tree — `ureq` for anchoring and inference,
+# `std::net` plus threads for `serve`. The async-reactor alternative
+# (`tokio-tungstenite`) would have pulled a runtime the project has so far
+# deliberately refused, for a handful of relay connections that a thread each
+# handles fine.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
 
 # --- M0: dev-only -----------------------------------------------------------
 tempfile = "3"

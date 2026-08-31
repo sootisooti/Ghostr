@@ -1,5 +1,8 @@
 //! Relay transport.
 
+pub mod websocket;
+pub mod wire;
+
 use async_trait::async_trait;
 use ghostr_core::identity::PublicKey;
 use ghostr_crypto::event::SignedEvent;

@@ -15,9 +15,16 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# The relay transport. Blocking, over `std::net::TcpStream`, matching every
+# other I/O path in this tree rather than introducing an async reactor for a
+# handful of connections (CLAUDE.md §4.9).
+tungstenite = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+# The test relay: a real websocket server on loopback, so the transport is
+# exercised against the protocol rather than against a mock of itself.
+tungstenite = { workspace = true }
 # The codec tests drive the real `FileKeystore` rather than a fake signer: a
 # fake would happily agree with this codec's own mistakes about ECDH and NIP-44,
 # which is the exact class of bug the crypto vectors exist to catch.
