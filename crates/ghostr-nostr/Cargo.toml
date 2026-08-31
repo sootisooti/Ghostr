@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 # other I/O path in this tree rather than introducing an async reactor for a
 # handful of connections (CLAUDE.md §4.9).
 tungstenite = { workspace = true }
+# Parsing the hex pubkey a NIP-46 signer reports. Already throughout the tree.
+hex = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]

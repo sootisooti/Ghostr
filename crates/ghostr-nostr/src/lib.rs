@@ -53,6 +53,7 @@ pub mod client;
 pub mod codec;
 pub mod error;
 pub mod kinds;
+pub mod nip46;
 pub mod payload;
 pub mod privacy;
 
