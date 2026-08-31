@@ -624,13 +624,16 @@ version = "0.0.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "base64ct",
  "bech32",
  "bip39",
+ "chacha20",
  "chacha20poly1305",
  "ghostr-core",
  "hex",
  "hkdf",
  "hmac",
+ "libc",
  "secp256k1",
  "serde",
  "serde_json",
@@ -638,6 +641,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror",
+ "tokio",
  "zeroize",
 ]
 
@@ -726,9 +730,12 @@ dependencies = [
  "chrono",
  "ghostr-core",
  "ghostr-crypto",
+ "ghostr-testkit",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -756,6 +763,7 @@ dependencies = [
  "ghostr-store",
  "proptest",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

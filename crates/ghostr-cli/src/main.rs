@@ -46,6 +46,13 @@ enum Command {
         /// Import an existing BIP-39 mnemonic instead of generating one.
         #[arg(long)]
         import: bool,
+        /// Use an existing nostr `nsec` as this vault's identity.
+        ///
+        /// The vault still generates its own seed for the ghost, anchor and
+        /// data keys — an `nsec` is a raw key with no derivation tree under it
+        /// — so there are two things to back up, not one (SPEC §14 Q21).
+        #[arg(long)]
+        nsec: bool,
         /// Home timezone, which decides where day boundaries fall.
         #[arg(long, default_value = "UTC")]
         tz: String,
@@ -293,7 +300,7 @@ fn run(cli: Cli) -> Result<()> {
     let dir = cli.home.unwrap_or_else(Config::default_dir);
 
     match cli.command {
-        Command::Init { import, tz } => cmd_init(&dir, import, &tz),
+        Command::Init { import, nsec, tz } => cmd_init(&dir, import, nsec, &tz),
         Command::Ingest { path } => cmd_ingest(&dir, &path),
         Command::Memoria {
             date,
@@ -400,7 +407,7 @@ fn rpassword_prompt(prompt: &str) -> Result<String> {
     Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
-fn cmd_init(dir: &std::path::Path, import: bool, tz: &str) -> Result<()> {
+fn cmd_init(dir: &std::path::Path, import: bool, nsec: bool, tz: &str) -> Result<()> {
     let home_tz = tz
         .parse()
         .map_err(|_| anyhow::anyhow!("`{tz}` is not an IANA timezone"))?;
@@ -411,6 +418,18 @@ fn cmd_init(dir: &std::path::Path, import: bool, tz: &str) -> Result<()> {
     } else {
         None
     };
+    // Read with echo off, like a passphrase. An `nsec` is a private key, and a
+    // key left on screen is a key in a screenshot, a scrollback, and a recording.
+    let brought = if nsec {
+        eprintln!(
+            "\n  Pasting an nsec makes it this vault's identity.\n  \
+             The vault still generates its own seed for everything else,\n  \
+             so you will have TWO things to back up: this key and that seed.\n"
+        );
+        Some(SecretString::new(rpassword_prompt("nsec: ")?))
+    } else {
+        None
+    };
     let pass = passphrase(true)?;
 
     let (engine, outcome) = Engine::init(
@@ -418,6 +437,7 @@ fn cmd_init(dir: &std::path::Path, import: bool, tz: &str) -> Result<()> {
         &pass,
         home_tz,
         imported,
+        brought,
         ghostr_crypto::kdf::Argon2Params::recommended(),
     )
     .context("creating the vault")?;

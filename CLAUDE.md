@@ -5,14 +5,16 @@ Read this before touching anything. It is the short version of
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md), plus the rules that aren't written
 down anywhere else.
 
-**Current state: M0 and M1 are implemented; M2 is under way.** The vault,
+**Current state: M0, M1 and M2 are implemented; M3 is under way.** The vault,
 ingest, the Memoria pipeline, the hash chain, `ghostr verify`, the egress gate,
 the encrypted vector index, persona distillation, and the daily quest loop —
 issue, answer, score — all work, and all work with no model at all, because
 every model call falls back to a deterministic path. `ghostr serve` puts the
-loop on a page a phone can open. What remains of M2 is the three quest kinds
-that need a model to write their prompt, and committing the day's quest set into
-the footage Merkle tree ([docs/ROADMAP.md](docs/ROADMAP.md)).
+loop on a page a phone can open. The three model-written quest kinds
+(`VoiceProbe`, `Counterfactual`, `Prediction`) land through
+`ghostr_quests::llm`, and the day's quest set is committed into the footage
+Merkle tree. M3 has its crypto and its event codec; what remains is the relay
+transport ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.

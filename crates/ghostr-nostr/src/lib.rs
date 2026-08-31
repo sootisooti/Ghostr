@@ -21,22 +21,33 @@
 //!
 //! # Status
 //!
-//! Scaffold. Types and signatures are defined; bodies are [`todo!`].
+//! The codec is implemented: [`kinds`] addresses events, [`codec`] encodes and
+//! decodes Ghostr's kinds against a [`Signer`](ghostr_crypto::Signer), mirrors
+//! them under NIP-78, and enforces ghost disclosure by construction (SPEC I10).
+//! [`privacy`] jitters publish times.
+//!
+//! Two things are deliberately absent. [`RelayClient`] is a trait with no
+//! transport yet — the websocket half of M3. And
+//! [`privacy::gift_wrap`] is `todo!()`: NIP-59 needs a throwaway signing key,
+//! which cannot live in this crate (ARCHITECTURE §3 rule 4), so it waits on
+//! SPEC §14 Q20 rather than on someone reaching for the shortcut.
 
 #![forbid(unsafe_code)]
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
 // the exception: a failed assertion should panic loudly with a message, and
 // threading `Result` through test bodies buries what is actually being asserted.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// SCAFFOLD: every function body in this crate is `todo!()`. These allows exist
-// only for the scaffold phase and are removed crate-by-crate as bodies land.
-// `unused_variables` and `dead_code` fire because a diverging body never reads
-// its arguments and never calls its helpers; parameters keep real names rather
-// than `_` prefixes so the signatures stay readable. `clippy::todo` is denied
-// workspace-wide by CLAUDE.md §5 and this is the documented exception.
-// `cargo xtask scaffold-status` counts these markers so they cannot be quietly
-// forgotten.
-#![allow(unused_variables, dead_code, clippy::todo)]
+// SCAFFOLD: one function is still `todo!()` — `privacy::gift_wrap`, blocked on
+// SPEC §14 Q20. The allows are narrowed to what that single body needs:
+// `unused_variables` because a diverging body never reads its arguments, and
+// its parameters keep real names rather than `_` prefixes so the signature stays
+// readable, and `clippy::todo`, which CLAUDE.md §5 denies workspace-wide and
+// names this as the documented exception. `dead_code` is gone — nothing in this
+// crate is unreachable any more.
+//
+// `cargo xtask scaffold-status` counts these markers, so the block cannot be
+// quietly forgotten. Delete it when Q20 is answered.
+#![allow(unused_variables, clippy::todo)]
 
 pub mod client;
 pub mod codec;

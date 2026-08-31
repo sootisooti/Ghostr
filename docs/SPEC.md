@@ -1426,3 +1426,132 @@ rather than by trust level or by a naming convention, because a foreign key is
 checkable and a convention is something somebody has to remember. The words are
 kept, not dropped: they are the user's own, and the quest they answered still
 carries them.
+
+---
+
+**Q19 — Where does a passphrase change get its salt?**
+
+`Keystore::change_passphrase(new_passphrase)` cannot be implemented at that
+signature. Re-wrapping the seed needs a fresh Argon2id salt and a fresh
+XChaCha20 nonce; the method is handed neither, and drawing them inside
+`ghostr-crypto` would put `OsRng` outside the composition root, which §11.4 and
+CLAUDE.md §6 both forbid. Reusing the stored salt is worse than it looks: it
+wraps a new KEK under parameters chosen for an old one, and it lets anyone who
+kept a copy of the old file confirm a guess against both wrappings at the cost of
+one derivation.
+
+The same gap exists on `Signer::nip44_encrypt`, which needs a per-message nonce.
+That one is resolved here: the nonce is a parameter, matching
+`FileKeystore::create`, which already takes its salt and nonce for exactly this
+reason.
+
+> **Recommendation:** the same treatment —
+> `change_passphrase(new_passphrase, salt, nonce)`. It keeps entropy in the
+> composition root, makes the operation reproducible under a seeded RNG in tests,
+> and is consistent with every other function in the crate that needs randomness.
+> The alternative worth considering is requiring the **old** passphrase as well,
+> which would additionally stop a passer-by from re-keying an unlocked vault; the
+> cost is that it can no longer be offered as "you are already unlocked, pick a
+> new passphrase". Until this is settled the method returns
+> `Backend { operation: "change_passphrase needs a caller-supplied salt" }` — a
+> refusal rather than a wrong rewrap, because a rewrap that loses the seed is not
+> recoverable.
+
+---
+
+**Q20 — Who holds the ephemeral key for a NIP-59 gift wrap?**
+
+Gift wrap is three layers: a rumor, a **seal** (kind 13) encrypted to the
+recipient and signed by the real author, and a **wrap** (kind 1059) encrypted and
+signed by a throwaway key that exists only for that one event. The throwaway key
+is the point — it is what hides the author from a relay.
+
+`ghostr-nostr` cannot hold it. §11.3 and ARCHITECTURE §3 rule 4 put secret key
+bytes in `ghostr-crypto` alone, so `privacy::gift_wrap` cannot derive a key from
+entropy handed to it, and it cannot sign the wrap either. The scaffold's
+signature — `gift_wrap(event, ephemeral_entropy)` returning an unsigned event —
+also names no recipient, so there is nobody to encrypt to.
+
+> **Recommendation:** add one method to `Signer`:
+> `gift_wrap(&self, key, recipient, rumor, ephemeral_entropy, nonces) ->
+> Result<SignedEvent>`, returning the finished wrap. The ephemeral key is born
+> and zeroized inside `ghostr-crypto`, never crosses a crate boundary, and never
+> reaches a domain type — the same treatment the identity key gets. `ghostr-nostr`
+> keeps [`PrivacyMode::GiftWrapped`] as the policy decision and delegates the
+> cryptography, which is the split every other seam in this tree already uses.
+>
+> The alternative — a general "sign with this ephemeral key" primitive — is
+> rejected: it is a signing oracle for arbitrary bytes under an
+> attacker-chosen key, and its only caller would be this one.
+>
+> Until this is settled `gift_wrap` is `todo!()` and `PrivacyMode::GiftWrapped`
+> cannot be selected. NIP-59 is opt-in and not on the M3 exit criteria
+> ([ROADMAP](ROADMAP.md)), so nothing else is blocked.
+
+---
+
+**Q21 — If the identity key is imported or held elsewhere, where do the other three accounts come from?**
+
+§8.1 derives four accounts — identity, ghost, anchor, data — from one BIP-39
+seed by NIP-06. That works because the seed is ours and we hold it. Two things
+users ask for break it:
+
+1. **Log in with an existing `nsec`.** An `nsec` is a raw private key, not a
+   seed. There is no BIP-32 tree under it, so there is nothing to derive
+   `1'`, `2'` and `3'` *from*.
+2. **Sign with a hardware wallet, or any external signer.** The key never
+   leaves the device it lives on.
+
+The tempting answer is to derive the other three by HKDF from the identity secret
+— deterministic, and recoverable from the `nsec` alone.
+
+> **It cannot be that.** HKDF needs the identity secret *bytes*, and the entire
+> point of an external signer is that those bytes never reach us.
+
+**And the problem is larger than the three accounts.** §10.1 derives the **DEK
+itself** from the identity secret key. That is a deliberate, well-argued choice —
+it means the store is readable exactly when the identity is unlocked, with no
+second secret to back up — but it has a consequence nobody wrote down: **a vault
+whose identity key lives on hardware cannot be decrypted at all.** Not slowly,
+not after a migration. The app holds a pubkey and a signing oracle, and no amount
+of asking that oracle to sign things produces the 32 bytes HKDF needs.
+
+So "log in with an `nsec`" and "sign with a hardware wallet" are not the same
+feature at different difficulties. The first works today with an import; the
+second is impossible until the DEK stops depending on the identity secret.
+
+> **Recommendation: derive nothing from the identity key — not the other
+> accounts, and not the DEK. Bind to it instead.**
+>
+> - **Ghost, anchor and data** come from a locally-held *vault seed*, generated
+>   at `init` and never leaving the device. None of them is the user's public
+>   identity, and all of them are what the vault needs to work offline.
+> - **The DEK moves to `Account::Data`**, which the seed already derives and
+>   nothing currently uses. The vault then decrypts from the vault seed alone, so
+>   it keeps working when the identity key is an `nsec` the user pasted, a key on
+>   a hardware wallet, or a bunker on the other side of a relay.
+> - **The identity account** is whatever the user brought: derived from the vault
+>   seed (today's default), imported, or held behind a [`Signer`] we can only
+>   ask. All three look identical to every call site, which is the substitution
+>   `Signer` already promises.
+> - The link is a **signature, not a derivation**: the identity key signs a
+>   `GhostManifest` (§8.2) naming the ghost pubkey. That is already how a reader
+>   learns which ghost belongs to whom, so binding costs no new mechanism — and a
+>   signature is the only binding an external signer can produce.
+>
+> **Migration, per CLAUDE.md §4.7.** Changing where the DEK comes from would
+> re-encrypt every row, so it must not be done retroactively. The keystore file
+> records which scheme it uses and the version tag goes to 2: a v1 vault keeps
+> deriving its DEK from the identity key and is never touched; v2 vaults derive
+> from `Account::Data`. Only a v2 vault can adopt an external signer, and the
+> file says which it is rather than leaving it to be inferred.
+>
+> **The cost, which belongs in the UI and not in a footnote: two things to back
+> up** — the vault seed and the identity key. §10.1 chose one secret on purpose,
+> and this gives that up. Losing the vault seed loses the journal; losing the
+> identity key loses the ability to speak as that identity, but not the journal.
+> What it buys is the only thing that makes a hardware signer possible at all.
+>
+> Consequence for §8.1: the account table stays, but "derived from the seed" is
+> true of `1'`, `2'` and `3'` only. `0'` becomes *the identity account*, however
+> it is held.

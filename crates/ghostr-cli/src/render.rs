@@ -45,13 +45,33 @@ pub(crate) fn init(engine: &Engine, outcome: &InitOutcome, dir: &std::path::Path
         for (i, word) in phrase.split_whitespace().enumerate() {
             out.push_str(&format!("  {:>2}. {word}\n", i + 1));
         }
-        out.push_str(
-            "\n  This phrase IS your identity. It is not stored anywhere in\n\
-             \x20 readable form and it cannot be regenerated or reset.\n\
-             \x20 Anyone who has it can read everything you ever record.\n\
-             \x20 Lose it and the vault is unrecoverable — there is no backup\n\
-             \x20 and no support address that can help.\n",
-        );
+        // What this phrase *is* depends on where the identity came from, and
+        // saying the wrong one is how a key gets lost. On an imported vault the
+        // phrase is the seed and the `nsec` is the identity — two secrets, and
+        // the user has to be told that plainly (SPEC §14 Q21).
+        if outcome.identity_imported {
+            out.push_str(
+                "\n  You now have TWO things to back up.\n\
+                 \n\
+                 \x20 1. The nsec you pasted. That is your identity — it signs\n\
+                 \x20    as you, and this vault does not store it in any form\n\
+                 \x20    you could read back.\n\
+                 \x20 2. The phrase above. That is this vault: the journal, the\n\
+                 \x20    chain, and the ghost.\n\
+                 \n\
+                 \x20 Lose the nsec and you keep the journal but can no longer\n\
+                 \x20 speak as that identity. Lose the phrase and the journal is\n\
+                 \x20 gone — there is no backup and no support address.\n",
+            );
+        } else {
+            out.push_str(
+                "\n  This phrase IS your identity. It is not stored anywhere in\n\
+                 \x20 readable form and it cannot be regenerated or reset.\n\
+                 \x20 Anyone who has it can read everything you ever record.\n\
+                 \x20 Lose it and the vault is unrecoverable — there is no backup\n\
+                 \x20 and no support address that can help.\n",
+            );
+        }
     }
     out
 }

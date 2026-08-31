@@ -57,7 +57,7 @@ fn write_vault(dir: &Path) {
 
 fn init(dir: &Path) -> Engine {
     let (engine, outcome) =
-        Engine::init(dir, &passphrase(), Tz::UTC, None, test_params()).expect("init");
+        Engine::init(dir, &passphrase(), Tz::UTC, None, None, test_params()).expect("init");
     assert!(outcome.npub.as_str().starts_with("npub1"));
     assert!(
         outcome.mnemonic.is_some(),
@@ -296,7 +296,7 @@ fn init_refuses_to_destroy_an_existing_identity() {
     let vault = home.path().join("vault");
     drop(init(&vault));
 
-    let err =
-        Engine::init(&vault, &passphrase(), Tz::UTC, None, test_params()).expect_err("must refuse");
+    let err = Engine::init(&vault, &passphrase(), Tz::UTC, None, None, test_params())
+        .expect_err("must refuse");
     assert!(format!("{err}").contains("already exists"), "got: {err}");
 }

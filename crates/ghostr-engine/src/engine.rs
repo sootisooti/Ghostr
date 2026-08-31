@@ -55,6 +55,14 @@ pub struct InitOutcome {
     pub mnemonic: Option<String>,
     /// The genesis link this chain starts from.
     pub genesis_link: Hash32,
+    /// Whether the identity key was brought by the user rather than derived.
+    ///
+    /// Changes what the recovery phrase *is*, and therefore what the user has to
+    /// be told. On a normal vault the phrase is the whole identity; on an
+    /// imported one it is only the vault seed, and the `nsec` is the other half
+    /// (SPEC §14 Q21). Telling someone with two secrets that they have one is
+    /// how a key gets lost.
+    pub identity_imported: bool,
 }
 
 impl Engine {
@@ -70,6 +78,7 @@ impl Engine {
         passphrase: &SecretString,
         home_tz: Tz,
         import: Option<SecretString>,
+        nsec: Option<SecretString>,
         params: Argon2Params,
     ) -> crate::Result<(Self, InitOutcome)> {
         let keystore_path = dir.join(KEYSTORE_FILENAME);
@@ -98,8 +107,29 @@ impl Engine {
         rng.fill(&mut salt);
         rng.fill(&mut nonce);
 
-        let mut keystore =
-            FileKeystore::create(&keystore_path, &mnemonic, passphrase, salt, nonce, params)?;
+        let imported_identity = nsec.is_some();
+        let mut keystore = match nsec {
+            // The imported key becomes the identity; the vault seed still
+            // produces ghost, anchor and data, and the DEK (SPEC §14 Q21).
+            Some(encoded) => {
+                let secret = ghostr_crypto::nip19::decode_nsec(&encoded)?;
+                let mut identity_nonce = [0u8; 24];
+                rng.fill(&mut identity_nonce);
+                let entropy =
+                    ghostr_crypto::keystore::WrapEntropy::new(salt, nonce, identity_nonce)?;
+                FileKeystore::create_with_nsec(
+                    &keystore_path,
+                    secret,
+                    &mnemonic,
+                    passphrase,
+                    entropy,
+                    params,
+                )?
+            }
+            None => {
+                FileKeystore::create(&keystore_path, &mnemonic, passphrase, salt, nonce, params)?
+            }
+        };
         keystore.unlock(SecretString::new(passphrase.expose().to_owned()))?;
 
         let identity = keystore.identity_pubkey()?;
@@ -126,6 +156,7 @@ impl Engine {
                 npub,
                 mnemonic: revealed,
                 genesis_link,
+                identity_imported: imported_identity,
             },
         ))
     }

@@ -28,6 +28,32 @@ pub enum Error {
         kind: u16,
     },
 
+    /// A payload was encoded under an account SPEC §8.1 does not assign to it.
+    ///
+    /// The dangerous direction is an anchor receipt under the identity key: the
+    /// event is well formed, a relay accepts it, and it quietly links a chain to
+    /// the identity the separate anchor account exists to keep apart.
+    #[error("kind {kind} must be signed by a different account (SPEC §8.1)")]
+    WrongSigningAccount {
+        /// The kind that was being encoded.
+        kind: u16,
+    },
+
+    /// An event was not one of Ghostr's kinds, or not addressed by a Ghostr
+    /// `d` tag, so it has no NIP-78 mirror.
+    #[error("kind {kind} has no NIP-78 mirror")]
+    NotMirrorable {
+        /// The kind that was offered.
+        kind: u16,
+    },
+
+    /// A ghost note was built with no text.
+    ///
+    /// An empty note is not a note; publishing one would emit disclosure tags
+    /// attached to nothing.
+    #[error("ghost note has no content")]
+    EmptyNote,
+
     /// An event's signature or id did not verify.
     ///
     /// Relay-supplied events are untrusted input. Verifying before decoding is

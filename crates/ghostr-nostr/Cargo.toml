@@ -17,5 +17,15 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
+[dev-dependencies]
+# The codec tests drive the real `FileKeystore` rather than a fake signer: a
+# fake would happily agree with this codec's own mistakes about ECDH and NIP-44,
+# which is the exact class of bug the crypto vectors exist to catch.
+tempfile = { workspace = true }
+# `SeededRng`, so the jitter tests are reproducible (CLAUDE.md §6).
+ghostr-testkit = { workspace = true }
+# Drives the async codec. `rt` + `macros` only: no reactor, no sockets.
+tokio = { workspace = true, features = ["rt", "macros"] }
+
 [lints]
 workspace = true

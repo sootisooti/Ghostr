@@ -42,6 +42,7 @@ fn vault(dir: &Path) -> Engine {
         &passphrase(),
         Tz::UTC,
         None,
+        None,
         Argon2Params {
             memory_kib: 8,
             iterations: 1,

@@ -14,6 +14,8 @@ ghostr-store = { workspace = true }
 ghostr-llm = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+# The quest-writing schema. Already in the tree.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 

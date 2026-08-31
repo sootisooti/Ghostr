@@ -37,6 +37,19 @@ use crate::secret::{SecretBytes, SecretString};
 /// DEK is derived rather than stored and there is no copy to fall back on.
 const DEK_INFO: &[u8] = b"ghostr/v1/store-dek";
 
+/// AAD for a wrapped imported identity key.
+///
+/// Distinct from [`DEK_INFO`] on purpose. Both wrappings sit in the same file
+/// under the same KEK, and today a swap between them already fails on length —
+/// a seed is 64 bytes and an identity key is 32. The AAD is the lock that keeps
+/// that true the day something else 32 bytes long gets wrapped here, when length
+/// stops distinguishing them and nothing else would.
+///
+/// `wrapping_roles_do_not_cross_open` is what holds this to account; without it
+/// the constant could be changed to [`DEK_INFO`] and every test would still
+/// pass.
+const IDENTITY_INFO: &[u8] = b"ghostr/v1/imported-identity";
+
 /// Argon2id parameters. Stored alongside the wrapped seed so that raising the
 /// cost later does not strand existing vaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -218,6 +231,66 @@ pub fn unwrap_seed(kek: &Kek, wrapped: &WrappedSeed) -> crate::Result<SecretByte
     Ok(SecretBytes::new(bytes))
 }
 
+/// Wraps an imported 32-byte identity key under a KEK.
+///
+/// Separate from [`wrap_seed`] because the two are different sizes and, more to
+/// the point, different roles: each wrapping is bound to its own AAD, so one
+/// cannot be opened as the other.
+///
+/// # Errors
+///
+/// Returns [`Error::Backend`](crate::Error::Backend) if encryption fails.
+pub fn wrap_identity(
+    kek: &Kek,
+    key: &SecretBytes<32>,
+    nonce: &[u8; 24],
+    salt: &[u8; 16],
+    params: Argon2Params,
+) -> crate::Result<WrappedSeed> {
+    let cipher = XChaCha20Poly1305::new(kek.0.expose().into());
+    let ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: key.expose(),
+                aad: IDENTITY_INFO,
+            },
+        )
+        .map_err(|_| crate::Error::Backend {
+            operation: "identity wrap",
+        })?;
+    Ok(WrappedSeed {
+        ciphertext,
+        nonce: nonce.to_vec(),
+        salt: salt.to_vec(),
+        params,
+    })
+}
+
+/// Unwraps an imported identity key.
+///
+/// # Errors
+///
+/// Returns [`Error::BadPassphrase`](crate::Error::BadPassphrase) if the KEK does
+/// not authenticate it — which is also what a seed pasted in here produces,
+/// because the AAD does not match.
+pub fn unwrap_identity(kek: &Kek, wrapped: &WrappedSeed) -> crate::Result<SecretBytes<32>> {
+    let cipher = XChaCha20Poly1305::new(kek.0.expose().into());
+    let plaintext = cipher
+        .decrypt(
+            XNonce::from_slice(&wrapped.nonce),
+            Payload {
+                msg: &wrapped.ciphertext,
+                aad: IDENTITY_INFO,
+            },
+        )
+        .map_err(|_| crate::Error::BadPassphrase)?;
+    let bytes: [u8; 32] = plaintext
+        .try_into()
+        .map_err(|_| crate::Error::BadPassphrase)?;
+    Ok(SecretBytes::new(bytes))
+}
+
 /// Derives the store's data key from the identity secret key.
 ///
 /// This is the step that makes the store readable only to whoever holds the
@@ -381,5 +454,41 @@ mod tests {
             open_row(&dek, &sealed, &[0u8; 24], b"memory:1"),
             Err(crate::Error::DecryptFailed)
         ));
+    }
+
+    /// The AAD separation, tested where it can actually be tested.
+    ///
+    /// Both wrappings live in one keystore file under one KEK. Length happens to
+    /// distinguish them today; this is what makes the *role* distinguish them,
+    /// so the property survives a future 32-byte secret being wrapped alongside.
+    #[test]
+    fn wrapping_roles_do_not_cross_open() {
+        let kek = kek();
+        let key = SecretBytes::new([0x5Au8; 32]);
+        let wrapped = wrap_identity(
+            &kek,
+            &key,
+            &[4u8; 24],
+            &[9u8; 16],
+            Argon2Params::insecure_for_tests(),
+        )
+        .expect("wrap");
+
+        // Same bytes, same key, same nonce — only the role differs.
+        let as_identity = unwrap_identity(&kek, &wrapped).expect("its own role opens it");
+        assert_eq!(as_identity.expose(), key.expose());
+
+        let cipher = XChaCha20Poly1305::new(kek.0.expose().into());
+        let as_seed = cipher.decrypt(
+            XNonce::from_slice(&wrapped.nonce),
+            Payload {
+                msg: &wrapped.ciphertext,
+                aad: DEK_INFO,
+            },
+        );
+        assert!(
+            as_seed.is_err(),
+            "an identity wrapping opened under the seed's AAD"
+        );
     }
 }

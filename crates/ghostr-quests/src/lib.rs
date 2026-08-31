@@ -38,6 +38,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 pub mod error;
 pub mod generate;
+pub mod llm;
 pub mod score;
 pub mod verdict;
 pub mod view;

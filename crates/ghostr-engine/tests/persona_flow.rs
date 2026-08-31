@@ -24,6 +24,7 @@ fn vault(dir: &Path) -> Engine {
         &SecretString::new("correct horse battery staple".to_owned()),
         Tz::UTC,
         None,
+        None,
         Argon2Params {
             memory_kib: 8,
             iterations: 1,

@@ -28,14 +28,24 @@ hkdf = { workspace = true }
 hmac = { workspace = true }
 argon2 = { workspace = true }
 chacha20poly1305 = { workspace = true }
+chacha20 = { workspace = true }
+base64ct = { workspace = true }
 secp256k1 = { workspace = true }
 bip39 = { workspace = true }
 bech32 = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
+# CLAUDE.md §4.10: the sole `unsafe` in the workspace, for mlock. Unix only.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Drives the async `Signer` methods. `rt` + `macros` only: no reactor, no
+# timers, nothing that could open a socket from a test.
+tokio = { workspace = true, features = ["rt", "macros"] }
+# Reads the vendored NIP-44 reference vectors. Already in the tree.
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
