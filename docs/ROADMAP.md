@@ -217,7 +217,15 @@ turns payloads into events and back: the `ghostr/v1/...` `d`-tag namespace, the
 NIP-78 mirror, per-kind account separation, and ghost disclosure enforced by the
 builder.
 
-The transport is now in: `WebsocketRelayClient` publishes, fetches and
+NIP-46 is in too, as the client half: `Nip46Signer` implements `Signer` over a
+transport trait, so a vault whose identity lives in a bunker or on a phone looks
+identical to every call site. What a remote signer returns is checked rather than
+believed — most of all a `sign_event` reply, since NIP-46 hands back a whole
+event and a correctly-signed *substitution* is the attack that shape invites.
+What remains for it is the relay-backed transport: wrapping each request in a
+kind-24133 event and matching the reply.
+
+The websocket transport is in: `WebsocketRelayClient` publishes, fetches and
 subscribes over blocking websockets — one thread per relay rather than an async
 reactor, matching `ureq` for anchoring and `std::net` for `serve`. Every event a
 relay returns is signature-verified before it is handed back, publishing is
