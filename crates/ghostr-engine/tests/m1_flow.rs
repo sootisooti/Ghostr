@@ -29,7 +29,8 @@ fn test_params() -> Argon2Params {
 }
 
 fn init(dir: &Path) -> Engine {
-    let (engine, _) = Engine::init(dir, &passphrase(), Tz::UTC, None, test_params()).expect("init");
+    let (engine, _) =
+        Engine::init(dir, &passphrase(), Tz::UTC, None, None, test_params()).expect("init");
     engine
 }
 

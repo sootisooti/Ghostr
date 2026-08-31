@@ -274,6 +274,29 @@ impl DerivedKey {
         self.secret.expose()
     }
 
+    /// Builds a key from raw secret bytes.
+    ///
+    /// Crate-internal, and the only caller is an imported `nsec` (SPEC §14 Q21):
+    /// a raw nostr key has no BIP-32 tree under it, so there is nothing to
+    /// derive it *from* and it has to be adopted as-is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidPublicKey`](crate::Error::InvalidPublicKey) if
+    /// the bytes are not a valid secp256k1 scalar — zero, or above the curve
+    /// order. Checked here rather than at first use, so an unusable key is
+    /// refused at import instead of at the first signature.
+    pub(crate) fn from_secret(account: Account, secret: [u8; 32]) -> crate::Result<Self> {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_byte_array(secret).map_err(|_| crate::Error::InvalidPublicKey)?;
+        let (x_only, _parity) = sk.x_only_public_key(&secp);
+        Ok(Self {
+            public: PublicKey::from_bytes(x_only.serialize()),
+            account,
+            secret: SecretBytes::new(secret),
+        })
+    }
+
     /// Signs a 32-byte message with BIP-340 Schnorr.
     ///
     /// Crate-internal: outside this crate, signing is [`Signer`](crate::Signer).

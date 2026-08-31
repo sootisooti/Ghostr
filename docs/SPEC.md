@@ -1506,33 +1506,51 @@ The tempting answer is to derive the other three by HKDF from the identity secre
 — deterministic, and recoverable from the `nsec` alone.
 
 > **It cannot be that.** HKDF needs the identity secret *bytes*, and the entire
-> point of an external signer is that those bytes never reach us. A scheme that
-> works for an imported `nsec` and collapses the moment the same user moves that
-> key to hardware is a scheme that has to be replaced exactly when it matters
-> most — and replacing it means re-deriving `Account::Data`, which is where the
-> DEK comes from (§10.1), which means re-encrypting the vault.
+> point of an external signer is that those bytes never reach us.
 
-> **Recommendation: derive nothing from the identity key. Bind instead.**
+**And the problem is larger than the three accounts.** §10.1 derives the **DEK
+itself** from the identity secret key. That is a deliberate, well-argued choice —
+it means the store is readable exactly when the identity is unlocked, with no
+second secret to back up — but it has a consequence nobody wrote down: **a vault
+whose identity key lives on hardware cannot be decrypted at all.** Not slowly,
+not after a migration. The app holds a pubkey and a signing oracle, and no amount
+of asking that oracle to sign things produces the 32 bytes HKDF needs.
+
+So "log in with an `nsec`" and "sign with a hardware wallet" are not the same
+feature at different difficulties. The first works today with an import; the
+second is impossible until the DEK stops depending on the identity secret.
+
+> **Recommendation: derive nothing from the identity key — not the other
+> accounts, and not the DEK. Bind to it instead.**
 >
-> - **Ghost, anchor and data** always come from a locally-held *vault seed*,
->   generated at `init` and never leaving the device. They are what the vault
->   needs to function offline, and none of them is the user's public identity.
-> - **The identity account** is whatever the user brought: a key derived from the
->   vault seed (today's default), an imported `nsec`, or a pubkey whose secret
->   lives behind a [`Signer`] we can only ask. All three are the same to every
->   call site, which is the seam `Signer` already promises.
-> - The link between them is a **signature, not a derivation**: the identity key
->   signs a `GhostManifest` (§8.2) naming the ghost pubkey. That is already how a
->   reader learns which ghost belongs to which person, so binding costs no new
->   mechanism — and it is the only form of binding an external signer can
->   produce.
+> - **Ghost, anchor and data** come from a locally-held *vault seed*, generated
+>   at `init` and never leaving the device. None of them is the user's public
+>   identity, and all of them are what the vault needs to work offline.
+> - **The DEK moves to `Account::Data`**, which the seed already derives and
+>   nothing currently uses. The vault then decrypts from the vault seed alone, so
+>   it keeps working when the identity key is an `nsec` the user pasted, a key on
+>   a hardware wallet, or a bunker on the other side of a relay.
+> - **The identity account** is whatever the user brought: derived from the vault
+>   seed (today's default), imported, or held behind a [`Signer`] we can only
+>   ask. All three look identical to every call site, which is the substitution
+>   `Signer` already promises.
+> - The link is a **signature, not a derivation**: the identity key signs a
+>   `GhostManifest` (§8.2) naming the ghost pubkey. That is already how a reader
+>   learns which ghost belongs to whom, so binding costs no new mechanism — and a
+>   signature is the only binding an external signer can produce.
 >
-> The cost is honest and should be stated in the UI: **two things to back up**,
-> the identity key and the vault seed. Losing the vault seed loses the chain;
-> losing the identity key loses the ability to speak as that identity but not the
-> journal. Deriving everything from one secret would have made a single backup
-> enough, and that is a real convenience this trade gives up — in exchange for an
-> identity that can move to hardware without re-encrypting the vault.
+> **Migration, per CLAUDE.md §4.7.** Changing where the DEK comes from would
+> re-encrypt every row, so it must not be done retroactively. The keystore file
+> records which scheme it uses and the version tag goes to 2: a v1 vault keeps
+> deriving its DEK from the identity key and is never touched; v2 vaults derive
+> from `Account::Data`. Only a v2 vault can adopt an external signer, and the
+> file says which it is rather than leaving it to be inferred.
+>
+> **The cost, which belongs in the UI and not in a footnote: two things to back
+> up** — the vault seed and the identity key. §10.1 chose one secret on purpose,
+> and this gives that up. Losing the vault seed loses the journal; losing the
+> identity key loses the ability to speak as that identity, but not the journal.
+> What it buys is the only thing that makes a hardware signer possible at all.
 >
 > Consequence for §8.1: the account table stays, but "derived from the seed" is
 > true of `1'`, `2'` and `3'` only. `0'` becomes *the identity account*, however

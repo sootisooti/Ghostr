@@ -47,7 +47,7 @@ fn cheap_params() -> Argon2Params {
 /// The clock handle comes back with it: expiry, streaks, and the rolling window
 /// only exist once time can move.
 fn ready_vault(dir: &Path) -> (Engine, FixedClock) {
-    Engine::init(dir, &passphrase(), Tz::UTC, None, cheap_params()).expect("init");
+    Engine::init(dir, &passphrase(), Tz::UTC, None, None, cheap_params()).expect("init");
 
     let clock = FixedClock::at(Timestamp::new(EPOCH_MILLIS, 0), Tz::UTC);
     let engine = Engine::open_with(
@@ -455,7 +455,7 @@ fn too_few_answers_refuse_to_produce_a_score() {
 fn issuing_before_a_persona_exists_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join("vault");
-    Engine::init(&dir, &passphrase(), Tz::UTC, None, cheap_params()).expect("init");
+    Engine::init(&dir, &passphrase(), Tz::UTC, None, None, cheap_params()).expect("init");
     let engine = Engine::open(&dir, &passphrase()).expect("open");
 
     assert!(matches!(

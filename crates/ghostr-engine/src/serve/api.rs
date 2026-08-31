@@ -537,7 +537,7 @@ mod tests {
             iterations: 1,
             lanes: 1,
         };
-        Engine::init(dir, &pass(), Tz::UTC, None, cheap).expect("init");
+        Engine::init(dir, &pass(), Tz::UTC, None, None, cheap).expect("init");
 
         let clock = FixedClock::at(Timestamp::new(1_767_571_200_000, 0), Tz::UTC);
         let engine = Engine::open_with(

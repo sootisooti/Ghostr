@@ -8,6 +8,8 @@
 use bech32::primitives::decode::CheckedHrpstring;
 use ghostr_core::identity::{Npub, PublicKey};
 
+use crate::secret::SecretBytes;
+
 /// Encodes a public key as `npub1...`.
 ///
 /// # Panics
@@ -42,6 +44,34 @@ pub fn decode_npub(npub: &Npub) -> crate::Result<PublicKey> {
     secp256k1::XOnlyPublicKey::from_byte_array(bytes)
         .map_err(|_| crate::Error::InvalidPublicKey)?;
     Ok(PublicKey::from_bytes(bytes))
+}
+
+/// Decodes an `nsec1...` into raw secret key bytes.
+///
+/// # This returns a secret, and says so in its type
+///
+/// Everything else in this module deals in public values. This one does not: an
+/// `nsec` *is* the private key, in a friendly costume. The return type is
+/// [`SecretBytes`] so it zeroizes on drop and cannot
+/// be printed, and the input is [`SecretString`](crate::secret::SecretString) so
+/// the encoded form gets the same treatment — a bare `&str` would leave the key
+/// sitting in whatever buffer the caller read it into.
+///
+/// The curve point is **not** validated here. That happens where the key is
+/// adopted, so an unusable key is refused at import with the user still looking
+/// at what they pasted.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidBech32`](crate::Error::InvalidBech32) if the checksum
+/// fails, the prefix is not `nsec`, or the payload is not 32 bytes.
+pub fn decode_nsec(nsec: &crate::secret::SecretString) -> crate::Result<SecretBytes<32>> {
+    let (hrp, data) = bech32::decode(nsec.expose()).map_err(|_| crate::Error::InvalidBech32)?;
+    if hrp.as_str() != "nsec" {
+        return Err(crate::Error::InvalidBech32);
+    }
+    let bytes: [u8; 32] = data.try_into().map_err(|_| crate::Error::InvalidBech32)?;
+    Ok(SecretBytes::new(bytes))
 }
 
 /// A NIP-19 `nprofile`: a pubkey plus relay hints.
