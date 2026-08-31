@@ -731,6 +731,7 @@ dependencies = [
  "ghostr-core",
  "ghostr-crypto",
  "ghostr-testkit",
+ "secp256k1",
  "serde",
  "serde_json",
  "tempfile",

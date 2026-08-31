@@ -26,6 +26,10 @@ tempfile = { workspace = true }
 ghostr-testkit = { workspace = true }
 # Drives the async codec. `rt` + `macros` only: no reactor, no sockets.
 tokio = { workspace = true, features = ["rt", "macros"] }
+# The external-signer double needs a keypair of its own, to stand in for a key
+# held outside this process. Already in the tree via ghostr-crypto.
+secp256k1 = { workspace = true }
+async-trait = { workspace = true }
 
 [lints]
 workspace = true
