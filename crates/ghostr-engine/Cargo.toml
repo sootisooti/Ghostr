@@ -30,12 +30,17 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 secp256k1 = { workspace = true }
+# Drives the async model seam from synchronous `ops`. Optional and tied to
+# `llm`: a stock build pulls no runtime at all, which is what keeps "works
+# offline with no LLM" checkable with `cargo tree`. `rt` only — the providers
+# speak blocking `ureq`, so there is no reactor to enable.
+tokio = { workspace = true, features = ["rt"], optional = true }
 
 [features]
 default = []
 ## Wire a language model in. Off by default: a stock build has no model path,
 ## which makes "works offline with no LLM" checkable with `cargo tree`.
-llm = ["dep:ghostr-llm", "dep:async-trait", "ghostr-memoria/llm"]
+llm = ["dep:ghostr-llm", "dep:async-trait", "dep:tokio", "ghostr-memoria/llm"]
 ## A local Ollama-compatible runtime.
 llm-local = ["llm", "ghostr-llm/local-ollama"]
 ## Remote providers, behind the egress gate. Off by default.

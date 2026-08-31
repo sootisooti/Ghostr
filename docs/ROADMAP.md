@@ -1,6 +1,6 @@
 # Ghostr — Roadmap
 
-**Status:** Draft v0.4 · M0 and M1 shipped, M2 under way
+**Status:** Draft v0.4 · M0 and M1 shipped, M2 complete, M3 under way
 
 Five milestones. The rule for all of them: **each one ships something a person
 would actually use, on its own, with no promise of the next.** If a milestone's
@@ -157,10 +157,14 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
 - [x] The loop, wired: `quest issue/list/show/answer`, `fidelity`, quest
       storage with an immutable commitment column, and corrections that reach
       distillation exactly once.
-- [ ] Generation for the three kinds that need a model to write their prompt:
-      `VoiceProbe`, `Counterfactual`, `Prediction`. Without one the generator
-      emits fewer quests of the kinds it can do well (SPEC Q7), which on a stock
-      build means `Cloze` and `FactRecall`.
+- [x] Generation for the three kinds that need a model to write their prompt:
+      `VoiceProbe`, `Counterfactual`, `Prediction`. Written through
+      `ghostr_quests::llm`, validated against a schema, and admitted only if the
+      kind is one of those three, the claim cites evidence, and the ghost's
+      answer is non-empty. Without a model the generator still emits fewer
+      quests of the kinds it can do well (SPEC Q7) — on a stock build that
+      remains `Cloze`, `Preference`, and `FactRecall`, byte-identical to before
+      (`no_drafts_is_exactly_todays_behaviour`).
 - [x] A loop fast enough to be a daily ritual: `ghostr serve` puts the day's
       quests, the day's recap, the score, and a box to write in on a page a
       phone can install to its Home Screen, one tap per verdict. The CLI's

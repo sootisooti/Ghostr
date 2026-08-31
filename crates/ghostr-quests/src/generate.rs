@@ -76,6 +76,74 @@ pub struct QuestContext<'a> {
     /// user really wrote — asking a model to invent the sentence would make the
     /// answer key fiction.
     pub voice_exemplars: &'a [(ghostr_core::ids::MemoryId, String)],
+    /// Quests a model wrote, already validated.
+    ///
+    /// Supplied by the caller for the same reason as `voice_exemplars`: the
+    /// thing that produces these lives outside. A model call is I/O, and this
+    /// module stays synchronous so its choosing logic remains property-testable
+    /// (CLAUDE.md §5) — the composition root owns the runtime, asks the model,
+    /// and hands the answers in.
+    ///
+    /// Empty is the normal case. A build with no model, a model that failed, and
+    /// a model that returned nothing usable are the same case here on purpose:
+    /// fewer quests of the kinds the ghost can do well, never worse ones of the
+    /// kinds it cannot (SPEC Q7).
+    pub model_drafts: &'a [ModelDraft],
+}
+
+/// A quest a model wrote, after validation.
+///
+/// The three kinds no amount of string manipulation can produce:
+/// [`QuestKind::VoiceProbe`], [`QuestKind::Counterfactual`], and
+/// [`QuestKind::Prediction`]. Each needs the prompt itself to be written, which
+/// is judgement rather than mechanism.
+///
+/// Carries no id, no nonce, and no commitment. Those are attached by the same
+/// private `finish` path every mechanical draft goes through, so a model-written
+/// quest cannot reach a display without a commitment any more than a cloze can
+/// (I6).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelDraft {
+    /// The written quest.
+    pub kind: QuestKind,
+    /// Which facet it probes.
+    pub facet: Facet,
+    /// How hard the ghost thinks it is, in `0.0..=1.0`.
+    pub difficulty: f32,
+    /// The ghost's own probability the user confirms, in `0.0..=1.0`.
+    pub confidence: f32,
+    /// The memories it was drawn from.
+    ///
+    /// Never empty in practice: a claim with no evidence is one the ghost
+    /// invented, and [`ModelDraft::is_admissible`] refuses it.
+    pub evidence: Vec<ghostr_core::ids::MemoryId>,
+}
+
+impl ModelDraft {
+    /// Whether this draft may become a quest.
+    ///
+    /// The boundary where model output stops being trusted. A model that has
+    /// just read the user's corpus is an untrusted source (THREAT_MODEL §T7),
+    /// and schema validation only proves the *shape* — these are the checks on
+    /// the meaning:
+    ///
+    /// - It must be one of the three kinds a model is for. A model returning a
+    ///   `Cloze` would be inventing the answer key to a question about a
+    ///   sentence the user wrote, which is the one thing cloze exists to avoid.
+    /// - It must cite evidence. A claim with nothing behind it is a
+    ///   hallucination, and scoring the user against one is worse than not
+    ///   asking.
+    /// - Its text must be non-empty, so an empty prompt cannot reach a screen.
+    #[must_use]
+    pub fn is_admissible(&self) -> bool {
+        let right_kind = matches!(
+            self.kind,
+            QuestKind::VoiceProbe { .. }
+                | QuestKind::Counterfactual { .. }
+                | QuestKind::Prediction { .. }
+        );
+        right_kind && !self.evidence.is_empty() && !self.kind.committed_answer().trim().is_empty()
+    }
 }
 
 impl core::fmt::Debug for QuestContext<'_> {
@@ -345,8 +413,32 @@ struct Draft {
     evidence: Vec<ghostr_core::ids::MemoryId>,
 }
 
-/// The quests a facet can support, without a model.
+/// The quests a facet can support.
+///
+/// Model-written drafts for this facet come first, then the mechanical ones.
+/// Order matters because the budget is finite: a `VoiceProbe` and a `Cloze` both
+/// probe the voice, and the probe is the harder, more informative question — so
+/// when only one fits, it should be the one asked.
 fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
+    let mut drafts: Vec<Draft> = ctx
+        .model_drafts
+        .iter()
+        .filter(|d| d.facet == facet && d.is_admissible())
+        .cloned()
+        .map(|d| Draft {
+            kind: d.kind,
+            facet: d.facet,
+            difficulty: d.difficulty,
+            confidence: d.confidence,
+            evidence: d.evidence,
+        })
+        .collect();
+    drafts.extend(mechanical_for(ctx, facet));
+    drafts
+}
+
+/// The quests a facet can support with no model at all.
+fn mechanical_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
     let facets = &ctx.persona.facets;
     match facet {
         Facet::Opinion => facets
@@ -419,7 +511,8 @@ fn candidates_for(ctx: &QuestContext<'_>, facet: Facet) -> Vec<Draft> {
             .collect(),
 
         // Relationship quests name a person, and naming one well needs the role
-        // a model supplies. Absent rather than guessed.
+        // a model supplies — so there is nothing mechanical here. `candidates_for`
+        // still serves this facet when a model wrote something for it.
         Facet::Relationship => Vec::new(),
         _ => Vec::new(),
     }
@@ -711,6 +804,15 @@ mod tests {
         rng: &'a dyn Rng,
         voice_exemplars: &'a [(MemoryId, String)],
     ) -> QuestContext<'a> {
+        context_full(model, rng, voice_exemplars, &[])
+    }
+
+    fn context_full<'a>(
+        model: &'a PersonaModel,
+        rng: &'a dyn Rng,
+        voice_exemplars: &'a [(MemoryId, String)],
+        model_drafts: &'a [ModelDraft],
+    ) -> QuestContext<'a> {
         QuestContext {
             persona: model,
             version: model.version,
@@ -726,6 +828,7 @@ mod tests {
             holdout: HoldoutPolicy::default(),
             avoid: &[],
             voice_exemplars,
+            model_drafts,
         }
     }
 
@@ -1157,5 +1260,221 @@ mod tests {
         let text = "I spent the whole afternoon wrestling with the parser again";
         let id = MemoryId::new(1, [1u8; 10]);
         assert_eq!(cloze_from(text, id), cloze_from(text, id));
+    }
+
+    fn draft_evidence() -> Vec<MemoryId> {
+        vec![MemoryId::new(1, [1u8; 10])]
+    }
+
+    fn probe(kind: QuestKind) -> ModelDraft {
+        ModelDraft {
+            kind,
+            facet: Facet::Voice,
+            difficulty: 0.5,
+            confidence: 0.6,
+            evidence: draft_evidence(),
+        }
+    }
+
+    #[test]
+    fn the_three_model_kinds_are_admissible() {
+        for kind in [
+            QuestKind::VoiceProbe {
+                prompt: "how would you turn down a meeting?".to_owned(),
+                ghost_answer: "briefly, and without apologising".to_owned(),
+            },
+            QuestKind::Counterfactual {
+                scenario: "your flight is cancelled overnight".to_owned(),
+                ghost_answer: "book the next one before calling anyone".to_owned(),
+            },
+            QuestKind::Prediction {
+                claim: "you will skip the run tomorrow".to_owned(),
+                horizon: chrono::NaiveDate::from_ymd_opt(2026, 1, 6).unwrap_or_default(),
+            },
+        ] {
+            assert!(probe(kind).is_admissible());
+        }
+    }
+
+    #[test]
+    fn a_model_may_not_write_the_mechanical_kinds() {
+        // A model returning a `Cloze` would be inventing the answer key to a
+        // question about a sentence the user wrote — the one thing cloze exists
+        // to avoid. `Preference` and `FactRecall` are drawn from recorded
+        // facets, so a model-written one cites evidence it did not derive from.
+        let mechanical = [
+            QuestKind::Cloze {
+                context: "I walked to the river".to_owned(),
+                redacted: ghostr_core::memory::Span { start: 2, end: 8 },
+                ghost_completion: "walked".to_owned(),
+            },
+            QuestKind::Preference {
+                a: "tea".to_owned(),
+                b: "coffee".to_owned(),
+                ghost_choice: ghostr_core::quest::Choice::A,
+            },
+            QuestKind::FactRecall {
+                claim: "you went to the market".to_owned(),
+                as_of: chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap_or_default(),
+            },
+        ];
+        for kind in mechanical {
+            let label = kind.variant_name();
+            assert!(!probe(kind).is_admissible(), "{label} should be refused");
+        }
+    }
+
+    #[test]
+    fn a_claim_with_no_evidence_is_refused() {
+        // A quest citing nothing is one the ghost invented. Scoring the user
+        // against it measures the model's imagination, not the ghost's fidelity.
+        let mut draft = probe(QuestKind::VoiceProbe {
+            prompt: "what would you say?".to_owned(),
+            ghost_answer: "something".to_owned(),
+        });
+        draft.evidence.clear();
+        assert!(!draft.is_admissible());
+    }
+
+    #[test]
+    fn an_empty_answer_is_refused() {
+        // The ghost commits to its answer before the user sees the question
+        // (I6). An empty commitment is a commitment to nothing.
+        for answer in ["", "   ", "\n\t"] {
+            let draft = probe(QuestKind::VoiceProbe {
+                prompt: "how would you put it?".to_owned(),
+                ghost_answer: answer.to_owned(),
+            });
+            assert!(!draft.is_admissible(), "{answer:?} should be refused");
+        }
+    }
+
+    #[test]
+    fn an_inadmissible_draft_never_becomes_a_quest() {
+        // The gate is in `candidates_for`, not only on the type. A draft that
+        // passes the type and fails the gate must not reach `finish`.
+        let model = persona();
+        let rng = SeededRng::new(4);
+        let bad = vec![ModelDraft {
+            // No evidence: inadmissible.
+            evidence: Vec::new(),
+            ..probe(QuestKind::VoiceProbe {
+                prompt: "invented from nothing".to_owned(),
+                ghost_answer: "also invented".to_owned(),
+            })
+        }];
+        let ctx = context_full(&model, &rng, &[], &bad);
+        let quests = DeterministicGenerator.generate(&ctx, 10).expect("generate");
+
+        assert!(
+            !quests
+                .iter()
+                .any(|q| matches!(q.kind, QuestKind::VoiceProbe { .. })),
+            "an inadmissible draft reached a quest"
+        );
+    }
+
+    #[test]
+    fn a_model_draft_is_committed_to_like_any_other() {
+        // I6 is structural: model-written quests go through the same `finish`
+        // path, so they arrive with a commitment or they do not arrive.
+        let model = persona();
+        let rng = SeededRng::new(9);
+        let drafts = vec![probe(QuestKind::VoiceProbe {
+            prompt: "how would you decline?".to_owned(),
+            ghost_answer: "briefly".to_owned(),
+        })];
+        let ctx = context_full(&model, &rng, &[], &drafts);
+        let quests = DeterministicGenerator.generate(&ctx, 5).expect("generate");
+
+        let probe_quest = quests
+            .iter()
+            .find(|q| matches!(q.kind, QuestKind::VoiceProbe { .. }))
+            .expect("the voice probe was issued");
+        assert_ne!(
+            probe_quest.answer_commitment,
+            ghostr_core::hash::Hash32::zero()
+        );
+        assert!(verify_commitment(probe_quest, "briefly", probe_quest.confidence).expect("verify"));
+    }
+
+    #[test]
+    fn a_model_draft_outranks_a_cloze_within_its_facet() {
+        // Both probe the voice; the probe is the harder, more informative
+        // question, so when the budget only reaches one of them it should be the
+        // one asked. Tested on `candidates_for` rather than on `generate`,
+        // because that is where the claim actually lives — across facets the
+        // order is `prioritise`'s to decide, not this rule's.
+        let model = persona();
+        let rng = SeededRng::new(3);
+        let exemplars = vec![(
+            MemoryId::new(1, [1u8; 10]),
+            "I walked to the river before work and left the phone at home.".to_owned(),
+        )];
+        let drafts = vec![probe(QuestKind::VoiceProbe {
+            prompt: "how would you describe your morning?".to_owned(),
+            ghost_answer: "flatly, and shorter than expected".to_owned(),
+        })];
+        let ctx = context_full(&model, &rng, &exemplars, &drafts);
+
+        let candidates = candidates_for(&ctx, Facet::Voice);
+        assert!(
+            candidates.len() >= 2,
+            "the cloze should still be a candidate behind the probe"
+        );
+        assert!(matches!(candidates[0].kind, QuestKind::VoiceProbe { .. }));
+        assert!(
+            candidates
+                .iter()
+                .any(|d| matches!(d.kind, QuestKind::Cloze { .. })),
+            "the mechanical candidate was dropped rather than ranked behind"
+        );
+    }
+
+    #[test]
+    fn a_model_draft_reaches_a_real_quest_set() {
+        // The end-to-end version: with a budget wide enough to cover every
+        // facet, the written probe is among what is issued.
+        let model = persona();
+        let rng = SeededRng::new(3);
+        let drafts = vec![probe(QuestKind::VoiceProbe {
+            prompt: "how would you describe your morning?".to_owned(),
+            ghost_answer: "flatly, and shorter than expected".to_owned(),
+        })];
+        let ctx = context_full(&model, &rng, &[], &drafts);
+        let quests = DeterministicGenerator.generate(&ctx, 10).expect("generate");
+
+        assert!(
+            quests
+                .iter()
+                .any(|q| matches!(q.kind, QuestKind::VoiceProbe { .. })),
+            "the written probe never made it into the day's set"
+        );
+    }
+
+    #[test]
+    fn no_drafts_is_exactly_todays_behaviour() {
+        // The default build. Adding the seam must not change what a vault with
+        // no model produces.
+        let model = persona();
+        let exemplars = vec![(
+            MemoryId::new(1, [1u8; 10]),
+            "I walked to the river before work and left the phone at home.".to_owned(),
+        )];
+
+        let with_empty = DeterministicGenerator
+            .generate(
+                &context_full(&model, &SeededRng::new(7), &exemplars, &[]),
+                5,
+            )
+            .expect("generate");
+        let via_old_path = DeterministicGenerator
+            .generate(&context_with(&model, &SeededRng::new(7), &exemplars), 5)
+            .expect("generate");
+
+        assert_eq!(with_empty.len(), via_old_path.len());
+        for (a, b) in with_empty.iter().zip(via_old_path.iter()) {
+            assert_eq!(a.kind.committed_answer(), b.kind.committed_answer());
+        }
     }
 }

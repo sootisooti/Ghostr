@@ -763,6 +763,7 @@ dependencies = [
  "ghostr-store",
  "proptest",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

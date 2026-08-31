@@ -1055,6 +1055,90 @@ pub struct QuestIssue {
     pub expired: u64,
 }
 
+/// The corpus a quest-writing model is shown.
+///
+/// The day being asked about, not the whole vault: a model given the entire
+/// history writes questions about last spring, and a question the user cannot
+/// place is one they answer "can't say" to.
+fn quest_corpus(
+    engine: &Engine,
+    date: NaiveDate,
+) -> crate::Result<Vec<ghostr_core::memory::Memory>> {
+    let tz = engine.home_tz()?;
+    let dek = engine.dek()?;
+    Ok(engine.store().window(dek, day_window(date, &tz))?)
+}
+
+/// Asks a model to write the three kinds it is needed for.
+///
+/// # Why this blocks
+///
+/// A model call is async and every `ops` entry point is synchronous, so the
+/// runtime lives here — in the composition root, which is the one place
+/// ARCHITECTURE puts scheduling. Pushing `async` up through `ops` would make the
+/// CLI and the local API async for one optional feature most builds do not
+/// compile in at all.
+///
+/// # Why it cannot fail
+///
+/// Every failure is the empty vector: no model configured, a runtime that would
+/// not start, a refused egress, output that did not validate. A day's quests are
+/// not worth failing to issue over, and the generator degrades to the mechanical
+/// kinds on its own (SPEC Q7).
+#[cfg(feature = "llm")]
+fn written_quests(
+    memories: &[ghostr_core::memory::Memory],
+    date: NaiveDate,
+) -> Vec<ghostr_quests::generate::ModelDraft> {
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+
+    // `Secret` content never reaches a prompt at all — not "denied at the gate",
+    // simply never offered to it, which is one fewer place for it to go wrong
+    // (I5). The local path is not exempt: the invariant is about what leaves the
+    // vault, and a local model is still another process.
+    let visible: Vec<ghostr_core::memory::Memory> = memories
+        .iter()
+        .filter(|m| m.sensitivity != Sensitivity::Secret)
+        .cloned()
+        .collect();
+    if visible.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(model) = crate::model::local_model(ghostr_llm::gate::LocalModelConfig::default()) else {
+        return Vec::new();
+    };
+    // No `enable_all()`: the providers speak blocking `ureq`, so there is no
+    // reactor to drive and asking for one would pull timer and net machinery a
+    // local HTTP call never touches.
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().build() else {
+        return Vec::new();
+    };
+
+    runtime
+        .block_on(ghostr_quests::llm::write_quests(
+            model.as_ref(),
+            &visible,
+            TrustLevel::FirstParty,
+            date,
+        ))
+        .unwrap_or_default()
+}
+
+/// The no-model build: there is nothing to ask.
+///
+/// Not a stub. A stock build has no model path at all, which is what makes
+/// "works offline with no LLM" checkable with `cargo tree` rather than a claim
+/// in a README.
+#[cfg(not(feature = "llm"))]
+fn written_quests(
+    memories: &[ghostr_core::memory::Memory],
+    date: NaiveDate,
+) -> Vec<ghostr_quests::generate::ModelDraft> {
+    let (_, _) = (memories, date);
+    Vec::new()
+}
+
 /// Issues a day's quests, committing to every answer before any can be shown.
 ///
 /// The commitment is written to the store *before* this returns, so there is no
@@ -1103,20 +1187,29 @@ pub fn issue_quests(engine: &Engine, date: NaiveDate) -> crate::Result<QuestIssu
         .iter()
         .map(|q| q.kind.committed_answer().to_owned())
         .collect();
+    // Asked before the context is built, because the drafts are borrowed by it.
+    // Empty whenever there is no model, which is the default build.
+    let drafts = written_quests(&quest_corpus(engine, date)?, date);
+
     let ctx = QuestContext {
         persona: &persona,
         version: persona.version,
         date,
         now,
         rng: engine.rng(),
-        // Without a model the generator is limited to the mechanical kinds
-        // anyway, and saying so is more honest than claiming a tier the build
-        // has no way to reach.
-        tier: ghostr_quests::generate::CapabilityTier::Small,
+        // Claimed from what the build can actually reach, not asserted. A tier
+        // above what is compiled in would make the generator hold back the
+        // mechanical kinds waiting for model-written ones that never arrive.
+        tier: if drafts.is_empty() {
+            ghostr_quests::generate::CapabilityTier::Small
+        } else {
+            ghostr_quests::generate::CapabilityTier::Baseline
+        },
         engagement: engagement(engine, now)?,
         holdout: HoldoutPolicy::default(),
         avoid: &avoid,
         voice_exemplars: &exemplars,
+        model_drafts: &drafts,
     };
 
     let generator = DeterministicGenerator;
