@@ -1487,3 +1487,53 @@ also names no recipient, so there is nobody to encrypt to.
 > Until this is settled `gift_wrap` is `todo!()` and `PrivacyMode::GiftWrapped`
 > cannot be selected. NIP-59 is opt-in and not on the M3 exit criteria
 > ([ROADMAP](ROADMAP.md)), so nothing else is blocked.
+
+---
+
+**Q21 — If the identity key is imported or held elsewhere, where do the other three accounts come from?**
+
+§8.1 derives four accounts — identity, ghost, anchor, data — from one BIP-39
+seed by NIP-06. That works because the seed is ours and we hold it. Two things
+users ask for break it:
+
+1. **Log in with an existing `nsec`.** An `nsec` is a raw private key, not a
+   seed. There is no BIP-32 tree under it, so there is nothing to derive
+   `1'`, `2'` and `3'` *from*.
+2. **Sign with a hardware wallet, or any external signer.** The key never
+   leaves the device it lives on.
+
+The tempting answer is to derive the other three by HKDF from the identity secret
+— deterministic, and recoverable from the `nsec` alone.
+
+> **It cannot be that.** HKDF needs the identity secret *bytes*, and the entire
+> point of an external signer is that those bytes never reach us. A scheme that
+> works for an imported `nsec` and collapses the moment the same user moves that
+> key to hardware is a scheme that has to be replaced exactly when it matters
+> most — and replacing it means re-deriving `Account::Data`, which is where the
+> DEK comes from (§10.1), which means re-encrypting the vault.
+
+> **Recommendation: derive nothing from the identity key. Bind instead.**
+>
+> - **Ghost, anchor and data** always come from a locally-held *vault seed*,
+>   generated at `init` and never leaving the device. They are what the vault
+>   needs to function offline, and none of them is the user's public identity.
+> - **The identity account** is whatever the user brought: a key derived from the
+>   vault seed (today's default), an imported `nsec`, or a pubkey whose secret
+>   lives behind a [`Signer`] we can only ask. All three are the same to every
+>   call site, which is the seam `Signer` already promises.
+> - The link between them is a **signature, not a derivation**: the identity key
+>   signs a `GhostManifest` (§8.2) naming the ghost pubkey. That is already how a
+>   reader learns which ghost belongs to which person, so binding costs no new
+>   mechanism — and it is the only form of binding an external signer can
+>   produce.
+>
+> The cost is honest and should be stated in the UI: **two things to back up**,
+> the identity key and the vault seed. Losing the vault seed loses the chain;
+> losing the identity key loses the ability to speak as that identity but not the
+> journal. Deriving everything from one secret would have made a single backup
+> enough, and that is a real convenience this trade gives up — in exchange for an
+> identity that can move to hardware without re-encrypting the vault.
+>
+> Consequence for §8.1: the account table stays, but "derived from the seed" is
+> true of `1'`, `2'` and `3'` only. `0'` becomes *the identity account*, however
+> it is held.
