@@ -222,8 +222,12 @@ transport trait, so a vault whose identity lives in a bunker or on a phone looks
 identical to every call site. What a remote signer returns is checked rather than
 believed — most of all a `sign_event` reply, since NIP-46 hands back a whole
 event and a correctly-signed *substitution* is the attack that shape invites.
-What remains for it is the relay-backed transport: wrapping each request in a
-kind-24133 event and matching the reply.
+Its relay transport is in too: each request becomes a kind-24133 event, NIP-44
+encrypted to the signer, and only that signer's replies are read — a genuine
+reply republished by someone else is refused, which is what stops a stale answer
+being replayed as a fresh one. What remains is wiring it into the engine, and
+[SPEC §14 Q22](SPEC.md#14-open-questions): which key signs the envelopes, since
+whichever it is becomes visible to relays as the thing talking to that bunker.
 
 The websocket transport is in: `WebsocketRelayClient` publishes, fetches and
 subscribes over blocking websockets — one thread per relay rather than an async

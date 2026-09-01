@@ -33,6 +33,8 @@
 //! module possible at all: with the DEK derived from the identity key, a vault
 //! whose identity lives on a phone could not be decrypted by anything.
 
+pub mod relay;
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;

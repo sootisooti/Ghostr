@@ -24,6 +24,7 @@ hex = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+chrono-tz = { workspace = true }
 # The test relay: a real websocket server on loopback, so the transport is
 # exercised against the protocol rather than against a mock of itself.
 tungstenite = { workspace = true }

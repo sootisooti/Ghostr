@@ -1555,3 +1555,47 @@ second is impossible until the DEK stops depending on the identity secret.
 > Consequence for §8.1: the account table stays, but "derived from the seed" is
 > true of `1'`, `2'` and `3'` only. `0'` becomes *the identity account*, however
 > it is held.
+
+---
+
+**Q22 — Which key signs the NIP-46 envelopes?**
+
+NIP-46 has two keys on the client's side. The **user's key** lives in the remote
+signer and is the point of the exercise. A **local keypair** signs and encrypts
+the kind-24133 events that carry each request — NIP-46 calls it
+`local_keypair`, and it is ours to choose.
+
+Whatever we choose becomes visible to every relay carrying the conversation, as
+*the thing that talks to this bunker*. §8.1 separates accounts precisely so that
+one observation cannot be joined to another, and this is a new observation to
+join:
+
+- **`Account::Data` or `Account::Ghost`** work today and are the obvious
+  shortcut. Both are wrong for the same reason: the relay already sees those
+  keys publishing footage or ghost notes, so using one here tells it *that
+  vault* uses *that bunker* — a link between the user's journal and whoever
+  operates their signer.
+- **`Account::Identity`** is worst: it is the key the signer holds, and we do
+  not have it.
+- **An ephemeral key per session** is what NIP-46's own wording suggests and is
+  the most private, but the signer sees a new client every time, so the user
+  re-authorises on every restart. A permission prompt that fires daily is a
+  permission prompt people learn to accept without reading.
+
+> **Recommendation: a fifth derived account, `m/44'/1237'/4'/0/0` — the signer
+> channel — used for nothing else.**
+>
+> Stable, so a bunker recognises the same client across restarts and the user
+> authorises once. Derived from the vault seed, so it survives a reinstall with
+> no extra backup. And used for exactly one purpose, so what a relay learns is
+> "some Ghostr vault talks to this bunker" and not which ghost, which chain, or
+> which journal.
+>
+> This grows [`Account`](ARCHITECTURE.md), which §8.1 currently fixes at four,
+> so it is a spec change rather than an implementation detail — which is why it
+> is a question rather than a commit.
+
+> Until this is settled, `RelayNip46Transport` takes the client key as a
+> parameter and the composition root supplies it. Nothing in the library picks,
+> and nothing is wired into `ghostr-engine` yet, so no vault has made this
+> choice by accident.

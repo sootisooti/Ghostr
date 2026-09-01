@@ -99,6 +99,18 @@ fn filter_to_json(filter: &Filter) -> Value {
     if !filter.d_tags.is_empty() {
         map.insert("#d".to_owned(), json!(filter.d_tags));
     }
+    if !filter.p_tags.is_empty() {
+        map.insert(
+            "#p".to_owned(),
+            json!(
+                filter
+                    .p_tags
+                    .iter()
+                    .map(ghostr_core::identity::PublicKey::to_hex)
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
     if let Some(since) = filter.since {
         map.insert("since".to_owned(), json!(since));
     }
