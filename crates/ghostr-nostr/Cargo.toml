@@ -21,6 +21,9 @@ thiserror = { workspace = true }
 tungstenite = { workspace = true }
 # Parsing the hex pubkey a NIP-46 signer reports. Already throughout the tree.
 hex = { workspace = true }
+# Curve-point validation for a pasted bunker:// pubkey, so a bad one fails at
+# paste time rather than at the first request. Already in the tree.
+secp256k1 = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]

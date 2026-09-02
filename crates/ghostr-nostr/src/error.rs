@@ -80,6 +80,13 @@ pub enum Error {
         scope: String,
     },
 
+    /// A `bunker://` URL did not parse.
+    ///
+    /// Carries no detail on purpose: the URL contains a connection secret, and
+    /// an error quoting the input would put it in a log.
+    #[error("malformed bunker:// url")]
+    MalformedBunkerUrl,
+
     /// Encryption or signing failed.
     #[error("crypto error")]
     Crypto(#[from] ghostr_crypto::Error),

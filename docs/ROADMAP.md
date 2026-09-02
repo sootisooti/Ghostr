@@ -225,9 +225,10 @@ event and a correctly-signed *substitution* is the attack that shape invites.
 Its relay transport is in too: each request becomes a kind-24133 event, NIP-44
 encrypted to the signer, and only that signer's replies are read — a genuine
 reply republished by someone else is refused, which is what stops a stale answer
-being replayed as a fresh one. What remains is wiring it into the engine, and
-[SPEC §14 Q22](SPEC.md#14-open-questions): which key signs the envelopes, since
-whichever it is becomes visible to relays as the thing talking to that bunker.
+being replayed as a fresh one. Q22 is settled: the envelopes are signed by a fifth derived account, `4'`, used
+for nothing else, so a relay carrying the conversation learns only that *some*
+Ghostr vault talks to that bunker. `bunker://` URLs parse, so what a signer hands
+the user is what the user pastes. What remains is wiring it into the engine.
 
 The websocket transport is in: `WebsocketRelayClient` publishes, fetches and
 subscribes over blocking websockets — one thread per relay rather than an async

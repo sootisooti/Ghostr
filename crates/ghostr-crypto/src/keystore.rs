@@ -425,6 +425,7 @@ impl Keystore for FileKeystore {
             Account::Ghost,
             Account::Anchor,
             Account::Data,
+            Account::SignerChannel,
         ]
         .into_iter()
         .map(|a| master.derive_account(a))
