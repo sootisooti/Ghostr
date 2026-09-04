@@ -36,6 +36,16 @@ pub struct FidelityScore {
     pub confidence_interval: (f32, f32),
     /// How well the ghost's confidence tracks its accuracy.
     pub calibration: Calibration,
+    /// 30-day EWMA of the daily scores, reported beside the point estimate
+    /// (SPEC §5.2).
+    ///
+    /// `None` when the window holds a single day: a trend needs somewhere to
+    /// have come from, and one point is a level rather than a direction.
+    ///
+    /// The whole reason the report is not a bare number. A user watching their
+    /// ghost cannot tell an improving 0.72 from a decaying one, and which of
+    /// those it is matters more than the 0.72.
+    pub trend: Option<f32>,
     /// Signals that the score may not mean what it says.
     pub integrity: IntegritySignals,
     /// Whether every convergence criterion is met (SPEC §5.3).

@@ -104,6 +104,7 @@ finding real defects, so it keeps running:
 | `may_be_exemplar`, `may_source_stance` | zero production callers; a feed note could evidence a `Relation`, which THREAT_MODEL §T7 names as an injection's second goal |
 | `cutoff::window_for` | zero production callers; the engine had a second, midnight-only window, so `cutoff_minute_of_day` decided nothing — its 23:59 default included |
 | `mirror_as_nip78` | zero production callers; the NIP-78 fallback that SPEC Q3 rests on was never published or read |
+| `ewma` | zero production callers; SPEC §5.2 lists a 30-day trend as one of four aggregation outputs, and the score carried no trend at all — a user could not tell an improving 72% from a decaying one |
 | `config.relays` | a field with no parser arm; the CLI told users to write the exact line the parser rejected, so `sync` and `restore` could never be configured at all |
 | restore's genesis | a restored vault's chain failed `ghostr verify`, while M3's first exit criterion — "full restore from relays on a clean machine" — was ticked |
 
@@ -112,7 +113,7 @@ Twice that check found the *test* was wrong rather than the guard — a relay
 double that ignored the filter it was meant to prove, and an intruder rejected
 by decryption before the check under test was ever reached.
 
-Still open, from the same sweep: `has_disclosure`, `ewma`, `is_confirmed`,
+Still open, from the same sweep: `has_disclosure`, `is_confirmed`,
 `Account::derivation_path` (which builds a BIP-32 path independently of
 `ghostr-crypto`'s, with nothing checking they agree), and `MemoryLock`, so
 `mlock` is documented rather than real.

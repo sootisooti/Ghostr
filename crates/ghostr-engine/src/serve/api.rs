@@ -464,6 +464,13 @@ struct FidelityView {
     interval: (f32, f32),
     brier: f32,
     ece: f32,
+    /// 30-day EWMA, `null` until there is more than one day (SPEC §5.2).
+    ///
+    /// In the list of things that qualify the number for the same reason as the
+    /// interval: which way it is moving is what a daily loop is for, and a
+    /// client that could show 72% without showing whether it is climbing or
+    /// falling would be showing the less useful half.
+    trend: Option<f32>,
     converged: bool,
     committed_at_seq: u64,
     by_facet: Vec<SliceView>,
@@ -506,6 +513,7 @@ fn fidelity(engine: &Engine) -> Result<String, Status> {
         interval: score.confidence_interval,
         brier: score.calibration.brier,
         ece: score.calibration.ece,
+        trend: score.trend,
         converged: score.converged,
         committed_at_seq: score.committed_at_seq,
         by_facet: slices(&score.by_facet),

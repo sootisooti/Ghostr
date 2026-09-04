@@ -392,6 +392,11 @@ async function loadScore() {
       </div>
       <div class="qual">95% interval ${pct(lo)}–${pct(hi)} ·
         ${s.converged ? "converged" : "not yet converged"}</div>
+      <div class="qual">${s.trend === null || s.trend === undefined
+        ? "trend: not yet — a trend needs more than one day"
+        : `trend ${pct(s.trend)} (30-day) · recent days ${
+            Math.abs(s.trend - s.overall) < 0.01 ? "level with"
+              : s.trend > s.overall ? "above" : "below"} the window`}</div>
       <div class="note">The bar is the interval, not the score. A narrow bar is
         evidence; a wide one means the number has not earned its precision yet.</div>
       <div class="note">Brier ${s.brier.toFixed(3)} · ECE ${s.ece.toFixed(3)} · at chain seq ${s.committed_at_seq}</div>

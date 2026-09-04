@@ -288,6 +288,40 @@ impl StandardScorer {
         Self::default()
     }
 
+    /// The half-life of the reported trend, in days (SPEC §5.2).
+    const TREND_HALF_LIFE_DAYS: f32 = 30.0;
+
+    /// The EWMA over daily scores, oldest day first.
+    ///
+    /// Each day is scored the way the whole window is — difficulty-weighted, by
+    /// the same [`slice`](Self::slice) — so the trend and the level are one
+    /// measurement at two resolutions. Weighting the days differently would
+    /// make a rising trend on a falling score possible for arithmetic reasons
+    /// rather than real ones.
+    fn trend(scoreable: &[&ScoredQuest]) -> Option<f32> {
+        use std::collections::BTreeMap;
+
+        let mut by_day: BTreeMap<chrono::NaiveDate, Vec<&ScoredQuest>> = BTreeMap::new();
+        for quest in scoreable {
+            by_day
+                .entry(quest.quest.issued_for)
+                .or_default()
+                .push(quest);
+        }
+        // One day is a level, not a direction.
+        if by_day.len() < 2 {
+            return None;
+        }
+        // `BTreeMap` iterates in key order, and for dates that is oldest first.
+        // An EWMA fed newest-first reports the reverse of the truth, which is
+        // worse than reporting nothing.
+        let daily: Vec<f32> = by_day
+            .into_values()
+            .map(|day| Self::slice(&day).score)
+            .collect();
+        Some(ewma(&daily, Self::TREND_HALF_LIFE_DAYS))
+    }
+
     /// Weighted agreement over a slice, and its interval.
     ///
     /// Weighted by difficulty: a hard question the ghost got right says more
@@ -416,6 +450,10 @@ impl Scorer for StandardScorer {
             sample_size: n,
             confidence_interval: overall.confidence_interval,
             calibration: self.calibration(&pairs),
+            // SPEC §5.2's fourth aggregation output. `ewma` existed, with
+            // property tests, and nothing called it — so the score reported a
+            // level and never a direction.
+            trend: Self::trend(&scoreable),
             // Filled by the caller, which is the only place that knows the
             // decoys — they are excluded from this set by construction.
             integrity: IntegritySignals {
@@ -573,6 +611,33 @@ pub(crate) mod fixtures {
         }
     }
 
+    /// A run spread over `days`, with each day's verdicts given by `right`.
+    ///
+    /// `right[i]` is whether day `i` went well, oldest day first. Four quests a
+    /// day, which clears `MIN_SCOREABLE` at three days.
+    pub(crate) fn run_over_days(right: &[bool]) -> Vec<ScoredQuest> {
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap_or_default();
+        let mut out = Vec::new();
+        let mut n = 0u8;
+        for (offset, ok) in right.iter().enumerate() {
+            for _ in 0..4 {
+                let verdict = if *ok {
+                    Verdict::Confirm
+                } else {
+                    Verdict::Reject { note: None }
+                };
+                let mut q = scored(n, Facet::Voice, verdict);
+                q.quest.issued_for = start
+                    .checked_add_days(chrono::Days::new(offset as u64))
+                    .unwrap_or(start);
+                q.quest.confidence = if *ok { 1.0 } else { 0.0 };
+                out.push(q);
+                n = n.wrapping_add(1);
+            }
+        }
+        out
+    }
+
     /// `count` held-out quests, all confirmed, spread across the facets so a
     /// per-facet breakdown has something in it.
     ///
@@ -604,6 +669,55 @@ mod tests {
 
     use super::fixtures::*;
     use super::*;
+
+    /// SPEC §5.2's fourth output, which nothing computed: `ewma` was
+    /// implemented and property-tested, and had no production caller, so the
+    /// score reported a level and never a direction.
+    ///
+    /// A ghost improving over the window trends *above* its own average.
+    #[test]
+    fn a_ghost_getting_better_trends_above_its_window_average() {
+        let quests = run_over_days(&[false, false, false, true, true, true]);
+        let score = StandardScorer::new()
+            .aggregate(&quests, ScoreWindow::Rolling30)
+            .expect("aggregate");
+        let trend = score.trend.expect("six days is a trend");
+        assert!(
+            trend > score.overall,
+            "trend {trend} should sit above overall {}",
+            score.overall
+        );
+    }
+
+    /// And a ghost getting worse trends below it.
+    ///
+    /// This is the pair that pins the *ordering*. An EWMA fed newest-first
+    /// reports the exact reverse of the truth — a decaying ghost as improving —
+    /// and either test alone would pass against that, because the two series
+    /// are mirror images.
+    #[test]
+    fn a_ghost_getting_worse_trends_below_its_window_average() {
+        let quests = run_over_days(&[true, true, true, false, false, false]);
+        let score = StandardScorer::new()
+            .aggregate(&quests, ScoreWindow::Rolling30)
+            .expect("aggregate");
+        let trend = score.trend.expect("six days is a trend");
+        assert!(
+            trend < score.overall,
+            "trend {trend} should sit below overall {}",
+            score.overall
+        );
+    }
+
+    /// One day is a level, not a direction, and the report says so rather than
+    /// printing the day's own score as if it were a trend.
+    #[test]
+    fn a_single_day_has_no_trend() {
+        let score = StandardScorer::new()
+            .aggregate(&confirmed_run(20), ScoreWindow::Rolling30)
+            .expect("aggregate");
+        assert_eq!(score.trend, None);
+    }
 
     /// SPEC I7. A non-holdout quest in the scoring set means the score is being
     /// computed on data the model trained on. It fails loudly rather than being
