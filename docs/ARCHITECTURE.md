@@ -397,7 +397,12 @@ The only crate that knows which implementations are real. It owns:
   reads it. Dispatch lives here rather than in `ghostr-ingest` because the
   engine is the only crate that knows which adapters this build compiled in.
 - **Scheduling.** Ingest polls, the Memoria cutoff, quest issuance, persona
-  distillation, and the anchor-upgrade retry queue.
+  distillation, and the anchor-upgrade retry queue. *When* a seal runs is the
+  engine's to decide — it is the only crate that knows the chain tip, the
+  vault's creation date, and whether this machine is a replica. *Which window*
+  a seal covers is not: that comes from `ghostr_memoria::cutoff`, and the
+  engine holds no copy of the rule. It used to, and the copy silently ignored
+  `cutoff_minute_of_day`.
 - **The job queue.** Durable, resumable, at-least-once, persisted in the store.
   A machine that sleeps through its cutoff must seal on wake, not skip a day —
   gapless chains (SPEC I3) depend on this.

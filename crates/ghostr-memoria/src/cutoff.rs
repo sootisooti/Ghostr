@@ -10,25 +10,35 @@
 //!
 //! Windows are half-open on absolute UTC instants regardless, so no memory is
 //! ever double-counted or dropped no matter what the wall clock did.
+//!
+//! # This is the only place that decides a window
+//!
+//! It did not used to be. `ghostr-engine` carried a second implementation that
+//! hardcoded midnight to midnight, and that was the one that ran — so
+//! `cutoff_minute_of_day` decided nothing, its documented 23:59 default
+//! included, while the version tested here was called by nothing but its own
+//! tests. The engine now delegates. If you add a rule about day boundaries, it
+//! goes here, and nowhere else.
 
 use chrono::NaiveDate;
 use chrono_tz::Tz;
-use ghostr_core::time::{Clock, Timestamp};
+use ghostr_core::time::Timestamp;
 use ghostr_store::memory::TimeRange;
 use serde::{Deserialize, Serialize};
 
 /// When a day ends.
+///
+/// No grace period here. Grace decides *when sealing runs*, which is a
+/// scheduling question the composition root answers — it is the only place that
+/// knows the chain tip, the vault's creation date, and whether this machine is
+/// a replica at all. A second copy of it on this type would be a number nobody
+/// read, which is what the rest of this module used to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CutoffPolicy {
     /// Local time of day, in minutes past midnight. Default 23:59.
     pub minute_of_day: u16,
     /// The identity's home zone, which decides the boundary.
     pub home_tz: Tz,
-    /// Grace period after the cutoff before sealing runs.
-    ///
-    /// Lets an ingest that started before the cutoff finish, so a note written
-    /// at 23:58 and synced at 00:01 still lands in the right day.
-    pub grace_minutes: u16,
 }
 
 /// The window for one sequence.
@@ -70,108 +80,16 @@ pub fn cutoff_instant(policy: &CutoffPolicy, date: NaiveDate) -> Timestamp {
     Timestamp::new(millis, 0)
 }
 
-/// Every unsealed window between the last seal and now, oldest first.
-///
-/// The answer to a laptop that slept through three cutoffs. Each missed day
-/// seals in order, because skipping them would leave gaps and backdating them
-/// into one window would misattribute memories to the wrong day (SPEC I3).
-#[must_use]
-pub fn pending_windows(
-    policy: &CutoffPolicy,
-    clock: &dyn Clock,
-    last_sealed: Option<(u64, Timestamp)>,
-) -> Vec<PendingWindow> {
-    let now = clock.now();
-    // The grace period delays sealing, so a cutoff that has passed but whose
-    // grace has not is not yet pending: a note written at 23:58 and synced at
-    // 00:01 still belongs to the day it was written in.
-    let sealable_before = now.utc_millis() - i64::from(policy.grace_minutes) * 60_000;
-
-    let (mut seq, mut previous) = match last_sealed {
-        Some((seq, cutoff)) => (seq + 1, cutoff),
-        None => {
-            // Nothing sealed: start from the day containing `now`, so a fresh
-            // vault seals one day rather than every day since the epoch.
-            let today = date_at(policy, now);
-            let first = today.pred_opt().unwrap_or(today);
-            (1, cutoff_instant(policy, first.pred_opt().unwrap_or(first)))
-        }
-    };
-
-    let mut out = Vec::new();
-    let mut date = date_at(policy, previous);
-    // Bounded so a clock jumped years forward cannot produce an unbounded list.
-    // Ten years of catch-up is far past any real "the laptop was asleep" case.
-    for _ in 0..3_660 {
-        date = match date.succ_opt() {
-            Some(d) => d,
-            None => break,
-        };
-        let end = cutoff_instant(policy, date);
-        if end.utc_millis() > sealable_before {
-            break;
-        }
-        out.push(PendingWindow {
-            seq,
-            date,
-            tz: policy.home_tz,
-            range: TimeRange {
-                start: previous,
-                end,
-            },
-        });
-        previous = end;
-        seq += 1;
-    }
-    out
-}
-
-/// Which cutoff-day an instant falls in, in the home zone.
-fn date_at(policy: &CutoffPolicy, at: Timestamp) -> NaiveDate {
-    use chrono::TimeZone as _;
-
-    policy
-        .home_tz
-        .timestamp_millis_opt(at.utc_millis())
-        .earliest()
-        .map(|dt| dt.date_naive())
-        .unwrap_or_default()
-}
-
-/// One window awaiting a seal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PendingWindow {
-    /// The sequence it will take.
-    pub seq: u64,
-    /// Its local date.
-    pub date: NaiveDate,
-    /// The zone in effect at its cutoff.
-    pub tz: Tz,
-    /// The absolute range.
-    pub range: TimeRange,
-}
-
 #[cfg(test)]
 mod tests {
     use chrono_tz::Tz;
 
     use super::*;
 
-    struct At(i64);
-    impl Clock for At {
-        fn now(&self) -> Timestamp {
-            Timestamp::new(self.0, 0)
-        }
-        fn home_tz(&self) -> Tz {
-            Tz::UTC
-        }
-    }
-
     fn policy(tz: Tz) -> CutoffPolicy {
         CutoffPolicy {
             minute_of_day: 23 * 60 + 59,
             home_tz: tz,
-            grace_minutes: 0,
         }
     }
 
@@ -212,68 +130,5 @@ mod tests {
         assert_eq!(length(&across), 23 * 3_600_000, "a 23-hour day");
         assert_eq!(across.start, before.end);
         assert_eq!(after.start, across.end);
-    }
-
-    #[test]
-    fn a_laptop_that_slept_through_three_cutoffs_seals_each_in_order() {
-        let p = policy(Tz::UTC);
-        let last = cutoff_instant(&p, date(2026, 8, 25));
-        // Two days later, well past the cutoff.
-        let now = cutoff_instant(&p, date(2026, 8, 28));
-        let pending = pending_windows(&p, &At(now.utc_millis()), Some((7, last)));
-
-        assert_eq!(pending.len(), 3);
-        assert_eq!(pending[0].seq, 8);
-        assert_eq!(pending[0].date, date(2026, 8, 26));
-        assert_eq!(pending[2].seq, 10);
-        assert_eq!(pending[2].date, date(2026, 8, 28));
-        // Contiguous, in order.
-        assert_eq!(pending[0].range.start, last);
-        assert_eq!(pending[1].range.start, pending[0].range.end);
-        assert_eq!(pending[2].range.start, pending[1].range.end);
-    }
-
-    /// A note written at 23:58 and synced at 00:01 must still land in the day it
-    /// was written in, which is what the grace period buys.
-    #[test]
-    fn the_grace_period_holds_a_day_open() {
-        let mut p = policy(Tz::UTC);
-        p.grace_minutes = 30;
-        let last = cutoff_instant(&p, date(2026, 8, 25));
-        // Ten minutes past the next cutoff: inside the grace period.
-        let now = cutoff_instant(&p, date(2026, 8, 26)).utc_millis() + 10 * 60_000;
-        assert!(pending_windows(&p, &At(now), Some((7, last))).is_empty());
-
-        // Forty minutes past: the grace has expired.
-        let later = cutoff_instant(&p, date(2026, 8, 26)).utc_millis() + 40 * 60_000;
-        assert_eq!(pending_windows(&p, &At(later), Some((7, last))).len(), 1);
-    }
-
-    /// A fresh vault seals one day, not every day since the epoch.
-    #[test]
-    fn a_vault_with_nothing_sealed_does_not_backfill_history() {
-        let p = policy(Tz::UTC);
-        let now = cutoff_instant(&p, date(2026, 8, 25)).utc_millis() + 3_600_000;
-        let pending = pending_windows(&p, &At(now), None);
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].seq, 1);
-        assert_eq!(pending[0].date, date(2026, 8, 25));
-    }
-
-    #[test]
-    fn nothing_is_pending_before_the_first_cutoff_passes() {
-        let p = policy(Tz::UTC);
-        let last = cutoff_instant(&p, date(2026, 8, 25));
-        let now = last.utc_millis() + 60_000;
-        assert!(pending_windows(&p, &At(now), Some((7, last))).is_empty());
-    }
-
-    /// A clock that jumped forward years must not produce an unbounded list.
-    #[test]
-    fn a_clock_jumped_far_forward_is_bounded() {
-        let p = policy(Tz::UTC);
-        let last = cutoff_instant(&p, date(2000, 1, 1));
-        let now = cutoff_instant(&p, date(2200, 1, 1));
-        assert!(pending_windows(&p, &At(now.utc_millis()), Some((1, last))).len() <= 3_660);
     }
 }
