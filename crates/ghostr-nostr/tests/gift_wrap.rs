@@ -67,7 +67,7 @@ fn rumor(pubkey: ghostr_core::identity::PublicKey) -> UnsignedEvent {
         created_at: RUMOR_AT,
         kind: 1,
         tags: Vec::new(),
-        content: "met Nan at the tea shop about the lease".to_owned(),
+        content: "met Nanthawan at the tea shop about the lease".to_owned(),
     }
 }
 
@@ -99,8 +99,10 @@ async fn a_wrap_does_not_name_its_author() {
         "the author's pubkey is in the wrap"
     );
     // Nor is the content readable.
+    // Whole words only: a three-letter needle appears in random base64 often
+    // enough to fail this test for no reason.
     assert!(!seen.contains("tea shop"));
-    assert!(!seen.contains("Nan"));
+    assert!(!seen.contains("Nanthawan"));
 
     assert_eq!(wrap.event.kind, 1059);
     // The recipient tag is the one thing a relay may see: it is how the

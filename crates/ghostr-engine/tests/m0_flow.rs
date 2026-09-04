@@ -16,7 +16,13 @@ use ghostr_engine::engine::Engine;
 use ghostr_engine::ops;
 
 /// A note that must never appear in the database file in readable form.
-const SECRET_PHRASE: &str = "met Nan at the tea shop about the lease";
+///
+/// The name is deliberately long. Absence assertions below scan raw ciphertext,
+/// and a three-letter needle like "Nan" occurs by chance in a 100 KB database
+/// roughly once in every two hundred runs — a false leak report, which is how
+/// this class of test failed in CI. Anything asserted absent must be long enough
+/// that a chance hit is impossible.
+const SECRET_PHRASE: &str = "met Nanthawan at the tea shop about the lease";
 
 fn passphrase() -> SecretString {
     SecretString::new("correct horse battery staple".to_owned())
@@ -38,7 +44,7 @@ fn write_vault(dir: &Path) {
         format!(
             "---\ndate: 2026-08-24\n---\n\
              Shipped the parser after three days stuck on it. Feeling good.\n\n\
-             {SECRET_PHRASE}, with @nan about #moving.\n\n\
+             {SECRET_PHRASE}, with @nanthawan about #moving.\n\n\
              - [ ] call the bank about the transfer\n\
              - [x] pay rent\n"
         ),
@@ -168,7 +174,7 @@ fn no_note_content_is_readable_in_the_vault_files() {
 
     for needle in [
         SECRET_PHRASE,
-        "Nan",
+        "Nanthawan",
         "tea shop",
         "timezone bug",
         "call the bank",
@@ -211,9 +217,28 @@ fn verify_names_the_first_tampered_sequence() {
     // drop them first. That is precisely the attacker the chain defends against:
     // someone who owns the database but not the history.
     let conn = rusqlite::Connection::open(vault.join("ghostr.db")).unwrap();
-    conn.execute_batch(
-        "DROP TRIGGER footage_is_immutable;
-         UPDATE footage SET merkle_root = 'aa' || substr(merkle_root, 3) WHERE seq = 1;",
+    conn.execute_batch("DROP TRIGGER footage_is_immutable;")
+        .unwrap();
+
+    // Read the root and write a value that differs from it, rather than
+    // overwriting a fixed prefix. Memory leaves are salted with random bytes, so
+    // the root is effectively random: a hardcoded `'aa' || substr(root, 3)` is a
+    // no-op the one run in 256 where the root already starts with `aa`, and the
+    // test then fails claiming tampering went undetected when nothing was
+    // tampered with at all.
+    let root: String = conn
+        .query_row("SELECT merkle_root FROM footage WHERE seq = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let forged = match root.strip_prefix("aa") {
+        Some(rest) => format!("bb{rest}"),
+        None => format!("aa{}", &root[2..]),
+    };
+    assert_ne!(forged, root, "the tamper must actually change the row");
+    conn.execute(
+        "UPDATE footage SET merkle_root = ?1 WHERE seq = 1",
+        [&forged],
     )
     .unwrap();
     drop(conn);

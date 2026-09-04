@@ -356,7 +356,7 @@ async fn nothing_readable_reaches_a_relay() {
     struct Footage {
         summary: String,
     }
-    let secret = "met Nan at the tea shop about the lease";
+    let secret = "met Nanthawan at the tea shop about the lease";
     let event = ghostr_nostr::codec::encode(
         &ks,
         key,
@@ -387,9 +387,12 @@ async fn nothing_readable_reaches_a_relay() {
         .expect("publish");
 
     let sent = frames.recv().unwrap();
+    // Needles are whole words on purpose. A three-letter one like "Nan" turns
+    // up in random base64 about once every four hundred payloads, which makes
+    // it a false leak report rather than a test.
     assert!(!sent.contains(secret), "plaintext reached the relay");
     assert!(!sent.contains("tea shop"));
-    assert!(!sent.contains("Nan"));
+    assert!(!sent.contains("Nanthawan"));
 }
 
 /// A filter with no authors must not become `"authors": []`.

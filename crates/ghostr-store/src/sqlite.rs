@@ -1819,7 +1819,12 @@ mod tests {
     use super::tests_support::{dek, memory, store};
     use super::*;
 
-    const SECRET_TEXT: &str = "met Nan at the tea shop and finally fixed the timezone bug";
+    /// Deliberately long words.
+    ///
+    /// The absence assertions below scan raw ciphertext, where a three-letter
+    /// needle turns up by chance often enough to fail CI on a database that
+    /// leaked nothing. Every needle here is a whole word or longer.
+    const SECRET_TEXT: &str = "met Nanthawan at the tea shop and finally fixed the timezone bug";
 
     #[test]
     fn memory_round_trips_through_encryption() {
@@ -1857,7 +1862,7 @@ mod tests {
         }
         assert!(!raw.is_empty(), "database should not be empty");
 
-        let needles = ["Nan", "tea shop", "timezone bug", SECRET_TEXT];
+        let needles = ["Nanthawan", "tea shop", "timezone bug", SECRET_TEXT];
         for needle in needles {
             assert!(
                 !raw.windows(needle.len()).any(|w| w == needle.as_bytes()),
@@ -2228,14 +2233,24 @@ mod tests {
     }
 
     /// The log must not become a second copy of the corpus.
+    ///
+    /// `EgressRecord` has no payload field today, so this is a tripwire rather
+    /// than a leak test: it fires the day somebody adds a column that carries
+    /// the text a digest stands for.
     #[test]
     fn the_egress_log_stores_a_digest_not_a_payload() {
+        /// What the record's digest is a digest *of*.
+        const PAYLOAD: &str = "met Nanthawan at the tea shop";
+
         let dir = tempfile::tempdir().expect("tempdir");
         let s = SqliteStore::open(dir.path()).expect("open");
         s.append_egress(&record("acme", "allow_redacted"))
             .expect("append");
         let raw = std::fs::read(dir.path().join(DB_FILENAME)).expect("read");
-        assert!(!raw.windows(3).any(|w| w == b"Nan"));
+        assert!(
+            !raw.windows(PAYLOAD.len()).any(|w| w == PAYLOAD.as_bytes()),
+            "the egress log carries the payload, not just its digest"
+        );
         // The digest is present and is what a user would compare against.
         let back = s.egress_since(Timestamp::new(0, 0)).expect("read");
         assert_eq!(

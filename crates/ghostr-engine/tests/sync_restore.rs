@@ -203,7 +203,7 @@ async fn no_plaintext_and_no_identity_reaches_a_relay() {
     std::fs::create_dir_all(&notes).unwrap();
     std::fs::write(
         notes.join("2026-08-01.md"),
-        "---\ndate: 2026-08-01\n---\nMet Nan at the tea shop about the lease.\n",
+        "---\ndate: 2026-08-01\n---\nMet Nanthawan at the tea shop about the lease.\n",
     )
     .unwrap();
 
@@ -215,7 +215,15 @@ async fn no_plaintext_and_no_identity_reaches_a_relay() {
     sync(&engine, &relay).await.expect("sync");
 
     let sent = serde_json::to_string(&*relay.stored.lock().unwrap()).unwrap();
-    for secret in ["Nan", "tea shop", "lease"] {
+    // A deliberately long, distinctive name.
+    //
+    // A short needle is not a valid absence assertion against ciphertext: NIP-44
+    // payloads are base64, and a three-letter string like "Nan" turns up in random
+    // base64 roughly once every four hundred blobs. That is exactly how this test
+    // failed in CI — a false positive claiming a leak that never happened. Anything
+    // asserted absent here must be long enough that a chance hit is impossible,
+    // which in practice means a whole word or more.
+    for secret in ["Nanthawan", "tea shop", "lease"] {
         assert!(!sent.contains(secret), "`{secret}` reached the relay");
     }
 
