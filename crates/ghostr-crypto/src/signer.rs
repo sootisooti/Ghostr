@@ -11,6 +11,7 @@ use ghostr_core::identity::{Account, KeyRef, PublicKey};
 
 use crate::event::{Signature, UnsignedEvent};
 use crate::kdf::Dek;
+use crate::keystore::WrapEntropy;
 use crate::secret::SecretString;
 
 /// Anything that can produce a nostr signature.
@@ -93,6 +94,83 @@ pub trait Signer: Send + Sync {
         sender: &PublicKey,
         payload: &str,
     ) -> crate::Result<Vec<u8>>;
+
+    /// Wraps a rumor in NIP-59 gift wrap, returning the finished kind-1059.
+    ///
+    /// # Why this is one method rather than a signing primitive
+    ///
+    /// Gift wrap is three layers: the **rumor** (unsigned, the real content), a
+    /// **seal** (kind 13) encrypted to the recipient and signed by the real
+    /// author, and a **wrap** (kind 1059) encrypted and signed by a throwaway
+    /// key that exists for exactly one event. That throwaway key is the whole
+    /// mechanism — it is what hides the author from a relay.
+    ///
+    /// It is therefore born, used and zeroized inside this crate and never
+    /// crosses a boundary, which is the same treatment the identity key gets
+    /// (SPEC §11.3). The alternative — a general "sign these bytes with this
+    /// ephemeral key" primitive — was rejected: that is a signing oracle for
+    /// arbitrary bytes under a caller-chosen key, and this would be its only
+    /// caller.
+    ///
+    /// A remote signer can implement this: nothing here returns key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked,
+    /// [`Error::InvalidPublicKey`](crate::Error::InvalidPublicKey) if the
+    /// ephemeral entropy is not a usable scalar or `recipient` is not a curve
+    /// point, or [`Error::Backend`](crate::Error::Backend) if the rumor carries
+    /// a timestamp the layers above it would have to precede.
+    async fn gift_wrap(
+        &self,
+        key: KeyRef,
+        recipient: &PublicKey,
+        rumor: &UnsignedEvent,
+        entropy: GiftWrapEntropy,
+    ) -> crate::Result<crate::event::SignedEvent>;
+}
+
+/// The randomness and timestamps one gift wrap needs.
+///
+/// Bundled because the values are correlated and all five have to come from the
+/// composition root: an ephemeral secret, a nonce for each of the two
+/// encryptions, and a `created_at` for each of the two outer layers.
+///
+/// # The timestamps go backwards, and that is not the same as publish jitter
+///
+/// NIP-59 §"canonical time": the rumor holds the real `created_at`, and every
+/// other layer SHOULD be tweaked **into the past** — partly to thwart time
+/// analysis, partly because relays refuse events dated in the future. The seal
+/// and the wrap SHOULD get *independent* values, so a relay cannot pair them by
+/// timestamp.
+///
+/// This runs opposite to `ghostr-nostr`'s publish jitter, which only ever moves
+/// a timestamp *later*, and the two are not in conflict: jitter hides when a
+/// footage was sealed by delaying its publication, while this hides who wrote a
+/// wrapped event by decorrelating its layers.
+pub struct GiftWrapEntropy {
+    /// Secret scalar for the throwaway key. Zeroized after use.
+    pub ephemeral_secret: [u8; 32],
+    /// NIP-44 nonce for the seal.
+    pub seal_nonce: [u8; 32],
+    /// NIP-44 nonce for the wrap. Must differ from `seal_nonce`.
+    pub wrap_nonce: [u8; 32],
+    /// `created_at` for the seal. At or before the rumor's.
+    pub seal_created_at: u64,
+    /// `created_at` for the wrap. At or before the rumor's, and independent of
+    /// the seal's.
+    pub wrap_created_at: u64,
+}
+
+impl core::fmt::Debug for GiftWrapEntropy {
+    /// Never prints the ephemeral secret: it is key material, and a leaked one
+    /// deanonymises the author of every event wrapped under it.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GiftWrapEntropy")
+            .field("seal_created_at", &self.seal_created_at)
+            .field("wrap_created_at", &self.wrap_created_at)
+            .finish_non_exhaustive()
+    }
 }
 
 // There is deliberately no `conversation_key` on this trait.
@@ -150,15 +228,38 @@ pub trait Keystore: Send + Sync {
     /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
     fn dek(&self) -> crate::Result<&Dek>;
 
-    /// Re-wraps the DEK under a new passphrase.
+    /// Re-wraps the vault's secrets under a new passphrase.
     ///
-    /// Cheap by design: the corpus is encrypted under the DEK, which does not
-    /// change, so a passphrase change rewraps 32 bytes.
+    /// Cheap by design: the corpus is encrypted under the DEK, which this does
+    /// not change. What gets rewrapped is the 64-byte seed — and, in a vault
+    /// whose identity was imported, the 32-byte identity key beside it. Both or
+    /// neither: a vault that rewraps one is one whose identity or whose journal
+    /// is unreachable.
+    ///
+    /// # Why the old passphrase, and why the entropy
+    ///
+    /// `old_passphrase` is required so this is an *authorised* operation rather
+    /// than something a passer-by can do to an unlocked laptop. Being unlocked
+    /// already gives an attacker the contents; it should not also hand them the
+    /// ability to lock the owner out.
+    ///
+    /// `entropy` is supplied rather than drawn because `OsRng` belongs in the
+    /// composition root (SPEC §11.4, CLAUDE.md §6), and because reusing the
+    /// stored salt would wrap a new KEK under parameters chosen for an old one
+    /// — letting anyone holding a copy of the old file test one guess against
+    /// both wrappings for the price of a single derivation.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Locked`](crate::Error::Locked) if locked, or
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked,
+    /// [`Error::BadPassphrase`](crate::Error::BadPassphrase) if
+    /// `old_passphrase` is wrong, or
     /// [`Error::Backend`](crate::Error::Backend) if the new wrapping cannot be
-    /// persisted.
-    fn change_passphrase(&mut self, new_passphrase: SecretString) -> crate::Result<()>;
+    /// persisted. On any error the stored file is left exactly as it was.
+    fn change_passphrase(
+        &mut self,
+        old_passphrase: SecretString,
+        new_passphrase: SecretString,
+        entropy: WrapEntropy,
+    ) -> crate::Result<()>;
 }

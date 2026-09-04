@@ -161,6 +161,24 @@ impl Engine {
         ))
     }
 
+    /// Changes the passphrase that unlocks this vault.
+    ///
+    /// Entropy is drawn here rather than in `ghostr-crypto`: this is the
+    /// composition root, which is the only place `OsRng` belongs (§11.4).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `old` is wrong or the new wrapping cannot be
+    /// written. The stored file is left unchanged on either.
+    pub fn change_passphrase(
+        &mut self,
+        old: SecretString,
+        new: SecretString,
+        entropy: ghostr_crypto::keystore::WrapEntropy,
+    ) -> crate::Result<()> {
+        Ok(self.keystore.change_passphrase(old, new, entropy)?)
+    }
+
     /// Opens an existing vault and unlocks it.
     ///
     /// # Errors

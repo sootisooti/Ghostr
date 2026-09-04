@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use ghostr_core::identity::{Account, KeyRef, Npub, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Signature, UnsignedEvent};
+use crate::event::{Signature, SignedEvent, UnsignedEvent};
 use crate::kdf::{
     Argon2Params, Dek, WrappedSeed, derive_dek, derive_kek, unwrap_identity, unwrap_seed,
     wrap_identity, wrap_seed,
@@ -23,7 +23,7 @@ use crate::kdf::{
 use crate::nip06::{DerivedKey, MasterKey, Mnemonic};
 use crate::nip44::ConversationKey;
 use crate::secret::SecretString;
-use crate::signer::{Keystore, Signer};
+use crate::signer::{GiftWrapEntropy, Keystore, Signer};
 
 /// Where a vault's data encryption key comes from.
 ///
@@ -123,6 +123,24 @@ impl WrapEntropy {
             seed_nonce,
             identity_nonce,
         })
+    }
+
+    /// The Argon2id salt.
+    #[must_use]
+    pub const fn salt(&self) -> [u8; 16] {
+        self.salt
+    }
+
+    /// The nonce for the wrapped seed.
+    #[must_use]
+    pub const fn seed_nonce(&self) -> [u8; 24] {
+        self.seed_nonce
+    }
+
+    /// The nonce for a wrapped imported identity key.
+    #[must_use]
+    pub const fn identity_nonce(&self) -> [u8; 24] {
+        self.identity_nonce
     }
 }
 
@@ -395,6 +413,16 @@ fn write_private(path: &Path, bytes: &[u8]) -> crate::Result<()> {
             operation: "create data directory",
         })?;
     }
+
+    // Written to a sibling and renamed, rather than truncated in place.
+    //
+    // Truncating is fine the first time, when there is nothing to lose. It is
+    // not fine for a passphrase change: the file holds the only copy of the
+    // wrapped seed, and a crash between truncate and write leaves a vault whose
+    // corpus can never be decrypted again. `rename` within a directory is
+    // atomic on POSIX, so a reader sees either the old file or the new one.
+    let temporary = path.with_extension("new");
+
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -402,15 +430,30 @@ fn write_private(path: &Path, bytes: &[u8]) -> crate::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut f = options.open(path).map_err(|_| crate::Error::Backend {
-        operation: "open keystore for writing",
-    })?;
+    let mut f = options
+        .open(&temporary)
+        .map_err(|_| crate::Error::Backend {
+            operation: "open keystore for writing",
+        })?;
     f.write_all(bytes).map_err(|_| crate::Error::Backend {
         operation: "write keystore",
     })?;
+    // Before the rename, not after: a rename that lands before the bytes reach
+    // the disk can publish an empty file.
     f.sync_all().map_err(|_| crate::Error::Backend {
         operation: "sync keystore",
     })?;
+    drop(f);
+
+    std::fs::rename(&temporary, path).map_err(|_| crate::Error::Backend {
+        operation: "replace keystore",
+    })?;
+
+    // And the directory entry itself, so the rename survives a power loss.
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().and_then(|p| std::fs::File::open(p).ok()) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -504,16 +547,79 @@ impl Keystore for FileKeystore {
             .ok_or(crate::Error::Locked)
     }
 
-    fn change_passphrase(&mut self, new_passphrase: SecretString) -> crate::Result<()> {
-        // Not implementable at this signature, and refused rather than faked.
-        // A rewrap needs a fresh salt and nonce; drawing them here would put
-        // `OsRng` outside the composition root, which CLAUDE.md §6 forbids, and
-        // reusing the stored salt would wrap a new KEK under an old one's
-        // parameters. Resolving that means changing the trait — SPEC §14 Q19.
-        let _ = new_passphrase;
-        Err(crate::Error::Backend {
-            operation: "change_passphrase needs a caller-supplied salt",
-        })
+    fn change_passphrase(
+        &mut self,
+        old_passphrase: SecretString,
+        new_passphrase: SecretString,
+        entropy: WrapEntropy,
+    ) -> crate::Result<()> {
+        // The old passphrase is not checked and then trusted — it is the only
+        // way to reach the seed at all, so authorisation here is structural
+        // rather than a guard someone could later delete "to simplify". A
+        // rewrap needs the plaintext seed, and the plaintext seed exists only
+        // on the far side of this unwrap.
+        //
+        // That is why it also stops a passer-by re-keying an unlocked laptop:
+        // being unlocked hands an attacker the contents, and it should not also
+        // hand them the ability to lock the owner out.
+        let old_kek = derive_kek(&old_passphrase, &self.file.seed.salt, self.file.seed.params)?;
+        let seed = unwrap_seed(&old_kek, &self.file.seed)?;
+
+        let imported = match self.file.identity_source {
+            IdentitySource::ImportedNsec => {
+                let wrapped = self
+                    .file
+                    .identity_key
+                    .as_ref()
+                    .ok_or(crate::Error::Backend {
+                        operation: "keystore claims an imported identity but carries none",
+                    })?;
+                Some(unwrap_identity(&old_kek, wrapped)?)
+            }
+            IdentitySource::Seed => None,
+        };
+
+        let salt = entropy.salt();
+        let new_kek = derive_kek(&new_passphrase, &salt, self.file.seed.params)?;
+        let wrapped_seed = wrap_seed(
+            &new_kek,
+            &seed,
+            &entropy.seed_nonce(),
+            &salt,
+            self.file.seed.params,
+        )?;
+        let wrapped_identity = imported
+            .map(|key| {
+                wrap_identity(
+                    &new_kek,
+                    &key,
+                    &entropy.identity_nonce(),
+                    &salt,
+                    self.file.seed.params,
+                )
+            })
+            .transpose()?;
+
+        // Both wrappings are built before either is stored, so a failure part
+        // way through leaves the file untouched rather than half re-keyed. The
+        // write itself is atomic (see `write_private`), which is what makes
+        // "untouched" true even across a crash.
+        let mut updated = self.file.clone();
+        updated.seed = wrapped_seed;
+        if wrapped_identity.is_some() {
+            updated.identity_key = wrapped_identity;
+        }
+
+        let json = serde_json::to_string_pretty(&updated).map_err(|_| crate::Error::Backend {
+            operation: "serialise keystore",
+        })?;
+        write_private(&self.path, json.as_bytes())?;
+        self.file = updated;
+
+        // The unlocked state is deliberately kept. The DEK is derived from key
+        // material the passphrase does not touch, so the vault stays readable
+        // and the user is not logged out of an operation they just authorised.
+        Ok(())
     }
 }
 
@@ -563,6 +669,94 @@ impl Signer for FileKeystore {
     ) -> crate::Result<Vec<u8>> {
         let conversation = self.conversation_key(key, sender)?;
         crate::nip44::decrypt(&conversation, payload)
+    }
+
+    async fn gift_wrap(
+        &self,
+        key: KeyRef,
+        recipient: &PublicKey,
+        rumor: &UnsignedEvent,
+        entropy: GiftWrapEntropy,
+    ) -> crate::Result<SignedEvent> {
+        // The rumor holds the canonical time; every outer layer is tweaked into
+        // the past (NIP-59). A layer dated after it would claim to have wrapped
+        // something that did not exist yet, and relays refuse future timestamps
+        // anyway — so this is checked rather than assumed of the caller.
+        if entropy.seal_created_at > rumor.created_at || entropy.wrap_created_at > rumor.created_at
+        {
+            return Err(crate::Error::Backend {
+                operation: "gift wrap layers must not postdate the rumor",
+            });
+        }
+        // Two encryptions under two different conversation keys, but a repeated
+        // nonce is the kind of thing that is only ever an accident and is free
+        // to refuse.
+        if entropy.seal_nonce == entropy.wrap_nonce {
+            return Err(crate::Error::Backend {
+                operation: "seal and wrap nonces must differ",
+            });
+        }
+
+        let author = self.derived(key.account)?;
+
+        // Layer 1: the seal. Kind 13, encrypted to the recipient under the
+        // author's real key, and its tags MUST be empty — NIP-59 is explicit,
+        // and a tag here would leak exactly what the wrap exists to hide.
+        let rumor_json = serde_json::to_string(rumor).map_err(|_| crate::Error::Backend {
+            operation: "serialise rumor",
+        })?;
+        let author_conversation = ConversationKey::derive(author.secret_bytes(), recipient)?;
+        let seal_content = crate::nip44::encrypt(
+            &author_conversation,
+            rumor_json.as_bytes(),
+            &entropy.seal_nonce,
+        )?;
+
+        let seal = UnsignedEvent {
+            pubkey: author.public,
+            created_at: entropy.seal_created_at,
+            kind: 13,
+            tags: Vec::new(),
+            content: seal_content,
+        };
+        let seal_sig = author.sign(seal.id().as_bytes())?;
+        let sealed = SignedEvent {
+            id: seal.id(),
+            event: seal,
+            sig: seal_sig,
+        };
+
+        // Layer 2: the wrap, under a key that exists only here. Born, used and
+        // dropped inside this function — it never reaches a domain type, a
+        // caller, or a log, which is the entire reason gift wrap hides anything.
+        let ephemeral = DerivedKey::from_secret(key.account, entropy.ephemeral_secret)?;
+
+        let seal_json = serde_json::to_string(&sealed).map_err(|_| crate::Error::Backend {
+            operation: "serialise seal",
+        })?;
+        let ephemeral_conversation = ConversationKey::derive(ephemeral.secret_bytes(), recipient)?;
+        let wrap_content = crate::nip44::encrypt(
+            &ephemeral_conversation,
+            seal_json.as_bytes(),
+            &entropy.wrap_nonce,
+        )?;
+
+        let wrap = UnsignedEvent {
+            pubkey: ephemeral.public,
+            created_at: entropy.wrap_created_at,
+            kind: 1059,
+            // The recipient tag is the one thing a relay may see, because it is
+            // how the recipient finds the event at all.
+            tags: vec![vec!["p".to_owned(), recipient.to_hex()]],
+            content: wrap_content,
+        };
+        let wrap_sig = ephemeral.sign(wrap.id().as_bytes())?;
+
+        Ok(SignedEvent {
+            id: wrap.id(),
+            event: wrap,
+            sig: wrap_sig,
+        })
     }
 }
 
@@ -746,23 +940,141 @@ mod tests {
         );
     }
 
-    /// The stub is honest about being a stub, and says why (SPEC §14 Q19).
+    fn rekey_entropy() -> WrapEntropy {
+        WrapEntropy::new([9u8; 16], [8u8; 24], [7u8; 24]).expect("entropy")
+    }
+
+    /// The old passphrase stops working and the new one starts.
     #[test]
-    fn change_passphrase_refuses_rather_than_rewrapping_badly() {
+    fn a_passphrase_change_swaps_which_passphrase_opens_the_vault() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(KEYSTORE_FILENAME);
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(SecretString::new(pass.expose().to_owned()))
+            .expect("unlock");
+
+        let new_pass = SecretString::new("an entirely different passphrase".to_owned());
+        ks.change_passphrase(
+            SecretString::new(pass.expose().to_owned()),
+            SecretString::new(new_pass.expose().to_owned()),
+            rekey_entropy(),
+        )
+        .expect("rekey");
+        drop(ks);
+
+        let mut reopened = FileKeystore::open(&path).expect("open");
+        assert!(
+            reopened.unlock(pass).is_err(),
+            "the old passphrase still opens the vault"
+        );
+        let mut again = FileKeystore::open(&path).expect("open");
+        again
+            .unlock(new_pass)
+            .expect("the new passphrase must work");
+    }
+
+    /// The corpus stays readable: the DEK does not depend on the passphrase.
+    #[test]
+    fn a_passphrase_change_leaves_the_data_key_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(KEYSTORE_FILENAME);
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(SecretString::new(pass.expose().to_owned()))
+            .expect("unlock");
+
+        // Sealed under the DEK before the change.
+        let sealed = crate::kdf::seal_row(ks.dek().expect("dek"), b"a row", &[3u8; 24], b"row:1")
+            .expect("seal");
+
+        let new_pass = SecretString::new("an entirely different passphrase".to_owned());
+        ks.change_passphrase(
+            SecretString::new(pass.expose().to_owned()),
+            SecretString::new(new_pass.expose().to_owned()),
+            rekey_entropy(),
+        )
+        .expect("rekey");
+        drop(ks);
+
+        let mut reopened = FileKeystore::open(&path).expect("open");
+        reopened.unlock(new_pass).expect("unlock");
+        assert_eq!(
+            crate::kdf::open_row(reopened.dek().expect("dek"), &sealed, &[3u8; 24], b"row:1")
+                .expect("the corpus must still decrypt"),
+            b"a row"
+        );
+    }
+
+    /// A wrong old passphrase changes nothing, and says so.
+    #[test]
+    fn a_wrong_old_passphrase_leaves_the_file_byte_identical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(KEYSTORE_FILENAME);
         let (mut ks, pass) = make(dir.path());
         ks.unlock(pass).expect("unlock");
 
-        let before = std::fs::read(dir.path().join(KEYSTORE_FILENAME)).expect("read");
-        assert!(
-            ks.change_passphrase(SecretString::new("a new one entirely".to_owned()))
-                .is_err()
+        let before = std::fs::read(&path).expect("read");
+        let result = ks.change_passphrase(
+            SecretString::new("not the old passphrase".to_owned()),
+            SecretString::new("a new one entirely".to_owned()),
+            rekey_entropy(),
         );
-        // Refusing must not have half-written the file.
-        assert_eq!(
-            std::fs::read(dir.path().join(KEYSTORE_FILENAME)).expect("read"),
-            before
-        );
+        assert!(matches!(result, Err(crate::Error::BadPassphrase)));
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+    }
+
+    /// An imported-identity vault rewraps *both* secrets.
+    ///
+    /// The failure this guards is asymmetric and silent: rewrapping only the
+    /// seed leaves a vault whose journal opens under the new passphrase and
+    /// whose identity opens under nothing at all.
+    #[test]
+    fn a_passphrase_change_rewraps_an_imported_identity_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(KEYSTORE_FILENAME);
+        let (mut ks, pass) = imported(dir.path());
+        ks.unlock(SecretString::new(pass.expose().to_owned()))
+            .expect("unlock");
+        let npub_before = ks.npub().as_str().to_owned();
+
+        let new_pass = SecretString::new("an entirely different passphrase".to_owned());
+        ks.change_passphrase(
+            SecretString::new(pass.expose().to_owned()),
+            SecretString::new(new_pass.expose().to_owned()),
+            rekey_entropy(),
+        )
+        .expect("rekey");
+        drop(ks);
+
+        // Unlocking is what exercises the imported wrapping: it unwraps the
+        // identity key and checks it against the stored pubkey.
+        let mut reopened = FileKeystore::open(&path).expect("open");
+        reopened
+            .unlock(new_pass)
+            .expect("the imported identity must survive a rekey");
+        assert_eq!(reopened.npub().as_str(), npub_before);
+    }
+
+    /// A rekey leaves no temporary file behind.
+    #[test]
+    fn an_atomic_write_cleans_up_after_itself() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut ks, pass) = make(dir.path());
+        ks.unlock(SecretString::new(pass.expose().to_owned()))
+            .expect("unlock");
+        ks.change_passphrase(
+            SecretString::new(pass.expose().to_owned()),
+            SecretString::new("an entirely different passphrase".to_owned()),
+            rekey_entropy(),
+        )
+        .expect("rekey");
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".new"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind {leftovers:?}");
     }
 
     /// NIP-19's published `nsec`, with the private key hex it decodes to.

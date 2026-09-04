@@ -189,6 +189,7 @@ $ ghostr serve --http                      # the same loop, on a screen
 $ ghostr egress log                        # everything that has left this device
 $ ghostr anchor                            # stamp the chain tip via OpenTimestamps
 $ ghostr verify                            # re-derive the chain from genesis
+$ ghostr passphrase                        # rewrap the seed; the journal is untouched
 ```
 
 Health and location logs are added as `Secret`, which means they never leave the

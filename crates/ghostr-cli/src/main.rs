@@ -149,6 +149,12 @@ enum Command {
 
     /// Show vault status.
     Status,
+
+    /// Change the passphrase that unlocks this vault.
+    ///
+    /// Cheap: the journal is encrypted under a key the passphrase does not
+    /// touch, so this rewraps the seed rather than re-encrypting the corpus.
+    Passphrase,
 }
 
 #[derive(Debug, Subcommand)]
@@ -301,6 +307,7 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Init { import, nsec, tz } => cmd_init(&dir, import, nsec, &tz),
+        Command::Passphrase => cmd_passphrase(&dir),
         Command::Ingest { path } => cmd_ingest(&dir, &path),
         Command::Memoria {
             date,
@@ -443,6 +450,48 @@ fn cmd_init(dir: &std::path::Path, import: bool, nsec: bool, tz: &str) -> Result
     .context("creating the vault")?;
 
     println!("{}", render::init(&engine, &outcome, dir));
+    Ok(())
+}
+
+/// Fills a buffer with OS randomness.
+///
+/// The composition root is the only place this happens (SPEC §11.4); every
+/// crate below takes the bytes it needs as an argument.
+fn fill_random(buf: &mut [u8]) {
+    use ghostr_core::time::Rng as _;
+    ghostr_engine::runtime::OsRng.fill(buf);
+}
+
+/// Changes the passphrase, asking for the old one first.
+///
+/// The old passphrase is not a formality: a rewrap needs the plaintext seed,
+/// which is only reachable by unwrapping with it (SPEC §14 Q19). Asking for it
+/// is also what stops someone at an unlocked laptop from re-keying the vault.
+fn cmd_passphrase(dir: &std::path::Path) -> Result<()> {
+    let old = SecretString::new(rpassword_prompt("current passphrase: ")?);
+    let mut engine = Engine::open(dir, &old).context("opening the vault")?;
+
+    eprintln!(
+        "\n  This changes only what unlocks the vault. Your recovery phrase is\n  \
+         unchanged, and so is everything already written down.\n"
+    );
+    let new = passphrase(true)?;
+
+    // Entropy drawn here, in the composition root, and nowhere deeper.
+    let mut salt = [0u8; 16];
+    let mut seed_nonce = [0u8; 24];
+    let mut identity_nonce = [0u8; 24];
+    fill_random(&mut salt);
+    fill_random(&mut seed_nonce);
+    fill_random(&mut identity_nonce);
+    let entropy = ghostr_crypto::keystore::WrapEntropy::new(salt, seed_nonce, identity_nonce)
+        .context("drawing entropy for the rewrap")?;
+
+    engine
+        .change_passphrase(old, new, entropy)
+        .context("changing the passphrase")?;
+    println!("passphrase changed");
+    println!("  the old one no longer opens this vault");
     Ok(())
 }
 

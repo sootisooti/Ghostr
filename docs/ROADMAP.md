@@ -235,10 +235,16 @@ subscribes over blocking websockets — one thread per relay rather than an asyn
 reactor, matching `ureq` for anchoring and `std::net` for `serve`. Every event a
 relay returns is signature-verified before it is handed back, publishing is
 refused for any scope the vault has not enabled, and an `OK` is only believed
-when it names the event that was actually sent. What remains of M3 is wiring the
-transport into the engine — sync, restore, and the replica rules — plus NIP-59
-gift wrap, which is blocked on
-[SPEC §14 Q20](SPEC.md#14-open-questions).
+when it names the event that was actually sent. NIP-59 gift wrap is in: `Signer::gift_wrap` builds both layers, the throwaway
+key that hides the author is born and zeroized inside `ghostr-crypto`, and a
+remote signer refuses with a reason rather than improvising — NIP-46 has no
+method that could produce a signature under a throwaway key, so choosing a
+bunker and choosing gift wrap are mutually exclusive today (SPEC §14 Q20).
+
+**The workspace has no scaffolding left**: `cargo xtask scaffold-status` reports
+zero diverging bodies and zero crates carrying an allow block. What remains of
+M3 is wiring the transport into the engine — sync, restore, and the replica
+rules.
 
 **Scope**
 - `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with

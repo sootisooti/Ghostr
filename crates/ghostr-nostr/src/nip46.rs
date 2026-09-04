@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use ghostr_core::identity::{Account, KeyRef, PublicKey};
 use ghostr_crypto::event::{Signature, SignedEvent, UnsignedEvent};
+use ghostr_crypto::signer::GiftWrapEntropy;
 use ghostr_crypto::{Error as CryptoError, Signer};
 use serde::{Deserialize, Serialize};
 
@@ -385,5 +386,30 @@ impl<T: Nip46Transport> Signer for Nip46Signer<T> {
             .await
             .map_err(|_| CryptoError::DecryptFailed)?;
         Ok(plaintext.into_bytes())
+    }
+
+    async fn gift_wrap(
+        &self,
+        _key: KeyRef,
+        _recipient: &PublicKey,
+        _rumor: &UnsignedEvent,
+        _entropy: GiftWrapEntropy,
+    ) -> ghostr_crypto::Result<SignedEvent> {
+        // Refused, and this is a real limitation rather than a gap to fill in.
+        //
+        // NIP-46's method list is closed: connect, get_public_key, sign_event,
+        // nip44_encrypt, nip44_decrypt, ping. None of them produces a signature
+        // under a *throwaway* key, and there is no way to ask a bunker to make
+        // one — so the outer wrap cannot be built remotely.
+        //
+        // Building it here instead would mean this crate holding the ephemeral
+        // secret, which ARCHITECTURE §3 rule 4 puts in `ghostr-crypto` alone.
+        // Both halves being closed is why this refuses rather than improvises:
+        // remote signing and gift wrap are mutually exclusive today, and a user
+        // who has chosen a bunker should be told that, not handed an event whose
+        // author a relay can read.
+        Err(CryptoError::RemoteSigner {
+            reason: "NIP-46 has no gift-wrap method; a remote signer cannot hide the author",
+        })
     }
 }
