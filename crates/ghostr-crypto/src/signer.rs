@@ -11,6 +11,7 @@ use ghostr_core::identity::{Account, KeyRef, PublicKey};
 
 use crate::event::{Signature, UnsignedEvent};
 use crate::kdf::Dek;
+use crate::keystore::WrapEntropy;
 use crate::secret::SecretString;
 
 /// Anything that can produce a nostr signature.
@@ -150,15 +151,38 @@ pub trait Keystore: Send + Sync {
     /// Returns [`Error::Locked`](crate::Error::Locked) if locked.
     fn dek(&self) -> crate::Result<&Dek>;
 
-    /// Re-wraps the DEK under a new passphrase.
+    /// Re-wraps the vault's secrets under a new passphrase.
     ///
-    /// Cheap by design: the corpus is encrypted under the DEK, which does not
-    /// change, so a passphrase change rewraps 32 bytes.
+    /// Cheap by design: the corpus is encrypted under the DEK, which this does
+    /// not change. What gets rewrapped is the 64-byte seed — and, in a vault
+    /// whose identity was imported, the 32-byte identity key beside it. Both or
+    /// neither: a vault that rewraps one is one whose identity or whose journal
+    /// is unreachable.
+    ///
+    /// # Why the old passphrase, and why the entropy
+    ///
+    /// `old_passphrase` is required so this is an *authorised* operation rather
+    /// than something a passer-by can do to an unlocked laptop. Being unlocked
+    /// already gives an attacker the contents; it should not also hand them the
+    /// ability to lock the owner out.
+    ///
+    /// `entropy` is supplied rather than drawn because `OsRng` belongs in the
+    /// composition root (SPEC §11.4, CLAUDE.md §6), and because reusing the
+    /// stored salt would wrap a new KEK under parameters chosen for an old one
+    /// — letting anyone holding a copy of the old file test one guess against
+    /// both wrappings for the price of a single derivation.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Locked`](crate::Error::Locked) if locked, or
+    /// Returns [`Error::Locked`](crate::Error::Locked) if locked,
+    /// [`Error::BadPassphrase`](crate::Error::BadPassphrase) if
+    /// `old_passphrase` is wrong, or
     /// [`Error::Backend`](crate::Error::Backend) if the new wrapping cannot be
-    /// persisted.
-    fn change_passphrase(&mut self, new_passphrase: SecretString) -> crate::Result<()>;
+    /// persisted. On any error the stored file is left exactly as it was.
+    fn change_passphrase(
+        &mut self,
+        old_passphrase: SecretString,
+        new_passphrase: SecretString,
+        entropy: WrapEntropy,
+    ) -> crate::Result<()>;
 }

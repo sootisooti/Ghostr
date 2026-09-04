@@ -1442,33 +1442,43 @@ carries them.
 
 ---
 
-**Q19 — Where does a passphrase change get its salt?**
+**~~Q19 — Where does a passphrase change get its salt?~~ — resolved.**
 
-`Keystore::change_passphrase(new_passphrase)` cannot be implemented at that
-signature. Re-wrapping the seed needs a fresh Argon2id salt and a fresh
-XChaCha20 nonce; the method is handed neither, and drawing them inside
-`ghostr-crypto` would put `OsRng` outside the composition root, which §11.4 and
-CLAUDE.md §6 both forbid. Reusing the stored salt is worse than it looks: it
-wraps a new KEK under parameters chosen for an old one, and it lets anyone who
-kept a copy of the old file confirm a guess against both wrappings at the cost of
-one derivation.
+**Decided: `change_passphrase(old_passphrase, new_passphrase, entropy)`.** Both
+halves of the recommendation were taken — caller-supplied entropy *and* the old
+passphrase.
 
-The same gap exists on `Signer::nip44_encrypt`, which needs a per-message nonce.
-That one is resolved here: the nonce is a parameter, matching
-`FileKeystore::create`, which already takes its salt and nonce for exactly this
-reason.
+The entropy comes from the caller for the reason every other function in
+`ghostr-crypto` takes its randomness that way: `OsRng` belongs in the
+composition root (§11.4), and the operation becomes reproducible under a seeded
+RNG in tests. Reusing the stored salt was never an option — it wraps a new KEK
+under parameters chosen for an old one, and lets anyone holding a copy of the
+old file test one guess against both wrappings for a single derivation.
 
-> **Recommendation:** the same treatment —
-> `change_passphrase(new_passphrase, salt, nonce)`. It keeps entropy in the
-> composition root, makes the operation reproducible under a seeded RNG in tests,
-> and is consistent with every other function in the crate that needs randomness.
-> The alternative worth considering is requiring the **old** passphrase as well,
-> which would additionally stop a passer-by from re-keying an unlocked vault; the
-> cost is that it can no longer be offered as "you are already unlocked, pick a
-> new passphrase". Until this is settled the method returns
-> `Backend { operation: "change_passphrase needs a caller-supplied salt" }` — a
-> refusal rather than a wrong rewrap, because a rewrap that loses the seed is not
-> recoverable.
+Requiring the old passphrase turned out to cost nothing, because it was already
+structurally necessary. A rewrap needs the plaintext seed, and the plaintext
+seed is only reachable by unwrapping with the old KEK — so authorisation here is
+not a check that could later be removed "to simplify", it is a data dependency.
+The security property comes free with it: a passer-by at an unlocked laptop
+cannot re-key the vault. Being unlocked already hands them the contents; it
+should not also hand them the ability to lock the owner out.
+
+Two consequences worth recording, both found while implementing rather than
+while specifying:
+
+- **A vault whose identity was imported holds two wrapped secrets** (§14 Q21),
+  and a passphrase change must rewrap both. Rewrapping only the seed leaves a
+  vault whose journal opens under the new passphrase and whose identity opens
+  under nothing — a silent, asymmetric loss.
+- **The keystore write had to become atomic.** It truncated in place, which is
+  harmless when creating a vault and unrecoverable when re-keying one: the file
+  holds the only copy of the wrapped seed, and a crash between truncate and
+  write ends the chain permanently. It now writes a sibling and renames.
+
+The trait's own doc was wrong and is corrected: it claimed a passphrase change
+"rewraps 32 bytes" of DEK. It rewraps the 64-byte seed. The DEK is untouched,
+which is why the corpus stays readable and the user is not logged out of an
+operation they just authorised.
 
 ---
 
