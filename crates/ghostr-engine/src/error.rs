@@ -78,4 +78,7 @@ pub enum Error {
     /// Anchoring failed.
     #[error(transparent)]
     Anchor(#[from] ghostr_anchor::Error),
+    /// A relay or nostr codec error.
+    #[error("nostr error")]
+    Nostr(#[from] ghostr_nostr::Error),
 }

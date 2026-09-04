@@ -402,6 +402,13 @@ pub mod meta_key {
     pub const VECTOR_DIMENSIONS: &str = "vector_dimensions";
     /// The identity's home timezone.
     pub const HOME_TZ: &str = "home_tz";
+    /// Whether this device may seal, as `sealer` or `replica`.
+    ///
+    /// Kept in the vault rather than in the config file, because the config
+    /// file is a thing a user edits and this is a thing that forks a chain
+    /// (SPEC §14 Q10). A vault created by `init` is a sealer; one rebuilt by
+    /// `restore` is a replica until a human hands sealing over.
+    pub const DEVICE_ROLE: &str = "device_role";
     /// When the chain was created, as Unix milliseconds.
     pub const CREATED_AT: &str = "created_at";
 }

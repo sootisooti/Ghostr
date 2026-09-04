@@ -42,6 +42,7 @@ pub mod ops;
 pub mod runtime;
 pub mod serve;
 pub mod sources;
+pub mod sync;
 
 pub use engine::Engine;
 pub use error::{Error, Result};

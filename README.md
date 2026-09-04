@@ -190,6 +190,8 @@ $ ghostr egress log                        # everything that has left this devic
 $ ghostr anchor                            # stamp the chain tip via OpenTimestamps
 $ ghostr verify                            # re-derive the chain from genesis
 $ ghostr passphrase                        # rewrap the seed; the journal is untouched
+$ ghostr sync                              # encrypted backup to your relays
+$ ghostr restore                           # rebuild on a new machine, seed only
 ```
 
 Health and location logs are added as `Secret`, which means they never leave the

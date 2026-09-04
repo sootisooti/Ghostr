@@ -242,9 +242,14 @@ method that could produce a signature under a throwaway key, so choosing a
 bunker and choosing gift wrap are mutually exclusive today (SPEC §14 Q20).
 
 **The workspace has no scaffolding left**: `cargo xtask scaffold-status` reports
-zero diverging bodies and zero crates carrying an allow block. What remains of
-M3 is wiring the transport into the engine — sync, restore, and the replica
-rules.
+zero diverging bodies and zero crates carrying an allow block.
+
+The transport is wired into the engine. `ghostr sync` publishes each sealed day
+as one encrypted event under the *data* account, so a relay holds something only
+this vault can read and nothing that ties it to an identity; `ghostr restore`
+rebuilds the whole history on a machine that has the seed and nothing else. A
+restored machine is a **replica** and cannot seal, because two devices advancing
+one `seq` forks the chain (SPEC §14 Q10, now resolved).
 
 **Scope**
 - `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with
@@ -265,11 +270,17 @@ rules.
   `restore`.
 
 **Exit criteria**
-- [ ] Full restore from relays on a clean machine, seed only.
-- [ ] Two devices, one sealer: the replica cannot advance `seq`; a forced attempt
-      is rejected by the store's uniqueness constraint.
-- [ ] No plaintext identity data on any relay — asserted by a test that inspects
-      published event bodies (SPEC I9).
+- [x] Full restore from relays on a clean machine, seed only —
+      `a_second_machine_rebuilds_the_chain_from_relays_alone`.
+- [x] Two devices, one sealer: the replica cannot advance `seq`
+      (`a_restored_machine_cannot_advance_the_chain`). Refused at the engine
+      before any state is touched, and the store's own duplicate-`seq` check
+      remains behind it — the replica rule is what makes the refusal legible
+      rather than a constraint violation surfacing much later.
+- [x] No plaintext identity data on any relay — asserted over what `sync`
+      actually sent, for footage compiled from real notes rather than a
+      hand-built event, and including that the identity pubkey never appears
+      (`no_plaintext_and_no_identity_reaches_a_relay`).
 - [x] Every ghost-authored event carries disclosure tags; a test proves an event
       without them cannot be constructed — `GhostNoteBuilder` is the only
       constructor and emits them unconditionally
@@ -281,8 +292,10 @@ rules.
       ciphertext — `nip44_bucketing_already_quantises_length` is what holds that
       claim to account, and a ciphertext-side padder would only have corrupted
       the payload.
-- [ ] Anchor receipts default to local-only; publishing requires an explicit flag
-      and uses the anchor key (SPEC Q5).
+- [x] Anchor receipts default to local-only; publishing requires naming the
+      `anchor_receipts` scope in config. A fresh vault publishes nothing at all,
+      and enabling `backup` does not enable liveness
+      (`anchor_receipts_are_not_published_by_default`).
 - [x] The kind block is checked against the live registry — fetched
       2026-08-27, no kind in 31700–31899 is registered, so 31780–31789 is free.
       **NIP not yet submitted**, so the block is unclaimed rather than ours; the

@@ -150,6 +150,19 @@ enum Command {
     /// Show vault status.
     Status,
 
+    /// Publish sealed footage to the configured relays, encrypted.
+    ///
+    /// A backup, not a broadcast: every day is encrypted to this vault's own
+    /// data key, so a relay stores something only this vault can read.
+    Sync,
+
+    /// Rebuild this vault's history from relays.
+    ///
+    /// For a machine that has the seed and nothing else. The result is a
+    /// *replica*: it holds the history and does not seal, because the machine
+    /// that has been sealing still is (SPEC §14 Q10).
+    Restore,
+
     /// Change the passphrase that unlocks this vault.
     ///
     /// Cheap: the journal is encrypted under a key the passphrase does not
@@ -308,6 +321,8 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { import, nsec, tz } => cmd_init(&dir, import, nsec, &tz),
         Command::Passphrase => cmd_passphrase(&dir),
+        Command::Sync => cmd_sync(&dir),
+        Command::Restore => cmd_restore(&dir),
         Command::Ingest { path } => cmd_ingest(&dir, &path),
         Command::Memoria {
             date,
@@ -460,6 +475,74 @@ fn cmd_init(dir: &std::path::Path, import: bool, nsec: bool, tz: &str) -> Result
 fn fill_random(buf: &mut [u8]) {
     use ghostr_core::time::Rng as _;
     ghostr_engine::runtime::OsRng.fill(buf);
+}
+
+/// Builds a relay client from the vault's config.
+///
+/// Refuses rather than defaulting to a relay list of our choosing: which relays
+/// a vault talks to is the user's decision, and picking one for them would put
+/// their encrypted history somewhere they never named.
+fn relay_client(engine: &Engine) -> Result<ghostr_nostr::client::websocket::WebsocketRelayClient> {
+    let config = engine.config()?;
+    if config.relays.is_empty() {
+        anyhow::bail!("no relays configured — add them to config.toml as `relays = [\"wss://…\"]`");
+    }
+    Ok(ghostr_nostr::client::websocket::WebsocketRelayClient::new(
+        config.relays.clone(),
+        config.enabled_scopes(),
+    ))
+}
+
+/// Publishes sealed footage to relays.
+fn cmd_sync(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let report =
+        block_on(ghostr_engine::sync::sync(&engine, &relays)).context("syncing to relays")?;
+
+    println!("published      {}", report.published);
+    println!("already there  {}", report.already_present);
+    if !report.failed.is_empty() {
+        // Named rather than counted: a day that failed is a day the user may
+        // want to retry, and "3 failed" does not say which.
+        println!("failed         {:?}", report.failed);
+    }
+    Ok(())
+}
+
+/// Rebuilds history from relays.
+fn cmd_restore(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let report = block_on(ghostr_engine::sync::restore(&engine, &relays))
+        .context("restoring from relays")?;
+
+    println!("recovered  {} day(s)", report.recovered);
+    if let Some(tip) = report.tip {
+        println!("tip        seq {tip}");
+    }
+    if report.rejected > 0 {
+        println!(
+            "ignored    {} event(s) this vault could not read",
+            report.rejected
+        );
+    }
+    println!();
+    println!("  this device is now a replica: it holds the history and does not seal.");
+    println!("  exactly one device per chain advances `seq`, and a second one would fork it.");
+    Ok(())
+}
+
+/// Drives one async call to completion.
+///
+/// The composition root owns the runtime, as it does for the model path. `rt`
+/// only — every I/O path underneath is blocking, so there is no reactor to
+/// enable.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map(|rt| rt.block_on(future))
+        .unwrap_or_else(|_| unreachable!("a current-thread runtime cannot fail to build"))
 }
 
 /// Changes the passphrase, asking for the old one first.
