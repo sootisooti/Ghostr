@@ -88,6 +88,14 @@ pub enum PublishScope {
     /// Always permitted. A revocation the user cannot publish because they
     /// disabled publishing is a revocation that does not happen.
     Revocation,
+    /// NIP-46 requests to a remote signer.
+    ///
+    /// Its own scope rather than folded into another: talking to a bunker is a
+    /// different decision from backing the journal up, and a user who enabled
+    /// one has not thereby agreed to the other. Enabled implicitly when a signer
+    /// is configured, since a vault that cannot reach its own signer cannot sign
+    /// at all.
+    RemoteSigner,
 }
 
 /// A relay query.
@@ -101,6 +109,11 @@ pub struct Filter {
     pub raw_kinds: Vec<u16>,
     /// Restrict to these `d` tags.
     pub d_tags: Vec<String>,
+    /// Restrict to these `p` tags — events *addressed to* these pubkeys.
+    ///
+    /// Needed for NIP-46, where a signer's reply is addressed to the client
+    /// rather than tagged by identifier.
+    pub p_tags: Vec<PublicKey>,
     /// Only events at or after this Unix second.
     pub since: Option<u64>,
     /// Only events before this Unix second.

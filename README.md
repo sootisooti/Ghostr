@@ -180,6 +180,7 @@ $ ghostr thread list                       # what is still open
 $ ghostr footage list                      # sealed days, with their chain links
 $ ghostr footage show 1                    # highlights, people, mood, open threads
 $ ghostr persona distill                   # propose a model of you; read the diff
+$ ghostr persona adopt                     # nothing uses it until you adopt it
 $ ghostr persona show                      # what the ghost thinks you are like
 $ ghostr quest issue                       # today's claims, answers committed first
 $ ghostr quest list                        # answer them; the ghost's answer is sealed
@@ -233,6 +234,51 @@ existed — plus a ghost distilled by counting rather than guessing, and a daily
 loop that checks it against you and reports a number with its evidence attached.
 What a model adds is the three quest kinds that need one to write their prompt,
 and opinions and lore in the persona — see the [roadmap](docs/ROADMAP.md).
+
+### On your phone
+
+The daily loop is a thing you do in a spare minute, which means it has to be on
+the device you actually carry. `ghostr serve` puts it there — the vault stays on
+your computer and the phone is only a screen onto it.
+
+**Two thresholds first**, because both are invisible until you hit them:
+
+| Before this works | You need |
+| --- | --- |
+| `ghostr persona distill` | **20 sealed memories.** Roughly three weeks of journalling, or one `source sync` over notes you already have. |
+| `ghostr fidelity` | **10 scored quests.** A score over fewer is noise, so there is not one. |
+
+Then, on the computer holding the vault:
+
+```console
+$ ghostr serve --http 0.0.0.0:7749 --lan
+
+  THIS VAULT IS NOW ON THE NETWORK, at 0.0.0.0:7749.
+
+  Anyone who can reach that address and holds the token below can read
+  your memories, your quests, and your score. [...]
+
+open  http://192.168.1.42:7749/#t=b23c0486...
+
+  point a phone camera at this:
+
+      █▀▀▀▀▀█  ▀▄▄▀▄▀ ▄ █ █ ▄▀█  █ █▀▀█ █▀▀▀▀▀█
+      █ ███ █ █ ▀▄ █▀▀▄ ▄▄▀▄▄   ▀██▀▀ █ █ ███ █
+      ...
+```
+
+Point the camera at the code and the phone opens the page — the alternative is
+typing a 64-character token on a phone keyboard, which nobody does twice.
+
+In Safari, **Share → Add to Home Screen** gives it an icon and drops the browser
+chrome, so it opens like an app.
+
+`--lan` is a second flag on purpose: `--http 0.0.0.0:7749` is one keystroke away
+from `--http 127.0.0.1:7749`, and the difference is who on the wifi can read your
+journal. The token is the only thing standing between them and it, and this is
+plaintext HTTP — so use it on a network you trust, and stop the server when you
+are done. There is no account and no password reset: the token is printed once,
+and restarting `serve` mints a new one.
 
 ## Platform constraints
 

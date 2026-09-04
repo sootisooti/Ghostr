@@ -13,6 +13,7 @@ name = "ghostr"
 path = "src/main.rs"
 
 [dependencies]
+qrcode = { workspace = true }
 ghostr-engine = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

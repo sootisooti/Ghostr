@@ -921,6 +921,49 @@ pub(crate) fn fidelity(score: &FidelityScore) -> String {
 /// # Errors
 ///
 /// Returns an error if the local addresses cannot be read.
+/// The first URL the banner offers, which is the one the QR code encodes.
+fn first_url(bind: &Bind, token: &Token) -> Option<String> {
+    let addr = bind.http?;
+    if ghostr_engine::serve::is_loopback(&addr) {
+        // A loopback URL in a QR code is useless to a phone — it would resolve
+        // to the phone itself. Offered anyway: it is still the correct URL for
+        // this machine, and a camera pointed at it on a laptop screen opens the
+        // right page on that laptop.
+        return Some(format!("http://{addr}/#t={}", token.expose()));
+    }
+    local_addresses(addr.port())
+        .into_iter()
+        .next()
+        .map(|host| format!("http://{host}/#t={}", token.expose()))
+}
+
+/// Renders a URL as a QR code in unicode half-blocks.
+///
+/// Returns `None` rather than failing the whole banner: a URL too long to
+/// encode, or any other encoder complaint, should cost the convenience and not
+/// the thing the user actually came for, which is the URL printed above it.
+fn qr_block(url: &str) -> Option<String> {
+    use qrcode::render::unicode;
+
+    let code = qrcode::QrCode::new(url.as_bytes()).ok()?;
+    let rendered = code
+        .render::<unicode::Dense1x2>()
+        // Two modules of quiet zone rather than the standard four: a terminal
+        // is not paper, and a code that scrolls off the top scans no better for
+        // being correctly margined.
+        .quiet_zone(true)
+        .module_dimensions(1, 1)
+        .build();
+
+    // Indented to sit under the surrounding banner text.
+    Some(
+        rendered
+            .lines()
+            .map(|line| format!("  {line}\n"))
+            .collect::<String>(),
+    )
+}
+
 pub(crate) fn serve_banner(
     dir: &std::path::Path,
     bind: &Bind,
@@ -962,6 +1005,19 @@ pub(crate) fn serve_banner(
                 "\n  the token is in the URL fragment, which browsers never send to a\n  \
                           server and proxies never log. It is printed once, here.\n",
             );
+
+            // A QR code, because the alternative is typing a 64-character token
+            // on a phone keyboard. That is the single thing standing between
+            // "the loop runs" and "the loop runs on the device you actually
+            // carry", and it is worth one small dependency.
+            //
+            // The first URL is the one encoded: on a LAN bind there may be
+            // several addresses and only one can be a code, so it is the first
+            // one printed rather than an arbitrary pick.
+            if let Some(code) = first_url(bind, token).as_deref().and_then(qr_block) {
+                out.push_str("\n  point a phone camera at this:\n\n");
+                out.push_str(&code);
+            }
         }
     }
 

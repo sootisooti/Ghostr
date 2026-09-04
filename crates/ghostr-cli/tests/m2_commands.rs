@@ -42,7 +42,10 @@ fn issuing_before_a_persona_exists_says_what_to_run() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no persona yet"))
-        .stderr(predicate::str::contains("persona propose"));
+        // Asserts the real command name. The previous version asserted
+        // `persona propose`, which does not exist — so the test that should
+        // have caught the broken instruction was pinning it in place.
+        .stderr(predicate::str::contains("persona distill"));
 }
 
 /// A new vault has nothing to score. Saying so beats printing 100% over zero

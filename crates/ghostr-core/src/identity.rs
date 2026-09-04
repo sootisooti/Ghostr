@@ -146,6 +146,15 @@ pub enum Account {
     Anchor,
     /// `m/44'/1237'/3'/0/0` — encrypts app data published to relays.
     Data,
+    /// `m/44'/1237'/4'/0/0` — the client half of a NIP-46 conversation.
+    ///
+    /// Signs and encrypts the kind-24133 envelopes carrying requests to a remote
+    /// signer, and does nothing else. That is the point: whichever key does this
+    /// becomes visible to every relay carrying the conversation as *the thing
+    /// that talks to this bunker*, so it must not also be the key publishing
+    /// footage or ghost notes — a relay would then know which vault uses which
+    /// signer (SPEC §8.1, §14 Q22).
+    SignerChannel,
 }
 
 impl Account {
@@ -157,6 +166,7 @@ impl Account {
             Self::Ghost => 1,
             Self::Anchor => 2,
             Self::Data => 3,
+            Self::SignerChannel => 4,
         }
     }
 

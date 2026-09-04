@@ -122,6 +122,11 @@ ureq = { version = "2", default-features = false, features = ["tls", "native-cer
 # deliberately refused, for a handful of relay connections that a thread each
 # handles fine.
 tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+# A QR code for the serve banner, so a phone can reach the vault by camera
+# rather than by typing a 64-character token. `default-features = false` drops
+# the `image` and `svg` renderers: this only ever renders unicode blocks to a
+# terminal, and an image encoder is a large dependency for a thing nobody sees.
+qrcode = { version = "0.14", default-features = false }
 
 # --- M0: dev-only -----------------------------------------------------------
 tempfile = "3"

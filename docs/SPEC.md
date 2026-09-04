@@ -852,11 +852,24 @@ Ghostr uses **NIP-06**: a BIP-39 mnemonic, BIP-32 derivation at
 | `1'` | **Ghost key** | The ghost's own identity. Signs ghost-authored content. Rotatable. |
 | `2'` | **Anchor key** | Publishes anchor receipts, if the user opts into publishing them at all. Unlinkable from `0'` unless deliberately linked. |
 | `3'` | **Data key** | Encrypts app-data events published to relays (NIP-44 self-encryption). |
+| `4'` | **Signer-channel key** | Signs and encrypts the kind-24133 envelopes of a NIP-46 conversation, and nothing else (§14 Q22). |
 
 Separating these is what makes selective disclosure possible. A user can publish
 anchor receipts from account `2'` and prove liveness of a chain without revealing
 whose chain it is; they can point a NIP-46 remote signer at account `0'` and keep
 the identity key off the machine entirely while the ghost still runs.
+
+`4'` exists for the same reason and is easy to miss. Pointing a remote signer at
+`0'` means a *conversation*, carried by relays, and whichever key signs those
+envelopes is visible to every relay carrying it as the thing that talks to that
+signer. Using `3'` for it would tell a relay that the vault publishing this
+footage uses that bunker — undoing, in one observation, the separation the other
+accounts buy. `4'` signs nothing else, so what a relay learns is only that *some*
+Ghostr vault is talking to that signer.
+
+Note that `0'` is the one account that may not exist locally at all: an imported
+`nsec` or a remote signer replaces it (§14 Q21). `1'` through `4'` always come
+from the vault seed.
 
 The mnemonic is entered or generated once at `ghostr init`, never written to disk in
 plaintext, and stored per §10.1.
@@ -1555,3 +1568,41 @@ second is impossible until the DEK stops depending on the identity secret.
 > Consequence for §8.1: the account table stays, but "derived from the seed" is
 > true of `1'`, `2'` and `3'` only. `0'` becomes *the identity account*, however
 > it is held.
+
+---
+
+**~~Q22 — Which key signs the NIP-46 envelopes?~~ — resolved.**
+
+**Decided: a fifth derived account, `m/44'/1237'/4'/0/0`, used for nothing else.**
+Written into §8.1 as the signer-channel key and implemented as
+`Account::SignerChannel`.
+
+NIP-46 has two keys on the client's side. The **user's key** lives in the remote
+signer and is the point of the exercise. A **local keypair** signs and encrypts
+the kind-24133 events carrying each request — NIP-46 calls it `local_keypair`,
+and it is ours to choose.
+
+Whatever we choose becomes visible to every relay carrying the conversation, as
+*the thing that talks to this bunker*. That is a new observation, and §8.1
+separates accounts precisely so one observation cannot be joined to another:
+
+- **`Account::Data` or `Account::Ghost`** would have worked with no new code, and
+  are wrong for the same reason. A relay already sees those keys publishing
+  footage or ghost notes, so reusing one here tells it *that vault* uses *that
+  signer* — a link between a person's journal and whoever runs their bunker,
+  given away to undo the separation every other account buys.
+- **`Account::Identity`** is not available: it is the key the signer holds.
+- **An ephemeral key per session** is the most private option and is what
+  NIP-46's wording suggests, but the signer then sees a new client on every
+  restart and the user re-authorises each time. A permission prompt that fires
+  daily is a permission prompt people learn to accept without reading, which
+  costs more security than the unlinkability buys.
+
+A dedicated account is stable, so a bunker recognises the same client across
+restarts and the user authorises once; derived from the vault seed, so it
+survives a reinstall with no extra backup; and single-purpose, so what a relay
+learns is "some Ghostr vault talks to this bunker" rather than which ghost,
+which chain, or which journal.
+
+The cost, recorded rather than glossed: this grows the account table §8.1 had
+fixed at four, and every vault now derives one more key it may never use.
