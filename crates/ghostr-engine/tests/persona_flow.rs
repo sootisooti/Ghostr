@@ -135,6 +135,96 @@ fn distilling_twice_over_the_same_corpus_gives_the_same_version() {
     assert_eq!(a.model.version.content, b.model.version.content);
 }
 
+/// A self-reported source feeds the claims and never the voice, end to end.
+///
+/// The unit tests in `ghostr-persona` hold the rule; this holds the *wiring*,
+/// which is where it was wrong. `propose_persona` builds two slices from the
+/// store's trust levels, and if it built one — as it did before this test
+/// existed — a health or people log could evidence nothing at all, and the log
+/// would be dead weight in the vault.
+#[test]
+fn a_self_reported_source_feeds_claims_but_never_the_voice() {
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+
+    let home = tempfile::tempdir().unwrap();
+    let engine = vault(&home.path().join("vault"));
+    load(&engine, TrustLevel::FirstParty);
+
+    // A people log: the user asserting they saw someone. Long enough to be an
+    // exemplar candidate, so "it is not in the voice" is a real assertion
+    // rather than one the length filter would satisfy on its own.
+    let dek = engine.dek().expect("dek");
+    let source = ghostr_core::ids::SourceId::new(9_999, [9u8; 10]);
+    engine
+        .store()
+        .upsert_source_with(
+            dek,
+            &ghostr_store::sqlite::NewSourceRow {
+                id: source,
+                kind_tag: "structured_log",
+                config: "{\"location\":\"/health\"}",
+                trust: TrustLevel::SelfReported,
+                sensitivity: Sensitivity::Private,
+            },
+            [7u8; 24],
+        )
+        .expect("source");
+
+    let logged = logged_memory(source);
+    engine
+        .store()
+        .put_memory(dek, &logged, engine.nonce())
+        .expect("put");
+    seal_all(&engine);
+
+    let model = ops::propose_persona(&engine).expect("propose").model;
+
+    // It fed the distillation: `derived_from` is what the model admits reading.
+    assert!(
+        model.derived_from.contains(&logged.id),
+        "a self-reported memory must be able to feed the model"
+    );
+    // And it is not in the ghost's mouth.
+    assert!(
+        !model.facets.voice.exemplars.contains(&logged.id),
+        "a self-reported memory became a voice exemplar"
+    );
+}
+
+/// A row a structured log would produce, long enough to rank as an exemplar.
+fn logged_memory(source: ghostr_core::ids::SourceId) -> ghostr_core::memory::Memory {
+    use ghostr_core::memory::{Memory, MemoryBody, MemoryKind, Provenance};
+
+    let text = "Saw Nan at the clinic on Tuesday morning again, third week running now";
+    Memory {
+        id: ghostr_core::ids::MemoryId::new(1_767_000_000_000, [3u8; 10]),
+        source_id: source,
+        occurred_at: Some(Timestamp::new(1_767_000_000_000, 0)),
+        ingested_at: Timestamp::new(1_767_000_000_000, 0),
+        kind: MemoryKind::Relationship,
+        body: MemoryBody {
+            text: text.to_owned(),
+            structured: None,
+            redactions: Vec::new(),
+        },
+        entities: Vec::new(),
+        salience: 0.4,
+        sensitivity: ghostr_core::sensitivity::Sensitivity::Private,
+        provenance: Provenance {
+            source_id: source,
+            external_id: Some("health.jsonl:1".to_owned()),
+            url: None,
+            raw_hash: ghostr_core::hash::tagged_hash(
+                ghostr_core::hash::Tag::MemoryLeaf,
+                b"health.jsonl:1",
+            ),
+        },
+        salt: [5u8; 32],
+        supersedes: None,
+        embedding: None,
+    }
+}
+
 /// THREAT_MODEL §T7. A feed is not the user's voice, so its content never
 /// becomes an exemplar the ghost speaks from — and with nothing else in the
 /// vault there is not enough first-party corpus to distil at all.

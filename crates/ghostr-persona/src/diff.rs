@@ -322,6 +322,7 @@ mod tests {
             &crate::distill::Corpus {
                 footage: &[],
                 first_party: &refs,
+                claimable: &refs,
             },
             &[],
             Timestamp::new(0, 0),

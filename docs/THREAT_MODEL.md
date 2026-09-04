@@ -326,12 +326,22 @@ user, or — worst case — an injected instruction driving a tool call.
   does not open the other.
 - **Footage-derived claims are filtered by trust.** Footage covers the whole
   day, third-party memories included, so a person beat or a thread can rest on a
-  note the user never wrote. Distillation takes the first-party slice as the set
-  of memories a claim may rest on: a beat or thread with no first-party evidence
-  contributes neither the claim nor the frequency behind it. Without this, a
-  feed note naming `@attacker` produced a `Relation` — which is the second thing
-  this section says an injection is trying to plant, and the one the trust level
-  alone did not stop.
+  note the user never wrote. Distillation takes a set of memories a claim may
+  rest on, and a beat or thread with no evidence in it contributes neither the
+  claim nor the frequency behind it. Without this, a feed note naming
+  `@attacker` produced a `Relation` — which is the second thing this section
+  says an injection is trying to plant, and the one the trust level alone did
+  not stop.
+- **The two rules are two sets, because `TrustLevel` says they are two rules.**
+  `may_be_exemplar` admits `FirstParty` alone and decides the voice; the ghost
+  speaks from that slice and nothing else. `may_source_stance` also admits
+  `SelfReported` and decides what may evidence a claim, because a people or
+  health log *is* the user asserting something about themselves. Collapsing
+  them into one set breaks one of the two: widened, a step count becomes an
+  utterance the ghost speaks; narrowed, a habit tracker can teach the ghost
+  nothing. The predicates are the enforcement point rather than a description
+  of one — the engine calls them instead of comparing to `FirstParty`, so the
+  rule has one definition.
 - **A relay is not believed about what it served.** The feed adapter re-checks
   every event's signature, author and kind after the transport has already
   checked them, counts what it refused, and surfaces the count — so a relay

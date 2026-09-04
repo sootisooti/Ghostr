@@ -53,19 +53,28 @@ const MAX_CADENCE_DAYS: f32 = 90.0;
 pub struct Corpus<'a> {
     /// Sealed days, oldest first.
     pub footage: &'a [Footage],
-    /// The memories those days refer to, first-party only.
+    /// The memories eligible to be voice exemplars.
     ///
-    /// The caller filters, and this slice is the trust boundary for *every*
-    /// deterministic facet, not only voice (THREAT_MODEL §T7).
-    ///
-    /// Voice reads it directly: [`crate::voice::profile`] has no path to
-    /// anything outside it. Relationships and routines are read out of
-    /// [`Corpus::footage`], which is compiled from the whole day and therefore
-    /// includes third-party memories, so they take the *ids* here as the set of
-    /// memories a claim may rest on. Without that, a stranger's note could
-    /// evidence a `Relation` — which is the second thing §T7 says an injection
-    /// is trying to plant, and the one the trust level alone does not stop.
+    /// The caller filters on
+    /// [`TrustLevel::may_be_exemplar`](ghostr_core::sensitivity::TrustLevel::may_be_exemplar),
+    /// and [`crate::voice::profile`] has no path to anything outside this slice
+    /// (THREAT_MODEL §T7).
     pub first_party: &'a [&'a Memory],
+    /// The memories a claim may rest on.
+    ///
+    /// Filtered on
+    /// [`TrustLevel::may_source_stance`](ghostr_core::sensitivity::TrustLevel::may_source_stance),
+    /// so it also admits `SelfReported` — a people or health log is the user
+    /// asserting something about themselves, and excluding it would leave a
+    /// habit tracker unable to teach the ghost a habit.
+    ///
+    /// Relationships and routines are read out of [`Corpus::footage`], which is
+    /// compiled from the *whole* day and therefore includes third-party
+    /// memories. They take the ids here as the set a claim may rest on. Without
+    /// that, a stranger's note could evidence a `Relation` — the second thing
+    /// §T7 says an injection is trying to plant, and the one the trust level
+    /// alone does not stop.
+    pub claimable: &'a [&'a Memory],
 }
 
 /// Distils the deterministic facets.
@@ -99,9 +108,10 @@ pub fn distill(
         });
     }
 
-    // Which memories a claim may rest on. Built once, from the same slice voice
-    // is built from, so the two facets cannot disagree about what is trusted.
-    let trusted: BTreeSet<MemoryId> = corpus.first_party.iter().map(|m| m.id).collect();
+    // Which memories a claim may rest on. Wider than the voice slice on purpose:
+    // narrowing it to first-party would mean a people log could never evidence
+    // a relationship, which is the one thing a people log is for.
+    let trusted: BTreeSet<MemoryId> = corpus.claimable.iter().map(|m| m.id).collect();
 
     let mut facets = Facets {
         voice: crate::voice::profile(corpus.first_party),
@@ -126,7 +136,12 @@ pub fn distill(
         parent: prior.map(|p| p.version),
         created_at: now,
         facets,
-        derived_from: corpus.first_party.iter().map(|m| m.id).collect(),
+        // The wider slice, because it is the honest answer to "what fed this":
+        // a memory that evidenced a relationship fed the model even though it
+        // was never eligible to be a voice exemplar. Recording only the voice
+        // slice would leave a claim traceable to a memory the model does not
+        // admit reading (THREAT_MODEL §T7's traceability).
+        derived_from: corpus.claimable.iter().map(|m| m.id).collect(),
         diff: None,
     };
 
@@ -661,10 +676,23 @@ mod tests {
     use super::*;
 
     fn distil(footage: &[Footage], memories: &[Memory]) -> crate::Result<PersonaModel> {
-        let refs: Vec<&Memory> = memories.iter().collect();
+        distil_with(footage, memories, memories)
+    }
+
+    /// Distils with the two slices apart: `voice` may be an exemplar, `claims`
+    /// may evidence a claim. Every real vault has `voice` as a subset of
+    /// `claims`, and the tests that care about the difference say so here.
+    fn distil_with(
+        footage: &[Footage],
+        voice: &[Memory],
+        claims: &[Memory],
+    ) -> crate::Result<PersonaModel> {
+        let voice_refs: Vec<&Memory> = voice.iter().collect();
+        let claim_refs: Vec<&Memory> = claims.iter().collect();
         let corpus = Corpus {
             footage,
-            first_party: &refs,
+            first_party: &voice_refs,
+            claimable: &claim_refs,
         };
         distill(None, &corpus, &[], Timestamp::new(1_000, 0), 1)
     }
@@ -679,6 +707,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let leaked = PersonaDelta {
             facet: Facet::Opinion,
@@ -702,6 +731,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let leaked = PersonaDelta {
             facet: Facet::Opinion,
@@ -830,6 +860,71 @@ mod tests {
         for relation in &model.facets.relationships {
             assert!(!relation.evidence.contains(&stranger.id));
         }
+    }
+
+    /// A self-reported source may evidence a relationship, and may never be a
+    /// voice exemplar.
+    ///
+    /// `TrustLevel` draws that line itself — `may_source_stance` admits
+    /// `SelfReported`, `may_be_exemplar` does not — and this is the test that
+    /// makes the two predicates mean something rather than being documentation.
+    ///
+    /// The failure it guards: a people log records "saw Nan" every week, and a
+    /// ghost that filtered claims down to prose would never learn the one fact
+    /// that log exists to record.
+    #[test]
+    fn a_self_reported_memory_may_evidence_a_claim_but_not_the_voice() {
+        use ghostr_core::sensitivity::TrustLevel;
+
+        // The rule, as the type states it.
+        assert!(TrustLevel::SelfReported.may_source_stance());
+        assert!(!TrustLevel::SelfReported.may_be_exemplar());
+
+        let prose = corpus_memories(30);
+        // Longer than every prose memory in the corpus, so it sorts *first*
+        // among exemplar candidates. A short row would be filtered out by
+        // `MIN_EXEMPLAR_WORDS` and the assertion below would pass whatever the
+        // code did — which is exactly how the first draft of this test passed.
+        let logged = memory(
+            210,
+            "Saw Nan at the clinic on Tuesday morning again, third week running now",
+        );
+        let mut claims = prose.clone();
+        claims.push(logged.clone());
+
+        let footage: Vec<Footage> = (0..6)
+            .map(|seq| day(seq + 1, vec![beat(entity(4), logged.id)], Vec::new()))
+            .collect();
+
+        let model = distil_with(&footage, &prose, &claims).expect("distil");
+
+        // The claim is made, and rests on the logged memory.
+        let relation = model
+            .facets
+            .relationships
+            .iter()
+            .find(|r| r.entity == entity(4))
+            .expect("a people log must be able to evidence a relationship");
+        assert!(relation.evidence.contains(&logged.id));
+
+        // And the voice never saw it. Checked by id, because `exemplars` is a
+        // list of `MemoryId` — searching a `Debug` render for the text would
+        // never have found anything and would have passed unconditionally.
+        assert!(
+            !model.facets.voice.exemplars.contains(&logged.id),
+            "a logged row became a voice exemplar"
+        );
+        // Nor through the lexicon, which is built from the same slice: a word
+        // that appears only in the logged row must not become a lexical tic.
+        assert!(
+            !model
+                .facets
+                .voice
+                .lexicon
+                .iter()
+                .any(|t| t.phrase.eq_ignore_ascii_case("clinic")),
+            "a logged row's vocabulary reached the voice"
+        );
     }
 
     /// The same rule for routines: a thread the user never wrote in is not
@@ -1040,6 +1135,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let next =
             distill(Some(&prior), &corpus, &[], Timestamp::new(2_000, 0), 2).expect("distil");
@@ -1072,6 +1168,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let correction = MemoryId::new(999, [9u8; 10]);
         let delta = PersonaDelta {
@@ -1114,6 +1211,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let delta = PersonaDelta {
             facet: Facet::Opinion,
@@ -1151,6 +1249,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let delta = PersonaDelta {
             facet: Facet::Opinion,
