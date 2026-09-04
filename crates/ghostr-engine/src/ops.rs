@@ -21,7 +21,7 @@ pub use ghostr_persona::CandidateVersion;
 use ghostr_store::memory::TimeRange;
 use ghostr_store::sqlite::{AnchorRecord, AnchorRecordState};
 
-use crate::engine::Engine;
+use crate::engine::{DeviceRole, Engine};
 
 /// At most this many highlights per day, so a recap stays readable.
 const MAX_HIGHLIGHTS: usize = 8;
@@ -96,6 +96,22 @@ pub fn ingest(engine: &Engine, path: &std::path::Path) -> crate::Result<IngestRe
 /// sealed, or [`Error::Store`](crate::Error::Store) if the seal would fork or
 /// gap the chain.
 pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome> {
+    // Checked before anything else, including before the already-sealed check:
+    // a replica must not advance `seq` at all, and the cheapest way to be sure
+    // of that is to refuse before any state is read or written.
+    //
+    // Two devices sealing the same `seq` forks the chain, and a fork has no
+    // resolution rule — there is nothing that says which side is the real
+    // history (I3, SPEC §14 Q10). So this refuses rather than merging.
+    if engine.device_role()? == DeviceRole::Replica {
+        return Err(crate::Error::Config {
+            detail: "this device is a replica and cannot seal — \
+                     exactly one device per chain advances `seq`, and a second \
+                     one would fork it"
+                .to_owned(),
+        });
+    }
+
     let tz = engine.home_tz()?;
 
     if let Some(existing) = engine.store().date_is_sealed(date)? {

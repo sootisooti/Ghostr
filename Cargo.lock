@@ -618,12 +618,14 @@ dependencies = [
  "ghostr-crypto",
  "ghostr-engine",
  "ghostr-llm",
+ "ghostr-nostr",
  "ghostr-persona",
  "ghostr-quests",
  "ghostr-store",
  "predicates",
  "qrcode",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -681,6 +683,7 @@ dependencies = [
  "ghostr-ingest",
  "ghostr-llm",
  "ghostr-memoria",
+ "ghostr-nostr",
  "ghostr-persona",
  "ghostr-quests",
  "ghostr-store",

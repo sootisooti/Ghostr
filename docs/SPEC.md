@@ -1313,16 +1313,31 @@ empirical basis yet.
 
 ---
 
-**Q10 — Which device seals, when there are several?**
+**~~Q10 — Which device seals, when there are several?~~ — resolved.**
 
-Two devices sealing the same `seq` forks the chain, and a forked chain is
-worthless.
+**Decided: exactly one sealing device per chain**, recorded in the vault as
+`DeviceRole`. A vault created by `init` is a **sealer**; one rebuilt by
+`restore` is a **replica**, which ingests, answers quests and reads, but never
+advances `seq`. `ops::memoria` refuses on a replica before it reads or writes
+anything.
 
-> **Recommendation:** exactly one **sealing device** per chain, named in the ghost
-> manifest. Other devices are ingest/read replicas: they can add memories and
-> answer quests, but only the sealer runs Memoria and advances `seq`. Handover is
-> an explicit, signed manifest update. Automatic election is tempting and wrong —
-> partition plus election equals fork.
+Two devices sealing the same `seq` forks the chain, and a fork has no
+resolution rule — nothing says which side is the real history (I3). Automatic
+election was rejected as the recommendation said: partition plus election is a
+fork with extra steps.
+
+The role lives in the store's `meta` table rather than in `config.toml`,
+because the config file is a thing people edit and this is a thing that
+destroys a chain. That is a speed bump rather than an enforcement boundary —
+the owner of a vault can always change their own data — and it is aimed at the
+accident, which is the realistic failure: two machines, one seed, nobody
+thinking about `seq`.
+
+**Handover is still manual and still unbuilt.** The recommendation named the
+ghost manifest as where the sealing device is declared, and manifests are not
+published yet, so today a replica stays a replica. That is the safe direction
+to be incomplete in: the failure mode of "cannot hand over yet" is
+inconvenience, and the failure mode of an automatic handover is a forked chain.
 
 ---
 

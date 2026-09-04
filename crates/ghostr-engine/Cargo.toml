@@ -24,6 +24,10 @@ ghostr-persona = { workspace = true }
 ghostr-quests = { workspace = true }
 serde_json = { workspace = true }
 ghostr-anchor = { workspace = true }
+# The relay transport and the event codec. The composition root is where a
+# vault's relays get wired in, and the only crate that may hold both a store
+# and a network client.
+ghostr-nostr = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 serde = { workspace = true }
@@ -47,6 +51,8 @@ llm-local = ["llm", "ghostr-llm/local-ollama"]
 llm-remote = ["llm", "ghostr-llm/remote"]
 
 [dev-dependencies]
+# The relay double in `sync_restore` implements an async trait.
+async-trait = { workspace = true }
 ghostr-testkit = { workspace = true }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }

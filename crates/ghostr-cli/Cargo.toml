@@ -25,6 +25,12 @@ ghostr-quests = { workspace = true }
 ghostr-store = { workspace = true }
 ghostr-anchor = { workspace = true }
 ghostr-llm = { workspace = true, optional = true }
+# The relay transport, for `sync` and `restore`. The CLI is a composition root:
+# it is where a vault's configured relays become a client.
+ghostr-nostr = { workspace = true }
+# Drives the async relay calls to completion. `rt` only — every I/O path
+# underneath is blocking, so there is no reactor to enable.
+tokio = { workspace = true, features = ["rt"] }
 
 [features]
 default = []

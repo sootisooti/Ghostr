@@ -7,6 +7,7 @@
 //! scheduling, relays, quests) arrive with the milestones that need them rather
 //! than sitting here unused (CLAUDE.md §9).
 
+use ghostr_nostr::client::PublishScope;
 use std::path::{Path, PathBuf};
 
 use chrono_tz::Tz;
@@ -44,6 +45,23 @@ pub struct Config {
     /// Per task, not per provider. Enabling a provider for conversation must not
     /// silently enable it for bulk extraction over the whole corpus (SPEC §11.2).
     pub egress_allow: Vec<String>,
+    /// Relays to publish to and restore from.
+    ///
+    /// **Empty by default.** A vault with no relays is a vault that has never
+    /// spoken to the network, which is the state a new one should be in.
+    pub relays: Vec<String>,
+    /// Which publish scopes are enabled, by name.
+    ///
+    /// **Empty by default**, and per scope rather than a single boolean:
+    /// enabling encrypted backup must not silently enable the ghost to post.
+    /// Names match [`PublishScope`] in
+    /// snake case — `backup`, `manifest`, `anchor_receipts`, `fidelity`,
+    /// `ghost_notes`.
+    ///
+    /// `anchor_receipts` is absent from the default on purpose: a receipt on a
+    /// relay proves a chain is alive, which is a fact about the person behind it
+    /// (SPEC Q5).
+    pub publish_scopes: Vec<String>,
 }
 
 impl Default for Config {
@@ -59,6 +77,8 @@ impl Default for Config {
             auto_anchor: false,
             egress_enabled: false,
             egress_allow: Vec::new(),
+            relays: Vec::new(),
+            publish_scopes: Vec::new(),
         }
     }
 }
@@ -149,6 +169,29 @@ impl Config {
             .or_else(|| std::env::var_os("XDG_DATA_HOME").map(|d| PathBuf::from(d).join("ghostr")))
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".ghostr")))
             .unwrap_or_else(|| PathBuf::from(".ghostr"))
+    }
+}
+
+impl Config {
+    /// The publish scopes this vault has enabled.
+    ///
+    /// An unknown name is ignored rather than refused. A config naming a scope
+    /// this build does not have is a config from a newer build, and the safe
+    /// reading of "backup, something_new" is to enable backup — not to refuse
+    /// to start, and not to enable everything.
+    #[must_use]
+    pub fn enabled_scopes(&self) -> std::collections::HashSet<PublishScope> {
+        self.publish_scopes
+            .iter()
+            .filter_map(|name| match name.as_str() {
+                "backup" => Some(PublishScope::Backup),
+                "manifest" => Some(PublishScope::Manifest),
+                "anchor_receipts" => Some(PublishScope::AnchorReceipts),
+                "fidelity" => Some(PublishScope::Fidelity),
+                "ghost_notes" => Some(PublishScope::GhostNotes),
+                _ => None,
+            })
+            .collect()
     }
 }
 

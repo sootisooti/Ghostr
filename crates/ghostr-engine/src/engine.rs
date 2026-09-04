@@ -43,6 +43,20 @@ impl core::fmt::Debug for Engine {
     }
 }
 
+/// Whether a device may advance the chain.
+///
+/// Not a capability the software grants itself: handover is a decision a person
+/// makes, because an automatic election plus a network partition is a fork
+/// (SPEC §14 Q10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceRole {
+    /// Runs Memoria and advances `seq`. Exactly one per chain.
+    Sealer,
+    /// Ingests, answers quests, and reads. Never seals.
+    Replica,
+}
+
 /// What `init` produced.
 #[derive(Debug)]
 pub struct InitOutcome {
@@ -159,6 +173,63 @@ impl Engine {
                 identity_imported: imported_identity,
             },
         ))
+    }
+
+    /// The vault's configuration, loaded from disk.
+    ///
+    /// Read rather than cached, like every other config consumer here: a
+    /// long-running `serve` should pick up an edit without a restart, and the
+    /// file is small.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but does not parse.
+    pub fn config(&self) -> crate::Result<crate::config::Config> {
+        crate::config::Config::load(&self.dir)
+    }
+
+    /// Whether this device may seal, or is a read replica.
+    ///
+    /// # Why this exists at all
+    ///
+    /// Two devices sealing the same `seq` forks the chain, and a forked chain
+    /// is worthless — there is no rule that says which side is real. Exactly one
+    /// device per chain seals; every other one ingests, answers quests and
+    /// reads (SPEC §14 Q10).
+    ///
+    /// A vault that has never been told otherwise is a sealer: that is what
+    /// `init` produces, and it keeps a single-device user from having to know
+    /// this concept exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn device_role(&self) -> crate::Result<DeviceRole> {
+        Ok(
+            match self
+                .store
+                .meta(ghostr_store::schema::meta_key::DEVICE_ROLE)?
+            {
+                Some(value) if value == "replica" => DeviceRole::Replica,
+                _ => DeviceRole::Sealer,
+            },
+        )
+    }
+
+    /// Records this device's role.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be written.
+    pub fn set_device_role(&self, role: DeviceRole) -> crate::Result<()> {
+        self.store.set_meta(
+            ghostr_store::schema::meta_key::DEVICE_ROLE,
+            match role {
+                DeviceRole::Sealer => "sealer",
+                DeviceRole::Replica => "replica",
+            },
+        )?;
+        Ok(())
     }
 
     /// Changes the passphrase that unlocks this vault.
