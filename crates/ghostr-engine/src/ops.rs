@@ -419,6 +419,111 @@ fn carry_forward_threads(engine: &Engine) -> crate::Result<Vec<Thread>> {
 }
 
 /// The half-open absolute window for one local calendar day.
+/// What a run of [`seal_due`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealDueReport {
+    /// Days sealed on this run, oldest first.
+    pub sealed: Vec<NaiveDate>,
+    /// The day that was ready but is still inside its grace window.
+    ///
+    /// Reported rather than silently skipped: "nothing happened" and "the most
+    /// recent day is deliberately waiting" look identical otherwise, and the
+    /// second one is the answer to "why has today not sealed yet".
+    pub waiting_on_grace: Option<NaiveDate>,
+}
+
+/// Seals every past day that is over, in order.
+///
+/// # Why this is not just "seal yesterday"
+///
+/// A day that nobody sealed does not become sealed later by itself, and an
+/// unsealed date is indistinguishable from a deleted one — so a weekend away
+/// leaves two holes unless something walks back and fills them. This walks back
+/// from yesterday to the first day that *is* sealed, then seals forward, because
+/// `seq` is assigned in order and sealing newest-first would refuse.
+///
+/// # The grace window
+///
+/// A day is not sealed the instant its cutoff passes. People write the day up
+/// afterwards — on the train, the next morning, on Sunday for the whole week —
+/// and a footage sealed before those notes arrive strands them as amendments to
+/// a day that is already closed (I2). Waiting a few hours costs nothing and
+/// keeps the common case in the right day.
+///
+/// # Errors
+///
+/// Returns an error if the vault is locked, or if this device is a replica —
+/// which is checked by `memoria` itself, so a replica running `serve` seals
+/// nothing rather than forking the chain.
+pub fn seal_due(
+    engine: &Engine,
+    grace_hours: u32,
+    max_backfill_days: u32,
+) -> crate::Result<SealDueReport> {
+    let tz = engine.home_tz()?;
+    let now = engine.clock().now().utc_millis();
+
+    let today = engine.clock().now().date_in(&tz);
+
+    // The chain cannot contain a day from before it existed. Without this a
+    // fresh vault would walk the whole backfill window and seal a month of days
+    // that predate its own genesis — history it was never there for, which is a
+    // fabrication rather than a gap.
+    let genesis_date = engine
+        .store()
+        .meta(ghostr_store::schema::meta_key::CREATED_AT)?
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .map(|millis| Timestamp::new(millis, 0).date_in(&tz));
+
+    let mut pending: Vec<NaiveDate> = Vec::new();
+    let mut waiting_on_grace = None;
+
+    // Backwards from yesterday to the first sealed day.
+    //
+    // Starting at yesterday rather than today is a statement of intent, not the
+    // guard: a day whose window has not closed is held by the grace check below
+    // regardless of where the walk starts, since `now` cannot be past a cutoff
+    // that has not happened. Deleting this line fails no test, and the comment
+    // says so rather than implying otherwise.
+    let mut cursor = today.pred_opt().unwrap_or(today);
+    for _ in 0..max_backfill_days {
+        if engine.store().date_is_sealed(cursor)?.is_some() {
+            break;
+        }
+        // The day the vault was created is the first it can speak for.
+        if genesis_date.is_some_and(|genesis| cursor < genesis) {
+            break;
+        }
+        let window = day_window(cursor, &tz);
+        let grace_ms = i64::from(grace_hours).saturating_mul(60 * 60 * 1000);
+        if now < window.end.utc_millis().saturating_add(grace_ms) {
+            // Still inside its grace window. Everything older is not, so the
+            // walk continues rather than stopping here.
+            waiting_on_grace = Some(cursor);
+        } else {
+            pending.push(cursor);
+        }
+        let Some(previous) = cursor.pred_opt() else {
+            break;
+        };
+        cursor = previous;
+    }
+
+    // Oldest first: `seq` is `tip + 1`, so sealing newest-first is refused by
+    // the store — and would be wrong even if it were not.
+    pending.reverse();
+
+    let mut sealed = Vec::new();
+    for date in pending {
+        memoria(engine, date)?;
+        sealed.push(date);
+    }
+    Ok(SealDueReport {
+        sealed,
+        waiting_on_grace,
+    })
+}
+
 fn day_window(date: NaiveDate, tz: &chrono_tz::Tz) -> TimeRange {
     use chrono::TimeZone as _;
 
