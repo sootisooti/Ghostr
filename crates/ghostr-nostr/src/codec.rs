@@ -110,7 +110,45 @@ pub async fn decode<T: DeserializeOwned>(
     kind: Kind,
     event: &UnsignedEvent,
 ) -> crate::Result<T> {
-    if event.kind != kind.as_u16() {
+    decode_inner(signer, key, kind, event, false).await
+}
+
+/// Decodes a payload from either the 3178x event or its NIP-78 mirror.
+///
+/// The point of the mirror is that a reader who cannot resolve 3178x still gets
+/// the same bytes (SPEC Q3), and a reader that refuses kind 30078 is not such a
+/// reader. [`decode`] stays strict: a caller that asked for a footage record
+/// and got application data should hear about it.
+///
+/// The numeric kind is the only check that relaxes. The `d` tag still has to
+/// name `kind`, and it is the stronger of the two: `ghostr/v1/footage/7` says
+/// what an event is regardless of the number it was filed under, which is
+/// exactly why the block being unclaimed is survivable.
+///
+/// # Errors
+///
+/// Returns [`Error::MalformedPayload`](crate::Error::MalformedPayload) if the
+/// event is neither form, if its `d` tag names another kind, or if the
+/// plaintext does not deserialise.
+pub async fn decode_mirrored<T: DeserializeOwned>(
+    signer: &dyn Signer,
+    key: KeyRef,
+    kind: Kind,
+    event: &UnsignedEvent,
+) -> crate::Result<T> {
+    decode_inner(signer, key, kind, event, true).await
+}
+
+async fn decode_inner<T: DeserializeOwned>(
+    signer: &dyn Signer,
+    key: KeyRef,
+    kind: Kind,
+    event: &UnsignedEvent,
+    accept_mirror: bool,
+) -> crate::Result<T> {
+    let kind_ok = event.kind == kind.as_u16()
+        || (accept_mirror && event.kind == crate::kinds::NIP78_APP_DATA);
+    if !kind_ok {
         return Err(crate::Error::MalformedPayload {
             kind: kind.as_u16(),
         });
@@ -120,6 +158,10 @@ pub async fn decode<T: DeserializeOwned>(
     // right numeric kind carrying another application's `d` tag would be decoded
     // as ours — and on an unclaimed kind block (SPEC Q3) that is not a
     // hypothetical, it is the expected collision.
+    //
+    // For a mirror it is not a second check but the *only* one: kind 30078 is
+    // shared application data that anyone may publish, so nothing but this tag
+    // distinguishes a Ghostr footage from another application's settings blob.
     let d_tag = first_tag_value(event, "d").ok_or(crate::Error::MalformedPayload {
         kind: kind.as_u16(),
     })?;

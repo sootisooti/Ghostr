@@ -38,6 +38,20 @@ pub struct SyncReport {
     pub already_present: u64,
     /// Days that failed to publish, by `seq`.
     pub failed: Vec<u64>,
+    /// Days whose NIP-78 mirror was published alongside the 3178x form.
+    ///
+    /// Counted separately rather than folded into `published`, because the two
+    /// can differ: a relay that accepts kind 30078 and refuses an unrecognised
+    /// 3178x — or the reverse — leaves a day backed up in one form only, and a
+    /// single number would hide which.
+    pub mirrored: u64,
+    /// Days published under 3178x whose mirror a relay refused, by `seq`.
+    ///
+    /// Not a failure of the day: the backup exists. It is a failure of the
+    /// *fallback*, and a vault whose mirror is missing is one that depends on
+    /// the kind block being resolvable — the assumption the mirror exists to
+    /// remove (SPEC Q3).
+    pub mirror_failed: Vec<u64>,
 }
 
 /// What a restore rebuilt.
@@ -77,35 +91,53 @@ pub async fn sync(engine: &Engine, relays: &dyn RelayClient) -> crate::Result<Sy
 
     // What the relays already hold, asked once rather than per day: a fetch per
     // sealed day would be a request per day of the user's life.
-    let existing: HashSet<String> = relays
+    //
+    // Both forms, and kept apart. A day whose 3178x event published but whose
+    // mirror was refused is half-backed-up, and a single set would read it as
+    // done and never send the missing half — the mirror would be reported
+    // failed once and then never retried.
+    let mut has_primary: HashSet<String> = HashSet::new();
+    let mut has_mirror: HashSet<String> = HashSet::new();
+    for event in relays
         .fetch(&Filter {
             authors: vec![data_pubkey],
             kinds: vec![Kind::FootageRecord],
+            raw_kinds: vec![ghostr_nostr::kinds::NIP78_APP_DATA],
             ..Filter::default()
         })
         .await?
-        .into_iter()
+    {
         // The author is checked here rather than trusted to the filter, and
         // this is not belt-and-braces. `authors` is a *request*; a relay is free
         // to ignore it and serve whatever it likes. A relay that answered with
         // events carrying our `d` tags would make this loop skip every day as
         // "already backed up" — a vault that believes it has a backup and does
         // not, which is worse than one that knows it has none.
-        .filter(|event| event.event.pubkey == data_pubkey)
-        .filter_map(|event| {
-            event
-                .event
-                .tags
-                .iter()
-                .find(|tag| tag.first().map(String::as_str) == Some("d"))
-                .and_then(|tag| tag.get(1).cloned())
-        })
-        .collect();
+        if event.event.pubkey != data_pubkey {
+            continue;
+        }
+        let Some(d_tag) = event
+            .event
+            .tags
+            .iter()
+            .find(|tag| tag.first().map(String::as_str) == Some("d"))
+            .and_then(|tag| tag.get(1).cloned())
+        else {
+            continue;
+        };
+        if event.event.kind == ghostr_nostr::kinds::NIP78_APP_DATA {
+            has_mirror.insert(d_tag);
+        } else {
+            has_primary.insert(d_tag);
+        }
+    }
 
     let mut report = SyncReport {
         published: 0,
         already_present: 0,
         failed: Vec::new(),
+        mirrored: 0,
+        mirror_failed: Vec::new(),
     };
 
     for footage in engine.store().all_footage(dek)? {
@@ -113,7 +145,10 @@ pub async fn sync(engine: &Engine, relays: &dyn RelayClient) -> crate::Result<Sy
         // The `d` tag carries the seq, so a day already on a relay is skipped
         // by name rather than by re-encrypting it and comparing ciphertext —
         // which would differ every time anyway, since the nonce is fresh.
-        if existing.contains(&format!("ghostr/v1/footage/{identifier}")) {
+        let d_tag = format!("ghostr/v1/footage/{identifier}");
+        let needs_primary = !has_primary.contains(&d_tag);
+        let needs_mirror = !has_mirror.contains(&d_tag);
+        if !needs_primary && !needs_mirror {
             report.already_present += 1;
             continue;
         }
@@ -136,16 +171,45 @@ pub async fn sync(engine: &Engine, relays: &dyn RelayClient) -> crate::Result<Sy
         )
         .await?;
 
-        let sig = engine.keystore().sign_event(key, &event).await?;
-        let signed = ghostr_crypto::event::SignedEvent {
-            id: event.id(),
-            event,
-            sig,
-        };
+        // Built before the primary is consumed, and from the same body, so the
+        // two copies cannot drift. Only one of them is anchored; a re-encode
+        // here would let the unanchored one say something else.
+        let mirror = codec::mirror_as_nip78(&event)?;
 
-        match relays.publish(signed, PublishScope::Backup).await {
-            Ok(_) => report.published += 1,
-            Err(_) => report.failed.push(footage.seq),
+        if needs_primary {
+            let sig = engine.keystore().sign_event(key, &event).await?;
+            let signed = ghostr_crypto::event::SignedEvent {
+                id: event.id(),
+                event,
+                sig,
+            };
+
+            match relays.publish(signed, PublishScope::Backup).await {
+                Ok(_) => report.published += 1,
+                Err(_) => {
+                    // The mirror of a day that is not there is not worth
+                    // sending: a fallback for a backup that does not exist.
+                    report.failed.push(footage.seq);
+                    continue;
+                }
+            }
+        }
+
+        if !needs_mirror {
+            continue;
+        }
+
+        // Signed separately: the mirror is a different kind, so it is a
+        // different event id, and one signature cannot cover both.
+        let mirror_sig = engine.keystore().sign_event(key, &mirror).await?;
+        let signed_mirror = ghostr_crypto::event::SignedEvent {
+            id: mirror.id(),
+            event: mirror,
+            sig: mirror_sig,
+        };
+        match relays.publish(signed_mirror, PublishScope::Backup).await {
+            Ok(_) => report.mirrored += 1,
+            Err(_) => report.mirror_failed.push(footage.seq),
         }
     }
     Ok(report)
@@ -171,6 +235,11 @@ pub async fn restore(engine: &Engine, relays: &dyn RelayClient) -> crate::Result
     let key = engine.keystore().key_ref(Account::Data)?;
     let data_pubkey = engine.keystore().account_pubkey(Account::Data)?;
 
+    // Both forms, in one query. The mirror is not a retry for when 3178x comes
+    // back empty: a relay may hold one and not the other — it may not recognise
+    // an unclaimed kind, or may have been written to by an older client — and
+    // asking for both is what makes the fallback a fallback rather than a
+    // second guess (SPEC Q3).
     let events = relays
         .fetch(&Filter {
             // Only our own data key. A relay is free to serve anything, and
@@ -178,21 +247,38 @@ pub async fn restore(engine: &Engine, relays: &dyn RelayClient) -> crate::Result
             // between a stranger's event and this vault's chain.
             authors: vec![data_pubkey],
             kinds: vec![Kind::FootageRecord],
+            raw_kinds: vec![ghostr_nostr::kinds::NIP78_APP_DATA],
             ..Filter::default()
         })
         .await?;
 
     let mut recovered: Vec<Footage> = Vec::new();
     let mut rejected = 0_u64;
+    let mut seen: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
 
     for event in events {
         // Signatures were verified by the relay client; this is the second
         // check, that the event was encrypted by *this* vault. An event that
         // does not decrypt is not ours, whoever signed it.
-        match codec::decode::<Footage>(engine.keystore(), key, Kind::FootageRecord, &event.event)
-            .await
+        //
+        // `decode_mirrored` accepts either kind. What it does not relax is the
+        // `d` tag: kind 30078 is shared application data anyone may publish, so
+        // that tag is the only thing separating this vault's footage from
+        // another application's settings blob.
+        match codec::decode_mirrored::<Footage>(
+            engine.keystore(),
+            key,
+            Kind::FootageRecord,
+            &event.event,
+        )
+        .await
         {
-            Ok(footage) => recovered.push(footage),
+            // A day present in both forms is one day. The two carry identical
+            // content by construction, so taking the first and counting the
+            // second as neither recovered nor rejected is the honest answer:
+            // nothing was wrong with it and nothing new came of it.
+            Ok(footage) if seen.insert(footage.seq) => recovered.push(footage),
+            Ok(_) => {}
             Err(_) => rejected += 1,
         }
     }

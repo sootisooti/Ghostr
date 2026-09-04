@@ -528,11 +528,18 @@ fn cmd_sync(dir: &std::path::Path) -> Result<()> {
         block_on(ghostr_engine::sync::sync(&engine, &relays)).context("syncing to relays")?;
 
     println!("published      {}", report.published);
+    println!("mirrored       {}", report.mirrored);
     println!("already there  {}", report.already_present);
     if !report.failed.is_empty() {
         // Named rather than counted: a day that failed is a day the user may
         // want to retry, and "3 failed" does not say which.
         println!("failed         {:?}", report.failed);
+    }
+    if !report.mirror_failed.is_empty() {
+        // The day is backed up; its fallback is not. Worth saying, because a
+        // vault without the mirror depends on kinds 31780–31789 resolving —
+        // the assumption the mirror exists to remove (SPEC Q3).
+        println!("no mirror      {:?}", report.mirror_failed);
     }
     Ok(())
 }
