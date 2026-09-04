@@ -870,6 +870,29 @@ pub(crate) fn fidelity(score: &FidelityScore) -> String {
         pct(score.confidence_interval.0),
         pct(score.confidence_interval.1)
     ));
+    // The direction, beside the level (SPEC §5.2). Which way the number is
+    // moving is what a daily loop is for; a user cannot tell an improving 72%
+    // from a decaying one, and that difference matters more than the 72%.
+    if let Some(trend) = score.trend {
+        let delta = trend - score.overall;
+        // Named rather than signed, because a reader should not have to work
+        // out which way a minus sign points on a smoothed average.
+        let direction = if delta.abs() < 0.01 {
+            "level"
+        } else if delta > 0.0 {
+            "recent days above the window"
+        } else {
+            "recent days below the window"
+        };
+        out.push_str(&format!(
+            "trend        {} (30-day EWMA) — {direction}\n",
+            pct(trend)
+        ));
+    } else {
+        // Said rather than omitted: a missing line reads as "no trend", and
+        // "one day of quests" is a different fact.
+        out.push_str("trend        not yet — a trend needs more than one day\n");
+    }
     out.push_str(&format!(
         "calibration: Brier {:.3}, ECE {:.3} over {} pair(s)\n",
         score.calibration.brier, score.calibration.ece, score.calibration.sample_size
