@@ -118,6 +118,18 @@ Still open, from the same sweep: `has_disclosure`, `is_confirmed`,
 `ghostr-crypto`'s, with nothing checking they agree), and `MemoryLock`, so
 `mlock` is documented rather than real.
 
+Alongside it, a second and much dumber technique: **look at the thing**.
+[docs/ui/](docs/ui/) is every screen of the served page at five real device
+sizes, taken from the running binary over a vault of invented notes, regenerable
+with one command. It has already paid for itself twice. The bottom nav was
+spanning the full window, so on a laptop "Today" sat in one corner and "Vault"
+in the other, a thousand pixels from the content they belong to. And `ghostr
+serve` was printing its URL, its token and its QR code *before* binding the
+listener — so when the port was already held, it printed a working-looking
+invitation to open somebody else's vault. Both are fixed; the screenshots are
+the record, and the harness now refuses to record a run where the page is
+showing an error.
+
 ### No model is compiled into a default build
 
 Which makes "works offline" checkable in one command rather than claimed:

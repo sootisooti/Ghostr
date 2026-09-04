@@ -80,24 +80,23 @@ fn a_silent_connection_does_not_stall_the_next_request() {
     let port = free_port();
     let token = Token::mint(&engine);
 
+    let (up, listening) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let bind = Bind {
             http: Some(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
             lan_acknowledged: false,
         };
-        let _ = ghostr_engine::serve::serve(engine, &bind, &token);
+        let _ = ghostr_engine::serve::serve(engine, &bind, &token, move || {
+            let _ = up.send(());
+        });
     });
 
-    // Wait for the listener rather than sleeping a guessed interval.
-    let mut ready = false;
-    for _ in 0..100 {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert!(ready, "the server never came up");
+    // The server says when it is listening, so this waits on the event rather
+    // than polling for a connection that succeeds. A poll would also succeed
+    // against a *different* process holding the port.
+    listening
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the server never came up");
 
     let warm = Instant::now();
     assert!(get_page(port).expect("warm-up").contains("200 OK"));
