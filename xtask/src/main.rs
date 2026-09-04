@@ -8,6 +8,7 @@
 //! ```console
 //! $ cargo xtask lint-deps        # dependency-direction rules
 //! $ cargo xtask scaffold-status  # how much of the tree is still todo!()
+//! $ cargo xtask unused-pub       # public functions whose only callers are tests
 //! ```
 
 #![forbid(unsafe_code)]
@@ -15,6 +16,7 @@
 
 mod lint_deps;
 mod scaffold;
+mod unused_pub;
 
 use anyhow::{Result, bail};
 
@@ -23,9 +25,12 @@ fn main() -> Result<()> {
     match task.as_deref() {
         Some("lint-deps") => lint_deps::run(),
         Some("scaffold-status") => scaffold::run(),
-        Some(other) => bail!("unknown task `{other}`; try `lint-deps` or `scaffold-status`"),
+        Some("unused-pub") => unused_pub::run(),
+        Some(other) => {
+            bail!("unknown task `{other}`; try `lint-deps`, `scaffold-status` or `unused-pub`")
+        }
         None => {
-            eprintln!("usage: cargo xtask <lint-deps|scaffold-status>");
+            eprintln!("usage: cargo xtask <lint-deps|scaffold-status|unused-pub>");
             bail!("no task given")
         }
     }

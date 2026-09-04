@@ -86,6 +86,11 @@ jobs:
       - run: cargo xtask lint-deps
       # Progress report, not a gate.
       - run: cargo xtask scaffold-status
+      # Public functions whose only callers are tests — documented promises with
+      # nothing keeping them. Also a report, not a gate: it reads text rather
+      # than a type graph, so it names candidates to investigate, and a run that
+      # failed on one would train people to stop reading it.
+      - run: cargo xtask unused-pub
 
   msrv:
     name: MSRV

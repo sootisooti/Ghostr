@@ -19,8 +19,13 @@ enters the corpus and the `TrustLevel::ThirdParty` gate is load-bearing rather
 than declared. Every M3 exit criterion is met except the NIP submission, which
 is a human's to make ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
-Run `cargo xtask scaffold-status` to see what is still unimplemented, and
-`cargo xtask lint-deps` to check the dependency rules in §2.
+Run `cargo xtask scaffold-status` to see what is still unimplemented,
+`cargo xtask lint-deps` to check the dependency rules in §2, and `cargo xtask
+unused-pub` to find public functions whose only callers are tests.
+
+**The process is in [.claude/skills/](.claude/skills/), not in this file.** This
+file says what the rules are; the skills say how the work moves through them.
+See §10 for which ones a given change needs.
 
 ---
 
@@ -301,3 +306,42 @@ spec(docs): resolve Q5 — anchor receipts default to local-only
 - **Never soften a claim in the docs to match a shortcut in the code.** If the
   implementation can't meet the invariant, change the implementation or escalate
   — do not edit the promise.
+
+---
+
+## 10. The process, as steps rather than a prompt
+
+Everything in §1–§9 is a *rule*. Rules are only as good as the process that
+makes somebody apply them, and a process that lives in one long instruction is
+one nobody can check a step of. So it is split into skills in
+[.claude/skills/](.claude/skills/), each ending in an artifact somebody can look
+at:
+
+| Skill | Ends with |
+| --- | --- |
+| [`grill-with-docs`](.claude/skills/grill-with-docs/SKILL.md) | the invariants this change touches, written down, and what the docs don't answer |
+| [`to-spec`](.claude/skills/to-spec/SKILL.md) | a numbered Open Question in SPEC §14 with a recommendation |
+| [`to-tickets`](.claude/skills/to-tickets/SKILL.md) | tasks whose acceptance check can fail |
+| [`implement`](.claude/skills/implement/SKILL.md) | the change, and the test, written together |
+| [`prove`](.claude/skills/prove/SKILL.md) | a table of *guard deleted → named test that failed* |
+| [`gate`](.claude/skills/gate/SKILL.md) | the CI commands, green, in both thread shapes |
+| [`sweep`](.claude/skills/sweep/SKILL.md) | `cargo xtask unused-pub` triaged, each candidate answered |
+
+**Not every change needs every step.** Routing:
+
+| The change | The route |
+| --- | --- |
+| A fix, a rename, one contained behaviour | `grill-with-docs` → `implement` → `prove` → `gate` |
+| A feature crossing crates, or a milestone | `grill-with-docs` → `to-spec` → `to-tickets` → `implement` → `prove` → `gate` |
+| Looking for defects in code that is already green | `sweep` → `grill-with-docs` → `implement` → `prove` → `gate` |
+| A docs-only change | `grill-with-docs` → `gate` |
+
+Two are never skipped. **`grill-with-docs`**, because a change that does not
+know which invariant it touches cannot avoid breaking it. **`prove`**, because a
+green suite is evidence that nothing regressed and no evidence at all that the
+new guard does anything — it has caught four tests passing for the wrong reason,
+each green for weeks.
+
+The point is not the skills. It is that a step which cannot be inspected is not
+a step: a process that only produces "done" produces nothing a reviewer can
+disagree with. Every skill above ends in something they can.

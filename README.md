@@ -113,6 +113,16 @@ Twice that check found the *test* was wrong rather than the guard — a relay
 double that ignored the filter it was meant to prove, and an intruder rejected
 by decryption before the check under test was ever reached.
 
+That sweep is no longer a thing one person does with grep. `cargo xtask
+unused-pub` runs it, prints each candidate as a question — *what calls this?* —
+and runs in CI as a report rather than a gate. It was checked against the sweep
+it replaces in both directions: it names every one of the still-open findings
+below, and it names none of the six above, because each of those now has a
+production caller. It is also honest about under-reporting — references match by
+bare name, so a namesake elsewhere hides a dead function. `MemoryLock::is_locked`
+is absent from the report for exactly that reason. An empty report means nothing
+was found, not that there is nothing to find.
+
 Still open, from the same sweep: `has_disclosure`, `is_confirmed`,
 `Account::derivation_path` (which builds a BIP-32 path independently of
 `ghostr-crypto`'s, with nothing checking they agree), and `MemoryLock`, so
@@ -129,6 +139,13 @@ listener — so when the port was already held, it printed a working-looking
 invitation to open somebody else's vault. Both are fixed; the screenshots are
 the record, and the harness now refuses to record a run where the page is
 showing an error.
+
+Both of those are the same lesson, and it is the reason the process moved out of
+prose and into [.claude/skills/](.claude/skills/): a step whose only output is
+"done" is not a step. Each skill now ends in something a reviewer can disagree
+with — the invariants a change touches, a numbered Open Question, a table of
+*guard deleted → named test that failed*. CLAUDE.md §10 has the routing, and
+not every change needs every step.
 
 ### No model is compiled into a default build
 
@@ -178,6 +195,7 @@ $ cargo build --workspace        # 14 crates, compiles clean
 $ cargo test --workspace         # 800+ tests, none touching the network
 $ cargo xtask scaffold-status    # what is still unimplemented, per crate
 $ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
+$ cargo xtask unused-pub         # public functions whose only callers are tests
 ```
 
 | Document | What's in it |
