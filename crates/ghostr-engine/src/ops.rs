@@ -632,7 +632,23 @@ pub struct VerifyReport {
     /// Whether every link recomputed.
     pub chain_ok: bool,
     /// Whether every stored Merkle root matched its leaves.
+    ///
+    /// Only over days this device can actually check. See
+    /// [`VerifyReport::roots_unchecked`].
     pub roots_ok: bool,
+    /// Days whose leaves this device never had, so their roots cannot be
+    /// re-derived.
+    ///
+    /// A replica restored from relays holds the footage but not the memories —
+    /// they are hashes of notes it never saw. Reporting that as a root mismatch
+    /// would tell a user their history had been altered when nothing had, which
+    /// is the worst possible false alarm for a system whose whole claim is
+    /// tamper-evidence. Their *links* still verify, and that is what a replica
+    /// can check.
+    ///
+    /// Never used to excuse a sealing device: a vault that sealed a day and no
+    /// longer holds its leaves has lost data, and that is `roots_ok = false`.
+    pub roots_unchecked: u64,
     /// The first bad sequence, when something failed.
     pub first_bad_seq: Option<u64>,
     /// What went wrong, in a sentence.
@@ -674,6 +690,7 @@ pub fn verify(engine: &Engine) -> crate::Result<VerifyReport> {
         days: footage.len() as u64,
         chain_ok: true,
         roots_ok: true,
+        roots_unchecked: 0,
         first_bad_seq: None,
         detail: None,
         anchored: 0,
@@ -693,8 +710,35 @@ pub fn verify(engine: &Engine) -> crate::Result<VerifyReport> {
         return Ok(report);
     }
 
+    let replica = engine.device_role()? == crate::engine::DeviceRole::Replica;
+
     for f in &footage {
         let stored = engine.store().footage_leaves(f.seq)?;
+
+        // The day was sealed over its memory leaves plus one meta leaf. If this
+        // device holds a different number, it is not holding what the day was
+        // sealed over, and comparing roots would only say "mismatch" without
+        // saying why.
+        let held = u32::try_from(stored.len().saturating_add(1)).unwrap_or(u32::MAX);
+        if held != f.commitment.leaf_count {
+            if replica && stored.is_empty() {
+                // Expected, and not a finding: a replica never had the
+                // memories. Counted so the user can see the check did not run
+                // rather than assume it passed.
+                report.roots_unchecked += 1;
+                continue;
+            }
+            report.roots_ok = false;
+            report.first_bad_seq = Some(f.seq);
+            report.detail = Some(format!(
+                "seq {} was sealed over {} leaves and this store holds {}",
+                f.seq,
+                f.commitment.leaf_count,
+                stored.len().saturating_add(1)
+            ));
+            return Ok(report);
+        }
+
         let mut digests = vec![ghostr_anchor::meta_leaf(
             f.seq,
             f.date,

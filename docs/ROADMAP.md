@@ -279,7 +279,16 @@ somebody else's notes is counted and reported, not silently ingested.
 
 **Exit criteria**
 - [x] Full restore from relays on a clean machine, seed only —
-      `a_second_machine_rebuilds_the_chain_from_relays_alone`.
+      `a_second_machine_rebuilds_the_chain_from_relays_alone`, and the restored
+      chain now actually **verifies**
+      (`a_restored_vault_verifies_its_chain`). It did not: `chain_id` and
+      `created_at` are minted by `Engine::init`, so a restored vault's genesis
+      was not the one its recovered links were computed against and `verify`
+      failed at seq 1. This criterion was ticked anyway, because the test
+      compared footage fields and never ran `verify`. Restore now adopts the
+      genesis link from seq 1's `prev_link` — the one thing the recovered
+      history determines — and clears the chain id rather than keeping one that
+      no longer hashes to it (SPEC §14 Q24).
 - [x] Two devices, one sealer: the replica cannot advance `seq`
       (`a_restored_machine_cannot_advance_the_chain`). Refused at the engine
       before any state is touched, and the store's own duplicate-`seq` check

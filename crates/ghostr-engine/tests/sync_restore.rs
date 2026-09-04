@@ -736,3 +736,87 @@ async fn a_mirror_of_another_kind_is_refused() {
         assert_eq!(a.commitment.link, b.commitment.link);
     }
 }
+
+// --- what a restored vault can prove about itself ---------------------------
+
+/// M3's first exit criterion, actually checked.
+///
+/// "Full restore from relays on a clean machine, seed only" was ticked while a
+/// restored vault's chain did not verify: `chain_id` and `created_at` are
+/// minted by `Engine::init`, so its genesis was not the one the recovered links
+/// were computed against and the check failed at seq 1. The existing test
+/// passed because it compared footage fields and never ran `verify`.
+#[tokio::test]
+async fn a_restored_vault_verifies_its_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 4);
+
+    let first = vault(&tmp.path().join("one"));
+    ops::ingest(&first, &notes).expect("ingest");
+    seal_days(&first, 4);
+    let relay = MemoryRelay::default();
+    sync(&first, &relay).await.expect("sync");
+
+    let second = vault(&tmp.path().join("two"));
+    restore(&second, &relay).await.expect("restore");
+
+    let report = ops::verify(&second).expect("verify");
+    assert!(report.chain_ok, "a restored chain must verify: {report:?}");
+    assert_eq!(report.days, 4);
+    assert_eq!(report.first_bad_seq, None);
+
+    // The roots are not checkable here and the report says so rather than
+    // claiming either that they matched or that they did not.
+    assert_eq!(report.roots_unchecked, 4);
+    assert!(report.roots_ok);
+
+    // The adopted genesis is the original's, not this vault's own.
+    let original = first.store().genesis_link().expect("genesis");
+    assert_eq!(second.store().genesis_link().expect("genesis"), original);
+
+    // And the chain id is absent rather than wrong: this vault does not know
+    // it, and a value that no longer hashes to the genesis link would be taken
+    // as fact by the next reader.
+    assert_eq!(
+        second
+            .store()
+            .meta(ghostr_store::schema::meta_key::CHAIN_ID)
+            .expect("meta"),
+        None
+    );
+}
+
+/// Missing leaves are an excuse for a replica and a failure for a sealer.
+///
+/// Without the distinction, deleting the leaf rows would be a way to silence
+/// the root check on the machine that actually holds the memories — turning a
+/// detected tamper into an unchecked day.
+#[tokio::test]
+async fn a_sealer_that_lost_its_leaves_fails_rather_than_going_unchecked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 2);
+
+    let vault_dir = tmp.path().join("one");
+    let engine = vault(&vault_dir);
+    ops::ingest(&engine, &notes).expect("ingest");
+    seal_days(&engine, 2);
+    assert!(ops::verify(&engine).expect("verify").roots_ok);
+    drop(engine);
+
+    // An attacker with file access removes the leaves rather than altering
+    // them, hoping the day is reported as unverifiable instead of altered.
+    let conn = rusqlite::Connection::open(vault_dir.join(ghostr_store::DB_FILENAME)).unwrap();
+    conn.execute("DELETE FROM footage_memory", []).unwrap();
+    drop(conn);
+
+    let engine = Engine::open(&vault_dir, &passphrase()).expect("reopen");
+    let report = ops::verify(&engine).expect("verify");
+    assert!(
+        !report.roots_ok,
+        "a sealing device missing its leaves has lost data: {report:?}"
+    );
+    assert_eq!(report.roots_unchecked, 0, "not excused");
+    assert_eq!(report.first_bad_seq, Some(1));
+}

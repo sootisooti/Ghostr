@@ -216,6 +216,24 @@ impl SqliteStore {
             })
     }
 
+    /// Removes a `meta` key, so it reads as absent rather than as a value.
+    ///
+    /// For the case where a vault knows it does not know something. Leaving a
+    /// stale value behind would let a later reader take it as fact; an empty
+    /// string would too, since an empty string is a value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if the delete fails.
+    pub fn clear_meta(&self, key: &str) -> crate::Result<()> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", [key])
+            .map_err(|_| crate::Error::Backend {
+                operation: "clear meta",
+            })?;
+        Ok(())
+    }
+
     /// Records the identity and genesis link for a fresh store.
     ///
     /// # Errors
