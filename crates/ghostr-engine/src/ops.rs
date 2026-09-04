@@ -1163,7 +1163,11 @@ pub fn issue_quests(engine: &Engine, date: NaiveDate) -> crate::Result<QuestIssu
         .store()
         .persona_head(dek)?
         .ok_or_else(|| crate::Error::Config {
-            detail: "no persona yet — run `ghostr persona propose` then `adopt`".to_owned(),
+            // The command is `distill`. It said `propose` for as long as this
+            // error has existed, and the test asserted `propose` too, so the
+            // wrong instruction was locked in by the thing meant to catch it.
+            detail: "no persona yet — run `ghostr persona distill` then `ghostr persona adopt`"
+                .to_owned(),
         })?;
 
     if engine.store().quests_issued_for(date)? > 0 {
