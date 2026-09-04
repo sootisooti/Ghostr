@@ -156,6 +156,16 @@ pub fn serve(engine: Engine, bind: &Bind, token: &Token) -> crate::Result<()> {
 
     std::thread::scope(|scope| {
         let mut acceptors = Vec::new();
+
+        // The sealer. `serve` is where this belongs because it is the one
+        // process that already holds an unlocked vault — the alternative is a
+        // cron job, and a cron job needs the passphrase in an environment
+        // variable or a file, which is a worse trade than running a server.
+        let sealer = scope.spawn({
+            let engine = &engine;
+            move || seal_loop(engine)
+        });
+        acceptors.push(sealer);
         for listener in listeners.into_streams() {
             let engine = &engine;
             let live = &live;
@@ -193,6 +203,39 @@ pub fn serve(engine: Engine, bind: &Bind, token: &Token) -> crate::Result<()> {
     });
 
     Ok(())
+}
+
+/// How often the sealer looks for a day that is over.
+///
+/// Fifteen minutes. The thing it is waiting for moves once a day, so this is
+/// about how promptly a machine that was asleep at the cutoff catches up rather
+/// than about precision.
+const SEAL_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Seals days that are over, for as long as the server runs.
+///
+/// Failures are swallowed deliberately. This runs beside a web server, and a
+/// day that cannot be sealed — a replica, a locked vault, a model that will not
+/// answer — must not take the page down with it. The next pass tries again, and
+/// `ghostr status` is where a user finds out the chain is behind.
+fn seal_loop(engine: &std::sync::Mutex<Engine>) {
+    loop {
+        std::thread::sleep(SEAL_CHECK_INTERVAL);
+
+        let guard = engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Read every pass rather than once at startup: a user who turns this on
+        // should not have to restart the server to get it.
+        let Ok(config) = guard.config() else {
+            continue;
+        };
+        if !config.auto_seal {
+            continue;
+        }
+        let _ = crate::ops::seal_due(&guard, config.seal_grace_hours, config.seal_backfill_days);
+    }
 }
 
 /// Reads one request, then answers it.

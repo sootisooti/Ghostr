@@ -50,6 +50,33 @@ pub struct Config {
     /// **Empty by default.** A vault with no relays is a vault that has never
     /// spoken to the network, which is the state a new one should be in.
     pub relays: Vec<String>,
+    /// Whether `ghostr serve` seals days that are over, by itself.
+    ///
+    /// **False by default**, because sealing is irreversible: a sealed footage
+    /// is immutable and a correction becomes an amendment in a later day (I2).
+    /// Turning that on for someone who did not ask is not a convenience, it is a
+    /// decision about their history made on their behalf.
+    ///
+    /// With it on, `serve` becomes the thing that keeps the chain current —
+    /// which is why it lives there rather than in a cron job: `serve` already
+    /// holds an unlocked vault, so nothing has to put a passphrase in an
+    /// environment variable or a file to make this work.
+    pub auto_seal: bool,
+    /// How long after a day's cutoff before `auto_seal` closes it.
+    ///
+    /// People write the day up afterwards — on the train, the next morning, on
+    /// Sunday for the whole week. A footage sealed before those notes arrive
+    /// strands them as amendments to a day that is already closed, so the
+    /// default waits until the following morning rather than sealing at
+    /// midnight.
+    pub seal_grace_hours: u32,
+    /// How far back `auto_seal` will fill in on one run.
+    ///
+    /// A vault nobody has opened for a year should not seal three hundred empty
+    /// days on the next launch. It seals the recent ones and leaves the rest to
+    /// a deliberate `ghostr memoria --date`, because a month of silence is a
+    /// fact about that month and backfilling it silently would hide it.
+    pub seal_backfill_days: u32,
     /// Which publish scopes are enabled, by name.
     ///
     /// **Empty by default**, and per scope rather than a single boolean:
@@ -77,6 +104,10 @@ impl Default for Config {
             auto_anchor: false,
             egress_enabled: false,
             egress_allow: Vec::new(),
+            auto_seal: false,
+            // 06:00 the next morning, for a 23:59 cutoff.
+            seal_grace_hours: 6,
+            seal_backfill_days: 30,
             relays: Vec::new(),
             publish_scopes: Vec::new(),
         }

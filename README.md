@@ -276,6 +276,27 @@ typing a 64-character token on a phone keyboard, which nobody does twice.
 In Safari, **Share → Add to Home Screen** gives it an icon and drops the browser
 chrome, so it opens like an app.
 
+### Sealing the day without remembering to
+
+The loop only works if days actually close, and nobody remembers a command every
+evening. Set `auto_seal = true` and `ghostr serve` closes each day once it is
+over.
+
+It lives in `serve` rather than a cron job for one reason: **cron would need
+your passphrase**, in an environment variable or a file. `serve` already holds an
+unlocked vault, so nothing new has to hold a secret.
+
+It waits `seal_grace_hours` (6 by default) past the cutoff before closing a day,
+because people write the day up afterwards — on the train, the next morning, on
+Sunday for the whole week. Sealing at midnight would strand those notes as
+amendments to a day that is already closed. It also fills in days missed while
+the machine was off, oldest first, up to `seal_backfill_days`.
+
+It is **off by default**, because sealing is irreversible: a sealed footage is
+immutable and a correction becomes an amendment in a later day. Turning that on
+for someone who did not ask is a decision about their history made on their
+behalf.
+
 `--lan` is a second flag on purpose: `--http 0.0.0.0:7749` is one keystroke away
 from `--http 127.0.0.1:7749`, and the difference is who on the wifi can read your
 journal. The token is the only thing standing between them and it, and this is
