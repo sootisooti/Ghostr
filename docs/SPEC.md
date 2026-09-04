@@ -1676,3 +1676,33 @@ stranger without ever being told.
 > which returns one trust level per adapter and has no way to express "first
 > party if and only if this is provably me". Doing it properly means widening
 > that seam, which is M4 work, not a patch to a feed reader.
+
+---
+
+**Q24 — Should a replica know its chain id?**
+
+It does not, and today nothing needs it to.
+
+`genesis = H(identity ‖ created_at ‖ chain_id)`, and a vault restored from
+relays cannot recover `chain_id` or `created_at`: neither is published, and
+`Footage` does not carry them. What it *can* recover is the genesis link
+itself — seq 1's `prev_link` is exactly that, because a chain link commits to
+its parent — so `restore` adopts it, and the chain verifies from there.
+
+The chain id is then cleared rather than left as the value `Engine::init`
+minted for this machine, which no longer hashes to the adopted genesis. Nothing
+reads it: it is written at init and never consulted, verified by sweeping for
+readers. An absent value is honest; a stale one would be believed.
+
+The alternative is publishing the chain identity — a small encrypted payload
+under its own `d` tag, letting a replica recover `chain_id` and `created_at`
+and *check* that they hash to the adopted link. That is strictly more correct,
+because it makes the three values consistent and checks the consistency rather
+than sidestepping it.
+
+> **Recommendation:** revisit in M4, when third-party verification arrives. A
+> verifier handed a chain needs to know what chain it is, and at that point the
+> identity has to be published anyway. Doing it now would put one more thing on
+> relays to fix an inconsistency that nothing currently observes, and the
+> narrower fix — adopt what the history proves, forget what it does not — is
+> the one that cannot be wrong.

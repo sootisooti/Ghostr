@@ -67,7 +67,8 @@ chained, anchored. Corrections are amendments, never rewrites.
 
 ## Status
 
-**Pre-alpha. Milestones M0 and M1 are implemented; M2 onward is scaffolded.**
+**Pre-alpha. M0, M1 and M2 are implemented, M3 is complete bar one human step,
+and the current work is an audit rather than a feature.**
 
 M0 works end to end: an encrypted local vault, markdown ingest, deterministic
 daily footage, a Bitcoin-anchored hash chain, and `ghostr verify`.
@@ -77,8 +78,48 @@ Memoria pipeline with threads and amendments, local embeddings over an encrypted
 vector index, and — before any remote provider existed — the egress gate, its
 policy, its pseudonymising redactor, and its append-only audit log.
 
-**No model is compiled into a default build**, which makes "works offline"
-checkable in one command rather than claimed:
+M2 is the loop. The persona model distils, versions, and diffs: voice,
+relationships, and routines are computed from the corpus exactly — sentence
+lengths and punctuation rates are arithmetic, not estimates — while opinions,
+boundaries, and lore wait for a model rather than being guessed. Quests are
+issued with their answers already committed, answered, and scored, and the day's
+quest set is committed into the footage Merkle tree.
+
+M3 is the nostr surface: NIP-44 v2 against all 128 reference vectors, NIP-19,
+NIP-46 remote signing, NIP-59 gift wrap, the relay transport, `sync` and
+`restore`, auto-seal, and a nostr feed as a source — which is the point at which
+hostile text can actually enter the corpus, so `TrustLevel::ThirdParty` stopped
+being a declaration and started being load-bearing. Every M3 exit criterion is
+met except submitting the NIP that claims kinds 31780–31789, which is a human's
+to send.
+
+### What is being worked on now
+
+Not a feature. A sweep for **documented promises with nothing enforcing them** —
+every `pub fn` in the library crates whose only callers are tests. It keeps
+finding real defects, so it keeps running:
+
+| Found | Was |
+| --- | --- |
+| `may_be_exemplar`, `may_source_stance` | zero production callers; a feed note could evidence a `Relation`, which THREAT_MODEL §T7 names as an injection's second goal |
+| `cutoff::window_for` | zero production callers; the engine had a second, midnight-only window, so `cutoff_minute_of_day` decided nothing — its 23:59 default included |
+| `mirror_as_nip78` | zero production callers; the NIP-78 fallback that SPEC Q3 rests on was never published or read |
+| `config.relays` | a field with no parser arm; the CLI told users to write the exact line the parser rejected, so `sync` and `restore` could never be configured at all |
+| restore's genesis | a restored vault's chain failed `ghostr verify`, while M3's first exit criterion — "full restore from relays on a clean machine" — was ticked |
+
+Each fix is mutation-checked: the guard is deleted and a named test must fail.
+Twice that check found the *test* was wrong rather than the guard — a relay
+double that ignored the filter it was meant to prove, and an intruder rejected
+by decryption before the check under test was ever reached.
+
+Still open, from the same sweep: `has_disclosure`, `ewma`, `is_confirmed`,
+`Account::derivation_path` (which builds a BIP-32 path independently of
+`ghostr-crypto`'s, with nothing checking they agree), and `MemoryLock`, so
+`mlock` is documented rather than real.
+
+### No model is compiled into a default build
+
+Which makes "works offline" checkable in one command rather than claimed:
 
 ```console
 $ cargo tree -p ghostr-cli | grep -c ghostr-llm
@@ -90,27 +131,13 @@ $ cargo tree -p ghostr-cli --features llm-local | grep -c ghostr-llm
 `--features llm-local` adds an Ollama-compatible runtime on loopback, and
 `--features llm-remote` adds providers that can only be reached through the
 gate. (The one network dependency a default build *does* carry is `ureq`, for
-OpenTimestamps — `ghostr anchor` is the single command that touches the
-network.) Either way the pipeline falls back to its deterministic path when a model
-is absent, so a runtime being down costs the recap its polish and never costs
-the day its seal.
+OpenTimestamps.) Either way the pipeline falls back to its deterministic path
+when a model is absent, so a runtime being down costs the recap its polish and
+never costs the day its seal.
 
-M2 is under way, and the daily loop now runs end to end on a stock build. The
-persona model distils, versions, and diffs: voice, relationships, and routines
-are computed from the corpus exactly — sentence lengths and punctuation rates
-are arithmetic, not estimates — while opinions, boundaries, and lore wait for a
-model rather than being guessed. On top of it, quests are issued with their
-answers already committed, answered, and scored:
+### On a screen, because a five-minute ritual does not get done otherwise
 
-```console
-$ ghostr quest issue                # commits to every answer, then asks
-$ ghostr quest list                 # the ghost's answer stays sealed
-$ ghostr quest answer qst:a1b2c3d4 correct --text "not how I'd put it"
-$ ghostr fidelity                   # never a bare percentage
-```
-
-And on a screen, because a daily ritual that takes five minutes does not get
-done. `ghostr serve` binds a Unix socket by default; `--http` adds a loopback
+`ghostr serve` binds a Unix socket by default; `--http` adds a loopback
 listener, and putting it on the wifi for a phone takes one more flag that exists
 to make you say so out loud:
 
@@ -129,20 +156,13 @@ app rather than a bookmark. Four screens: today's recap with a box to write in,
 the day's quests, the score, and the vault's state. The token is in the URL
 fragment, which browsers never send to a server and proxies never log.
 
-Without a model the generator asks the kinds it can do well — clozes over
-sentences you wrote and recall claims about routines it counted — rather than
-inventing the three that need a model to write their prompt. What is *not* yet
-there: those three kinds, a keyboard loop fast enough to be a daily ritual, and
-committing the day's quest set into the footage Merkle tree. Relays are still
-defined with `todo!()` bodies, so the shape is reviewable before it is built.
-
 `ghostr-testkit` landed ahead of all of it: a synthetic corpus generator that
 hands back its own ground truth, a scripted model, a deterministic clock and
 RNG, and a permanent set of hostile fixtures.
 
 ```console
 $ cargo build --workspace        # 14 crates, compiles clean
-$ cargo test --workspace         # 400+ tests, none touching the network
+$ cargo test --workspace         # 800+ tests, none touching the network
 $ cargo xtask scaffold-status    # what is still unimplemented, per crate
 $ cargo xtask lint-deps          # dependency-direction rules, enforced in CI
 ```
@@ -194,6 +214,20 @@ $ ghostr passphrase                        # rewrap the seed; the journal is unt
 $ ghostr sync                              # encrypted backup to your relays
 $ ghostr restore                           # rebuild on a new machine, seed only
 ```
+
+`sync` and `restore` need relays, and they are yours to name — nothing picks one
+for you, because that would put your encrypted history somewhere you never
+chose. In `config.toml`:
+
+```toml
+relays = ["wss://relay.example", "wss://relay.two"]
+```
+
+Each day is published twice: once under Ghostr's own kind and once mirrored
+under NIP-78, so a restore works even though kinds 31780–31789 are not yet
+claimed. A restored machine is a **replica** — it reads, ingests and answers
+quests, and never seals, because two devices advancing one `seq` would fork the
+chain with no rule for which side is real.
 
 Health and location logs are added as `Secret`, which means they never leave the
 device under any policy — and `source add` says so where you will read it:

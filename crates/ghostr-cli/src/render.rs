@@ -279,16 +279,21 @@ pub(crate) fn verify(report: &VerifyReport) -> String {
         if report.chain_ok { "OK" } else { "FAILED" },
         report.days
     ));
-    out.push_str(&format!(
-        "roots   {}\n",
-        if !report.chain_ok {
-            "not checked (chain failed first)"
-        } else if report.roots_ok {
-            "OK"
-        } else {
-            "FAILED"
-        }
-    ));
+    // Three states, not two. A replica restored from relays holds the footage
+    // but not the memories, so its roots cannot be re-derived — saying FAILED
+    // there would tell a user their history had been altered when nothing had.
+    let roots = if !report.chain_ok {
+        "not checked (chain failed first)".to_owned()
+    } else if !report.roots_ok {
+        "FAILED".to_owned()
+    } else if report.roots_unchecked == report.days {
+        "not checkable here (this device holds no memories)".to_owned()
+    } else if report.roots_unchecked > 0 {
+        format!("OK  ({} day(s) not checkable here)", report.roots_unchecked)
+    } else {
+        "OK".to_owned()
+    };
+    out.push_str(&format!("roots   {roots}\n"));
 
     if let Some(seq) = report.first_bad_seq {
         out.push_str(&format!("\nfirst bad sequence: {seq}\n"));

@@ -301,6 +301,33 @@ pub async fn restore(engine: &Engine, relays: &dyn RelayClient) -> crate::Result
         }
     }
 
+    // The chain this vault is joining is not the one `Engine::init` minted for
+    // it. Genesis is `H(identity ‖ created_at ‖ chain_id)`, and a fresh vault's
+    // `chain_id` and `created_at` are its own — so its genesis link is not the
+    // one the recovered links were computed against, and `verify` fails at
+    // seq 1. It did, on every restored vault, and the existing test did not
+    // notice because it compared footage fields rather than running `verify`.
+    //
+    // Seq 1's `prev_link` *is* the original genesis link: that is what a chain
+    // link commits to. Adopt it.
+    if let Some(first) = recovered.first() {
+        engine
+            .store()
+            .set_meta(
+                ghostr_store::schema::meta_key::GENESIS_LINK,
+                &first.commitment.prev_link.to_hex(),
+            )
+            .map_err(crate::Error::Store)?;
+        // And forget the chain id, rather than keep one that no longer hashes
+        // to that link. It is not recoverable from anything published today —
+        // `Footage` does not carry it — and a wrong value nothing checks is
+        // worse than an absent one, because the next reader believes it.
+        engine
+            .store()
+            .clear_meta(ghostr_store::schema::meta_key::CHAIN_ID)
+            .map_err(crate::Error::Store)?;
+    }
+
     let tip = recovered.last().map(|footage| footage.seq);
     for footage in &recovered {
         let leaves = Vec::new();
