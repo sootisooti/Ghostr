@@ -4,7 +4,7 @@
 //! than state. The engine holds the wiring; these hold the order things happen
 //! in.
 
-use chrono::{NaiveDate, NaiveTime};
+use chrono::NaiveDate;
 use ghostr_anchor::{AnchorState, OtsClient};
 use ghostr_core::footage::{Amendment, AmendmentReason, Commitment, Footage, Thread};
 use ghostr_core::hash::Hash32;
@@ -123,7 +123,7 @@ pub fn memoria(engine: &Engine, date: NaiveDate) -> crate::Result<MemoriaOutcome
     // The window runs from the previous cutoff to this day's. Both ends are
     // absolute instants, so a timezone change mid-window cannot double-count or
     // drop a note (SPEC Q11).
-    let window = day_window(date, &tz);
+    let window = day_window(engine, date)?;
 
     let dek = engine.dek()?;
     let memories = engine.store().window(dek, window)?;
@@ -494,7 +494,7 @@ pub fn seal_due(
         if genesis_date.is_some_and(|genesis| cursor < genesis) {
             break;
         }
-        let window = day_window(cursor, &tz);
+        let window = day_window(engine, cursor)?;
         let grace_ms = i64::from(grace_hours).saturating_mul(60 * 60 * 1000);
         if now < window.end.utc_millis().saturating_add(grace_ms) {
             // Still inside its grace window. Everything older is not, so the
@@ -524,29 +524,43 @@ pub fn seal_due(
     })
 }
 
-fn day_window(date: NaiveDate, tz: &chrono_tz::Tz) -> TimeRange {
-    use chrono::TimeZone as _;
+/// The vault's cutoff policy, from its configuration.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if the configuration cannot
+/// be read.
+fn cutoff_policy(engine: &Engine) -> crate::Result<ghostr_memoria::cutoff::CutoffPolicy> {
+    let config = engine.config()?;
+    Ok(ghostr_memoria::cutoff::CutoffPolicy {
+        minute_of_day: config.cutoff_minute_of_day,
+        home_tz: engine.home_tz()?,
+    })
+}
 
-    let start_local = date.and_time(NaiveTime::MIN);
-    let end_local = date.succ_opt().unwrap_or(date).and_time(NaiveTime::MIN);
-
-    // `from_local_datetime` is ambiguous across a DST fold and absent across a
-    // spring-forward gap. Taking the earliest candidate makes the choice
-    // deterministic in both cases rather than depending on which branch a
-    // library happens to return.
-    let start = tz
-        .from_local_datetime(&start_local)
-        .earliest()
-        .map_or(0, |dt| dt.timestamp_millis());
-    let end = tz
-        .from_local_datetime(&end_local)
-        .earliest()
-        .map_or(0, |dt| dt.timestamp_millis());
-
-    TimeRange {
-        start: Timestamp::new(start, 0),
-        end: Timestamp::new(end, 0),
-    }
+/// The half-open absolute window one local date's footage covers.
+///
+/// Delegates to `ghostr_memoria::cutoff`, which is where the rule lives and
+/// where its DST behaviour is tested. This used to be a second implementation
+/// here that hardcoded midnight to midnight, so `cutoff_minute_of_day` — a
+/// documented setting with a 23:59 default — decided nothing at all, and the
+/// carefully tested version was called by nothing but its own tests.
+///
+/// Consecutive dates abut by construction: this date's start is the previous
+/// date's cutoff, which is that date's end. A gap between two windows would
+/// drop every memory inside it, sealed into no footage and reported by nothing
+/// (I3).
+///
+/// # Errors
+///
+/// Returns [`Error::Config`](crate::Error::Config) if the configuration cannot
+/// be read.
+fn day_window(engine: &Engine, date: NaiveDate) -> crate::Result<TimeRange> {
+    Ok(ghostr_memoria::cutoff::window_for(
+        &cutoff_policy(engine)?,
+        date,
+        None,
+    ))
 }
 
 /// Submits the chain tip to OpenTimestamps calendars.
@@ -844,7 +858,7 @@ pub fn recap(engine: &Engine, date: NaiveDate) -> crate::Result<Recap> {
 /// and looked like it had.
 fn preview(engine: &Engine, date: NaiveDate) -> crate::Result<Footage> {
     let tz = engine.home_tz()?;
-    let window = day_window(date, &tz);
+    let window = day_window(engine, date)?;
     let dek = engine.dek()?;
     let memories = engine.store().window(dek, window)?;
 
@@ -958,8 +972,7 @@ pub fn dry_run_remote(
     use ghostr_llm::model::TaskKind;
     use ghostr_llm::prompt::{PromptBuilder, TokenBudget};
 
-    let tz = engine.home_tz()?;
-    let window = day_window(date, &tz);
+    let window = day_window(engine, date)?;
     let dek = engine.dek()?;
     let memories = engine.store().window(dek, window)?;
     let gated = crate::model::remote_model(engine, config)?;
@@ -1204,9 +1217,8 @@ fn quest_corpus(
     engine: &Engine,
     date: NaiveDate,
 ) -> crate::Result<Vec<ghostr_core::memory::Memory>> {
-    let tz = engine.home_tz()?;
     let dek = engine.dek()?;
-    Ok(engine.store().window(dek, day_window(date, &tz))?)
+    Ok(engine.store().window(dek, day_window(engine, date)?)?)
 }
 
 /// Asks a model to write the three kinds it is needed for.
