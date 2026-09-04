@@ -157,20 +157,13 @@ impl Config {
                 }
                 "auto_anchor" => config.auto_anchor = value == "true",
                 "egress_enabled" => config.egress_enabled = value == "true",
-                "egress_allow" => {
-                    config.egress_allow = value
-                        .split(',')
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
-                "calendars" => {
-                    config.calendars = value
-                        .split(',')
-                        .map(|s| s.trim().to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
+                "egress_allow" => config.egress_allow = string_list(value),
+                // Read by `sync` and `restore`, and until now unsettable: the
+                // field existed, the CLI told users to put `relays = [...]` in
+                // this file, and this parser rejected the key as unknown. So
+                // the list was always empty and both commands always refused.
+                "relays" => config.relays = string_list(value),
+                "calendars" => config.calendars = string_list(value),
                 other => {
                     return Err(crate::Error::Config {
                         detail: format!("unknown config key `{other}`"),
@@ -226,6 +219,24 @@ impl Config {
     }
 }
 
+/// Parses a list value, in TOML array form or bare comma-separated form.
+///
+/// Both, because the file is called `config.toml` and the CLI's own error
+/// messages print TOML arrays, while this hand-rolled parser only ever
+/// understood the bare form. A vault written either way keeps working, and a
+/// user who writes what the error message told them to no longer gets
+/// `unknown config key`.
+fn string_list(value: &str) -> Vec<String> {
+    value
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|item| item.trim().trim_matches('"').trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +259,42 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join(CONFIG_FILENAME), "this is not config\n").expect("write");
         assert!(Config::load(dir.path()).is_err());
+    }
+
+    /// The key `sync` and `restore` need, and the one the CLI's own error
+    /// message tells the user to write. It was rejected as unknown.
+    #[test]
+    fn relays_can_actually_be_configured() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(CONFIG_FILENAME),
+            "relays = [\"wss://one.example\", \"wss://two.example\"]\n",
+        )
+        .expect("write");
+        let config = Config::load(dir.path()).expect("load");
+        assert_eq!(
+            config.relays,
+            vec![
+                "wss://one.example".to_owned(),
+                "wss://two.example".to_owned()
+            ]
+        );
+    }
+
+    /// A list written the bare way an older vault used keeps working.
+    #[test]
+    fn a_list_parses_in_either_form() {
+        assert_eq!(
+            string_list("[\"wss://a\", \"wss://b\"]"),
+            vec!["wss://a".to_owned(), "wss://b".to_owned()]
+        );
+        assert_eq!(
+            string_list("wss://a, wss://b"),
+            vec!["wss://a".to_owned(), "wss://b".to_owned()]
+        );
+        assert_eq!(string_list("[]"), Vec::<String>::new());
+        assert_eq!(string_list(""), Vec::<String>::new());
+        assert_eq!(string_list("  one  "), vec!["one".to_owned()]);
     }
 
     #[test]

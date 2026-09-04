@@ -28,9 +28,17 @@ use ghostr_nostr::client::{Filter, PublishReport, PublishScope, RelayClient, Sub
 
 /// A relay that keeps what it is given.
 ///
-/// Deliberately not filtering on `authors`: a real relay may ignore the filter,
-/// and a restore that only works against a well-behaved relay is a restore that
-/// has not been tested.
+/// Two deliberate and opposite choices about the filter.
+///
+/// It does **not** filter on `authors`. A real relay may ignore that, and a
+/// restore that only works against a well-behaved relay is a restore that has
+/// not been tested — the author check has to be ours.
+///
+/// It **does** filter on `kinds`, because that is a request the caller has to
+/// actually make. A double that served everything regardless would make the
+/// filter invisible: dropping kind 30078 from the query would change nothing a
+/// test could see, and the NIP-78 fallback would look wired up while asking for
+/// nothing.
 #[derive(Default, Clone)]
 struct MemoryRelay {
     stored: Arc<Mutex<Vec<SignedEvent>>>,
@@ -51,13 +59,29 @@ impl RelayClient for MemoryRelay {
         })
     }
 
-    async fn fetch(&self, _filter: &Filter) -> ghostr_nostr::Result<Vec<SignedEvent>> {
-        Ok(self.stored.lock().unwrap().clone())
+    async fn fetch(&self, filter: &Filter) -> ghostr_nostr::Result<Vec<SignedEvent>> {
+        Ok(self
+            .stored
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| requested(filter, event.event.kind))
+            .cloned()
+            .collect())
     }
 
     async fn subscribe(&self, _filter: Filter) -> ghostr_nostr::Result<Box<dyn Subscription>> {
         unreachable!("sync fetches rather than subscribes")
     }
+}
+
+/// Whether a filter asked for this kind. An empty filter asks for everything,
+/// as NIP-01 says.
+fn requested(filter: &Filter, kind: u16) -> bool {
+    if filter.kinds.is_empty() && filter.raw_kinds.is_empty() {
+        return true;
+    }
+    filter.kinds.iter().any(|k| k.as_u16() == kind) || filter.raw_kinds.contains(&kind)
 }
 
 const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
@@ -295,21 +319,27 @@ async fn a_relay_holding_an_incomplete_chain_is_refused() {
 
     let relay = MemoryRelay::default();
     sync(&first, &relay).await.expect("sync");
-    assert_eq!(relay.stored.lock().unwrap().len(), 3);
+    // Six, not three: every day is published in both forms since the NIP-78
+    // mirror was wired in.
+    assert_eq!(relay.stored.lock().unwrap().len(), 6);
 
     // A relay loses the middle day — expired, pruned, or never accepted.
+    //
+    // *Both* copies of it. Since the mirror was wired in, dropping only the
+    // 3178x form leaves the day recoverable from kind 30078 and the chain is
+    // complete after all — which is the fallback doing its job, and is what
+    // `a_relay_holding_only_the_mirror_restores_the_whole_chain` covers. Losing
+    // a day now means losing both forms of it.
     {
         let mut stored = relay.stored.lock().unwrap();
-        let middle = stored
-            .iter()
-            .position(|event| {
-                event.event.tags.iter().any(|tag| {
-                    tag.first().map(String::as_str) == Some("d")
-                        && tag.get(1).map(String::as_str) == Some("ghostr/v1/footage/2")
-                })
+        let before = stored.len();
+        stored.retain(|event| {
+            !event.event.tags.iter().any(|tag| {
+                tag.first().map(String::as_str) == Some("d")
+                    && tag.get(1).map(String::as_str) == Some("ghostr/v1/footage/2")
             })
-            .expect("the day 2 event");
-        stored.remove(middle);
+        });
+        assert_eq!(before - stored.len(), 2, "the record and its mirror");
     }
 
     let second = vault(&tmp.path().join("two"));
@@ -395,5 +425,314 @@ async fn a_second_sync_sends_nothing_new() {
     let again = sync(&engine, &relay).await.expect("sync");
     assert_eq!(again.published, 0);
     assert_eq!(again.already_present, 3);
-    assert_eq!(relay.stored.lock().unwrap().len(), 3);
+    // Three days, two forms each, and the second run added neither.
+    assert_eq!(relay.stored.lock().unwrap().len(), 6);
+}
+
+// --- the NIP-78 mirror ------------------------------------------------------
+//
+// SPEC Q3: kinds 31780–31789 are unclaimed. The mirror under NIP-78 (30078) is
+// what makes correctness not depend on that block being ours, and until this
+// section existed `mirror_as_nip78` was called by nothing but its own unit
+// tests — the fallback was documented and absent.
+
+/// A relay that will not store an unrecognised kind.
+///
+/// The whole point of this file's newest tests: it rejects every 3178x event,
+/// so only the mirror survives. A double that kept both would let every
+/// assertion below pass with the fallback deleted.
+#[derive(Default, Clone)]
+struct MirrorOnlyRelay {
+    stored: Arc<Mutex<Vec<SignedEvent>>>,
+}
+
+#[async_trait]
+impl RelayClient for MirrorOnlyRelay {
+    async fn publish(
+        &self,
+        event: SignedEvent,
+        _scope: PublishScope,
+    ) -> ghostr_nostr::Result<PublishReport> {
+        if event.event.kind != ghostr_nostr::kinds::NIP78_APP_DATA {
+            return Err(ghostr_nostr::Error::PublishRejected { attempted: 1 });
+        }
+        self.stored.lock().unwrap().push(event);
+        Ok(PublishReport {
+            accepted: vec!["memory".to_owned()],
+            rejected: Vec::new(),
+            unreachable: Vec::new(),
+        })
+    }
+
+    async fn fetch(&self, filter: &Filter) -> ghostr_nostr::Result<Vec<SignedEvent>> {
+        Ok(self
+            .stored
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| requested(filter, event.event.kind))
+            .cloned()
+            .collect())
+    }
+
+    async fn subscribe(&self, _filter: Filter) -> ghostr_nostr::Result<Box<dyn Subscription>> {
+        unreachable!("sync fetches rather than subscribes")
+    }
+}
+
+/// A sync sends both forms of every day.
+#[tokio::test]
+async fn sync_publishes_the_mirror_alongside_the_record() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 3);
+
+    let engine = vault(&tmp.path().join("one"));
+    ops::ingest(&engine, &notes).expect("ingest");
+    seal_days(&engine, 3);
+
+    let relay = MemoryRelay::default();
+    let report = sync(&engine, &relay).await.expect("sync");
+
+    assert_eq!(report.published, 3);
+    assert_eq!(report.mirrored, 3);
+    assert!(report.mirror_failed.is_empty());
+
+    let stored = relay.stored.lock().unwrap().clone();
+    let mirrors = stored
+        .iter()
+        .filter(|e| e.event.kind == ghostr_nostr::kinds::NIP78_APP_DATA)
+        .count();
+    assert_eq!(mirrors, 3);
+
+    // Byte-identical content, so the unanchored copy cannot say something the
+    // anchored one does not.
+    for mirror in stored
+        .iter()
+        .filter(|e| e.event.kind == ghostr_nostr::kinds::NIP78_APP_DATA)
+    {
+        let d = mirror
+            .event
+            .tags
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("d"))
+            .and_then(|t| t.get(1))
+            .expect("a d tag");
+        let twin = stored
+            .iter()
+            .find(|e| {
+                e.event.kind != ghostr_nostr::kinds::NIP78_APP_DATA
+                    && e.event.tags.iter().any(|t| t.get(1) == Some(d))
+            })
+            .expect("the 3178x form");
+        assert_eq!(mirror.event.content, twin.event.content);
+        assert_eq!(mirror.event.tags, twin.event.tags);
+        // Different ids, because the kind differs — so one signature cannot
+        // cover both, and the mirror is signed in its own right.
+        assert_ne!(mirror.id, twin.id);
+    }
+}
+
+/// The criterion: a relay that holds *only* the mirror still restores the chain.
+///
+/// This is what SPEC Q3 actually claims — that correctness survives the kind
+/// block turning out not to be ours. A test where both forms were present would
+/// pass without the fallback existing at all.
+#[tokio::test]
+async fn a_relay_holding_only_the_mirror_restores_the_whole_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 4);
+
+    let first = vault(&tmp.path().join("one"));
+    ops::ingest(&first, &notes).expect("ingest");
+    seal_days(&first, 4);
+
+    let relay = MirrorOnlyRelay::default();
+    let report = sync(&first, &relay).await.expect("sync");
+
+    // Every 3178x publish was refused, and the report says so rather than
+    // claiming a backup that is not there.
+    assert_eq!(report.published, 0);
+    assert_eq!(report.failed.len(), 4);
+    // The mirror is not sent for a day whose record was refused: a fallback for
+    // a backup that does not exist is not a fallback.
+    assert_eq!(report.mirrored, 0);
+
+    // So publish the mirrors the way a relay that accepted the record but not
+    // the kind would have left things: through a relay that keeps everything,
+    // then drop the records.
+    let both = MemoryRelay::default();
+    sync(&first, &both).await.expect("sync");
+    let mirrors: Vec<SignedEvent> = both
+        .stored
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.event.kind == ghostr_nostr::kinds::NIP78_APP_DATA)
+        .cloned()
+        .collect();
+    assert_eq!(mirrors.len(), 4);
+
+    let mirror_only = MemoryRelay::default();
+    *mirror_only.stored.lock().unwrap() = mirrors;
+
+    // A clean machine with the seed and nothing else.
+    let second = vault(&tmp.path().join("two"));
+    let restored = restore(&second, &mirror_only).await.expect("restore");
+
+    assert_eq!(restored.recovered, 4, "the mirror must rebuild the chain");
+    assert_eq!(restored.tip, Some(4));
+    assert_eq!(restored.rejected, 0);
+    // `ops::verify` is deliberately not asserted here. A restored vault's chain
+    // does not verify, and that is a separate, pre-existing defect rather than
+    // anything the mirror does: `chain_id` and the chain's `created_at` are
+    // minted fresh by `Engine::init`, so a restored vault's genesis differs
+    // from the one the recovered links were computed against and the check
+    // fails at seq 1. Restoring those parameters is its own change; asserting
+    // around it here would be writing a test that dodges a known failure.
+}
+
+/// A day present in both forms is one day, not two.
+#[tokio::test]
+async fn a_day_present_in_both_forms_is_restored_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 3);
+
+    let first = vault(&tmp.path().join("one"));
+    ops::ingest(&first, &notes).expect("ingest");
+    seal_days(&first, 3);
+
+    let relay = MemoryRelay::default();
+    sync(&first, &relay).await.expect("sync");
+    assert_eq!(
+        relay.stored.lock().unwrap().len(),
+        6,
+        "three days, two forms"
+    );
+
+    let second = vault(&tmp.path().join("two"));
+    let restored = restore(&second, &relay).await.expect("restore");
+
+    assert_eq!(restored.recovered, 3);
+    // The duplicate is neither recovered again nor counted as rejected: nothing
+    // was wrong with it, and nothing new came of it.
+    assert_eq!(restored.rejected, 0);
+    // See the note in `a_relay_holding_only_the_mirror_restores_the_whole_chain`
+    // for why `verify` is not asserted after a restore.
+}
+
+/// A mirror a relay refused is sent again on the next sync.
+///
+/// Without this the day would be skipped as "already backed up" — a vault whose
+/// fallback is missing, reported once and never healed.
+#[tokio::test]
+async fn a_missing_mirror_is_sent_on_the_next_sync() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 2);
+
+    let engine = vault(&tmp.path().join("one"));
+    ops::ingest(&engine, &notes).expect("ingest");
+    seal_days(&engine, 2);
+
+    // First run against a relay that keeps everything, then strip the mirrors:
+    // the state a relay leaves after accepting a record and refusing the kind.
+    let relay = MemoryRelay::default();
+    sync(&engine, &relay).await.expect("sync");
+    relay
+        .stored
+        .lock()
+        .unwrap()
+        .retain(|e| e.event.kind != ghostr_nostr::kinds::NIP78_APP_DATA);
+    assert_eq!(relay.stored.lock().unwrap().len(), 2);
+
+    let again = sync(&engine, &relay).await.expect("second sync");
+    assert_eq!(again.published, 0, "the records are already there");
+    assert_eq!(again.mirrored, 2, "the missing mirrors are sent");
+    assert_eq!(again.already_present, 0);
+
+    // And a third run has nothing left to do.
+    let third = sync(&engine, &relay).await.expect("third sync");
+    assert_eq!(third.already_present, 2);
+    assert_eq!(third.mirrored, 0);
+}
+
+/// Kind 30078 is shared: anyone may publish it. The `d` tag is what separates
+/// this vault's footage from anything else filed under that kind, and it is the
+/// only thing that does.
+///
+/// The intruder here is a **mirror of a different Ghostr kind**, encrypted to
+/// this vault's own data key. That matters: an outsider's blob is rejected by
+/// the decrypt, so a test using one would pass with the `d` check deleted — as
+/// the first draft of this test did. This one decrypts perfectly. Only the tag
+/// says it is not a footage.
+#[tokio::test]
+async fn a_mirror_of_another_kind_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 2);
+
+    let first = vault(&tmp.path().join("one"));
+    ops::ingest(&first, &notes).expect("ingest");
+    seal_days(&first, 2);
+
+    let relay = MemoryRelay::default();
+    sync(&first, &relay).await.expect("sync");
+
+    let key =
+        ghostr_crypto::Keystore::key_ref(first.keystore(), ghostr_core::identity::Account::Data)
+            .expect("key");
+
+    // A real footage — the first vault's own day 1 — re-published under the
+    // *quest set* kind and mirrored. Footage-shaped on purpose: a payload that
+    // failed to deserialise would be rejected by `serde` and the test would
+    // pass with the `d` check deleted. This one decrypts and deserialises
+    // perfectly, so the tag is the only thing left that can refuse it.
+    let real = first
+        .store()
+        .all_footage(first.dek().unwrap())
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("day 1");
+    let intruder = ghostr_nostr::codec::encode(
+        first.keystore(),
+        key,
+        ghostr_nostr::kinds::Kind::QuestSet,
+        "2026-08-01",
+        1_756_252_800,
+        &real,
+        [7u8; 32],
+    )
+    .await
+    .expect("encode");
+    let mirror = ghostr_nostr::codec::mirror_as_nip78(&intruder).expect("mirror");
+    let sig = ghostr_crypto::Signer::sign_event(first.keystore(), key, &mirror)
+        .await
+        .expect("sign");
+    relay.stored.lock().unwrap().push(SignedEvent {
+        id: mirror.id(),
+        event: mirror,
+        sig,
+    });
+
+    let second = vault(&tmp.path().join("two"));
+    let restored = restore(&second, &relay).await.expect("restore");
+
+    assert_eq!(restored.recovered, 2, "our two days, and nothing else");
+    assert_eq!(
+        restored.rejected, 1,
+        "a footage filed under the quest-set identifier is not this day's footage"
+    );
+
+    // And the two days that did come back are the real ones, day for day.
+    let original = first.store().all_footage(first.dek().unwrap()).unwrap();
+    let rebuilt = second.store().all_footage(second.dek().unwrap()).unwrap();
+    assert_eq!(rebuilt.len(), 2);
+    for (a, b) in original.iter().zip(rebuilt.iter()) {
+        assert_eq!(a.seq, b.seq);
+        assert_eq!(a.commitment.link, b.commitment.link);
+    }
 }

@@ -24,6 +24,15 @@
 //! The codec is implemented: [`kinds`] addresses events, [`codec`] encodes and
 //! decodes Ghostr's kinds against a [`Signer`](ghostr_crypto::Signer), mirrors
 //! them under NIP-78, and enforces ghost disclosure by construction (SPEC I10).
+//!
+//! The mirror is not decoration. Kinds 31780–31789 are **unclaimed** (SPEC Q3),
+//! so a reader that cannot resolve them must still be able to read a vault's
+//! history; [`codec::mirror_as_nip78`] builds the kind-30078 copy and
+//! [`codec::decode_mirrored`] reads either form. What never relaxes is the `d`
+//! tag: kind 30078 is shared application data anyone may publish, so
+//! `ghostr/v1/footage/7` is the only thing that says an event is a footage —
+//! and it says so whatever number it was filed under, which is the property
+//! that makes an unclaimed block survivable.
 //! [`privacy`] jitters publish times.
 //!
 //! Two things are deliberately absent. [`RelayClient`] is a trait with no

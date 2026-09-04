@@ -316,7 +316,13 @@ somebody else's notes is counted and reported, not silently ingested.
       2026-08-27, no kind in 31700–31899 is registered, so 31780–31789 is free.
       **NIP not yet submitted**, so the block is unclaimed rather than ours; the
       `ghostr/v1/...` `d` tag is the real identifier and the NIP-78 mirror is
-      what makes that true in practice (SPEC Q3).
+      what makes that true in practice (SPEC Q3). The mirror is now actually
+      published and actually read: `sync` sends both forms of every day and
+      re-sends a mirror a relay refused, `restore` asks for both kinds and
+      accepts either, and `a_relay_holding_only_the_mirror_restores_the_whole_chain`
+      rebuilds a chain from a relay that holds no 3178x event at all. Until
+      this, `mirror_as_nip78` was called by nothing outside its own unit tests
+      — the fallback this criterion leans on was documented and absent.
 
 **Not in M3:** GUI, third-party verifier tooling.
 
