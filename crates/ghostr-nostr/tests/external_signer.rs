@@ -117,6 +117,21 @@ impl Signer for DetachedSigner {
         let conversation = nip44::ConversationKey::derive(&self.secret, sender)?;
         nip44::decrypt(&conversation, payload)
     }
+
+    async fn gift_wrap(
+        &self,
+        _key: KeyRef,
+        _recipient: &PublicKey,
+        _rumor: &UnsignedEvent,
+        _entropy: ghostr_crypto::signer::GiftWrapEntropy,
+    ) -> ghostr_crypto::Result<SignedEvent> {
+        // A hardware wallet has the same problem a bunker does: the outer wrap
+        // needs a signature under a throwaway key, and a device that holds one
+        // key does not have one to offer.
+        Err(ghostr_crypto::Error::RemoteSigner {
+            reason: "this signer cannot sign under a throwaway key",
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]

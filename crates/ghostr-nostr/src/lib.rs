@@ -37,17 +37,6 @@
 // the exception: a failed assertion should panic loudly with a message, and
 // threading `Result` through test bodies buries what is actually being asserted.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-// SCAFFOLD: one function is still `todo!()` — `privacy::gift_wrap`, blocked on
-// SPEC §14 Q20. The allows are narrowed to what that single body needs:
-// `unused_variables` because a diverging body never reads its arguments, and
-// its parameters keep real names rather than `_` prefixes so the signature stays
-// readable, and `clippy::todo`, which CLAUDE.md §5 denies workspace-wide and
-// names this as the documented exception. `dead_code` is gone — nothing in this
-// crate is unreachable any more.
-//
-// `cargo xtask scaffold-status` counts these markers, so the block cannot be
-// quietly forgotten. Delete it when Q20 is answered.
-#![allow(unused_variables, clippy::todo)]
 
 pub mod client;
 pub mod codec;

@@ -9,7 +9,10 @@
 //! erase it. That is why anchor receipts default to local-only rather than
 //! relying on these measures (SPEC Q5, THREAT_MODEL §T2).
 
-use ghostr_crypto::event::UnsignedEvent;
+use ghostr_core::identity::{KeyRef, PublicKey};
+use ghostr_crypto::Signer;
+use ghostr_crypto::event::{SignedEvent, UnsignedEvent};
+use ghostr_crypto::signer::GiftWrapEntropy;
 use serde::{Deserialize, Serialize};
 
 /// How much metadata protection a publish applies.
@@ -68,31 +71,28 @@ pub fn jitter_created_at(base: u64, rng: &dyn ghostr_core::time::Rng, window_sec
     base.saturating_add(u64::from_be_bytes(bytes) % u64::from(window_secs))
 }
 
-/// Wraps an event in NIP-59 gift wrap under an ephemeral key.
+/// Wraps an event in NIP-59 gift wrap, hiding its author from relays.
+///
+/// The cryptography is delegated to [`Signer::gift_wrap`]: the throwaway key
+/// that signs the outer layer is what hides the author, and it is born and
+/// zeroized inside `ghostr-crypto` (SPEC §14 Q20). This crate keeps the policy
+/// decision — [`PrivacyMode::GiftWrapped`] — and none of the key material,
+/// which is the split every other seam in this tree uses.
 ///
 /// # Errors
 ///
-/// Returns an error if sealing or wrapping fails.
-pub fn gift_wrap(
-    event: &UnsignedEvent,
-    ephemeral_entropy: &[u8; 32],
-) -> crate::Result<UnsignedEvent> {
-    // Left unimplemented, and the signature is why — SPEC §14 Q20.
-    //
-    // NIP-59 is three layers: a rumor, a seal (kind 13) encrypted to the
-    // recipient and signed by the real author, and a wrap (kind 1059) encrypted
-    // and signed by a *throwaway* key. This signature can produce none of them.
-    // It has no recipient, so there is nobody to encrypt to; no `Signer`, so the
-    // seal cannot be signed; and it returns an `UnsignedEvent`, though the wrap
-    // must be signed by a key that exists only inside this call.
-    //
-    // Deriving that key here from `ephemeral_entropy` is the obvious shortcut
-    // and the one thing that is not allowed: ARCHITECTURE §3 rule 4 puts secret
-    // key bytes in `ghostr-crypto` and nowhere else. Closing this means giving
-    // `Signer` an ephemeral-key operation, which is a decision about the crypto
-    // seam rather than a gap with one right answer — so it is a question, not a
-    // silent choice (CLAUDE.md §9).
-    todo!("SPEC Q20: needs an ephemeral-key operation on Signer")
+/// Returns an error if the signer refuses. A **remote signer always will**:
+/// NIP-46 has no gift-wrap method, so choosing a bunker and choosing gift wrap
+/// are mutually exclusive today, and the caller is told rather than quietly
+/// given an event whose author a relay can read.
+pub async fn gift_wrap(
+    signer: &dyn Signer,
+    key: KeyRef,
+    recipient: &PublicKey,
+    rumor: &UnsignedEvent,
+    entropy: GiftWrapEntropy,
+) -> crate::Result<SignedEvent> {
+    Ok(signer.gift_wrap(key, recipient, rumor, entropy).await?)
 }
 
 #[cfg(test)]

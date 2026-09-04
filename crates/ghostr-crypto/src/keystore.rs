@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use ghostr_core::identity::{Account, KeyRef, Npub, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Signature, UnsignedEvent};
+use crate::event::{Signature, SignedEvent, UnsignedEvent};
 use crate::kdf::{
     Argon2Params, Dek, WrappedSeed, derive_dek, derive_kek, unwrap_identity, unwrap_seed,
     wrap_identity, wrap_seed,
@@ -23,7 +23,7 @@ use crate::kdf::{
 use crate::nip06::{DerivedKey, MasterKey, Mnemonic};
 use crate::nip44::ConversationKey;
 use crate::secret::SecretString;
-use crate::signer::{Keystore, Signer};
+use crate::signer::{GiftWrapEntropy, Keystore, Signer};
 
 /// Where a vault's data encryption key comes from.
 ///
@@ -669,6 +669,94 @@ impl Signer for FileKeystore {
     ) -> crate::Result<Vec<u8>> {
         let conversation = self.conversation_key(key, sender)?;
         crate::nip44::decrypt(&conversation, payload)
+    }
+
+    async fn gift_wrap(
+        &self,
+        key: KeyRef,
+        recipient: &PublicKey,
+        rumor: &UnsignedEvent,
+        entropy: GiftWrapEntropy,
+    ) -> crate::Result<SignedEvent> {
+        // The rumor holds the canonical time; every outer layer is tweaked into
+        // the past (NIP-59). A layer dated after it would claim to have wrapped
+        // something that did not exist yet, and relays refuse future timestamps
+        // anyway — so this is checked rather than assumed of the caller.
+        if entropy.seal_created_at > rumor.created_at || entropy.wrap_created_at > rumor.created_at
+        {
+            return Err(crate::Error::Backend {
+                operation: "gift wrap layers must not postdate the rumor",
+            });
+        }
+        // Two encryptions under two different conversation keys, but a repeated
+        // nonce is the kind of thing that is only ever an accident and is free
+        // to refuse.
+        if entropy.seal_nonce == entropy.wrap_nonce {
+            return Err(crate::Error::Backend {
+                operation: "seal and wrap nonces must differ",
+            });
+        }
+
+        let author = self.derived(key.account)?;
+
+        // Layer 1: the seal. Kind 13, encrypted to the recipient under the
+        // author's real key, and its tags MUST be empty — NIP-59 is explicit,
+        // and a tag here would leak exactly what the wrap exists to hide.
+        let rumor_json = serde_json::to_string(rumor).map_err(|_| crate::Error::Backend {
+            operation: "serialise rumor",
+        })?;
+        let author_conversation = ConversationKey::derive(author.secret_bytes(), recipient)?;
+        let seal_content = crate::nip44::encrypt(
+            &author_conversation,
+            rumor_json.as_bytes(),
+            &entropy.seal_nonce,
+        )?;
+
+        let seal = UnsignedEvent {
+            pubkey: author.public,
+            created_at: entropy.seal_created_at,
+            kind: 13,
+            tags: Vec::new(),
+            content: seal_content,
+        };
+        let seal_sig = author.sign(seal.id().as_bytes())?;
+        let sealed = SignedEvent {
+            id: seal.id(),
+            event: seal,
+            sig: seal_sig,
+        };
+
+        // Layer 2: the wrap, under a key that exists only here. Born, used and
+        // dropped inside this function — it never reaches a domain type, a
+        // caller, or a log, which is the entire reason gift wrap hides anything.
+        let ephemeral = DerivedKey::from_secret(key.account, entropy.ephemeral_secret)?;
+
+        let seal_json = serde_json::to_string(&sealed).map_err(|_| crate::Error::Backend {
+            operation: "serialise seal",
+        })?;
+        let ephemeral_conversation = ConversationKey::derive(ephemeral.secret_bytes(), recipient)?;
+        let wrap_content = crate::nip44::encrypt(
+            &ephemeral_conversation,
+            seal_json.as_bytes(),
+            &entropy.wrap_nonce,
+        )?;
+
+        let wrap = UnsignedEvent {
+            pubkey: ephemeral.public,
+            created_at: entropy.wrap_created_at,
+            kind: 1059,
+            // The recipient tag is the one thing a relay may see, because it is
+            // how the recipient finds the event at all.
+            tags: vec![vec!["p".to_owned(), recipient.to_hex()]],
+            content: wrap_content,
+        };
+        let wrap_sig = ephemeral.sign(wrap.id().as_bytes())?;
+
+        Ok(SignedEvent {
+            id: wrap.id(),
+            event: wrap,
+            sig: wrap_sig,
+        })
     }
 }
 

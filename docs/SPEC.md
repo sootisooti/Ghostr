@@ -1482,34 +1482,43 @@ operation they just authorised.
 
 ---
 
-**Q20 — Who holds the ephemeral key for a NIP-59 gift wrap?**
+**~~Q20 — Who holds the ephemeral key for a NIP-59 gift wrap?~~ — resolved.**
 
-Gift wrap is three layers: a rumor, a **seal** (kind 13) encrypted to the
-recipient and signed by the real author, and a **wrap** (kind 1059) encrypted and
-signed by a throwaway key that exists only for that one event. The throwaway key
-is the point — it is what hides the author from a relay.
+**Decided: one method on `Signer`** —
+`gift_wrap(key, recipient, rumor, entropy) -> SignedEvent`, returning the
+finished kind-1059. The throwaway key is born, used and zeroized inside
+`ghostr-crypto`, never crosses a crate boundary, and never reaches a domain
+type — the same treatment the identity key gets (§11.3).
 
-`ghostr-nostr` cannot hold it. §11.3 and ARCHITECTURE §3 rule 4 put secret key
-bytes in `ghostr-crypto` alone, so `privacy::gift_wrap` cannot derive a key from
-entropy handed to it, and it cannot sign the wrap either. The scaffold's
-signature — `gift_wrap(event, ephemeral_entropy)` returning an unsigned event —
-also names no recipient, so there is nobody to encrypt to.
+The rejected alternative was a general "sign these bytes under this ephemeral
+key" primitive. It is a signing oracle for arbitrary bytes under a
+caller-chosen key, and this would have been its only caller.
 
-> **Recommendation:** add one method to `Signer`:
-> `gift_wrap(&self, key, recipient, rumor, ephemeral_entropy, nonces) ->
-> Result<SignedEvent>`, returning the finished wrap. The ephemeral key is born
-> and zeroized inside `ghostr-crypto`, never crosses a crate boundary, and never
-> reaches a domain type — the same treatment the identity key gets. `ghostr-nostr`
-> keeps [`PrivacyMode::GiftWrapped`] as the policy decision and delegates the
-> cryptography, which is the split every other seam in this tree already uses.
->
-> The alternative — a general "sign with this ephemeral key" primitive — is
-> rejected: it is a signing oracle for arbitrary bytes under an
-> attacker-chosen key, and its only caller would be this one.
->
-> Until this is settled `gift_wrap` is `todo!()` and `PrivacyMode::GiftWrapped`
-> cannot be selected. NIP-59 is opt-in and not on the M3 exit criteria
-> ([ROADMAP](ROADMAP.md)), so nothing else is blocked.
+`ghostr-nostr` keeps [`PrivacyMode::GiftWrapped`] as the policy decision and
+delegates the cryptography, which is the split every other seam here uses.
+`gift_wrap` is no longer `todo!()`, and the workspace has **no diverging bodies
+left**.
+
+Two things this settled that the question had not raised:
+
+**Gift wrap and remote signing are mutually exclusive today.** NIP-46's method
+list is closed — connect, get_public_key, sign_event, nip44_encrypt,
+nip44_decrypt, ping — and none of them produces a signature under a throwaway
+key, so a bunker cannot build the outer layer. Building it client-side instead
+would put the ephemeral secret in `ghostr-nostr`, which ARCHITECTURE §3 rule 4
+forbids. Both halves being closed is why `Nip46Signer::gift_wrap` refuses with
+a reason rather than improvising: a user who has chosen a bunker should be told
+that gift wrap is unavailable, not handed an event whose author a relay can
+read.
+
+**The outer timestamps run backwards, and that is not the publish jitter.**
+NIP-59 puts the canonical `created_at` on the rumor and tweaks every layer above
+it *into the past*, with independent values per layer, so a relay cannot pair
+seal and wrap by time — and because relays refuse events dated in the future.
+Ghostr's publish jitter moves a timestamp only *later*, to hide when a footage
+was sealed. The two serve different ends and are not in conflict; both are now
+documented where they are implemented, and a layer dated after its rumor is
+refused rather than published.
 
 ---
 
