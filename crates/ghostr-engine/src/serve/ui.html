@@ -19,6 +19,9 @@
   --ink: #e7e9ee; --dim: #8b90a0; --faint: #5a5f70;
   --accent: #7dd3a0; --warn: #e5b567; --bad: #e07a7a;
   --tap: 48px;
+  /* The reading column. Everything the eye tracks down the page lines up with
+     it, the nav included — see the `nav` rule. */
+  --col: 34rem;
 }
 @media (prefers-color-scheme: light) {
   :root {
@@ -35,7 +38,7 @@ body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   overscroll-behavior-y: contain;
 }
-main { max-width: 34rem; margin: 0 auto; padding: 1rem 1rem 5rem; }
+main { max-width: var(--col); margin: 0 auto; padding: 1rem 1rem 5rem; }
 h1 { font-size: 1rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); margin: .25rem 0 1rem; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 1rem; margin-bottom: .875rem; }
 .meta { display: flex; flex-wrap: wrap; gap: .5rem 1rem; font-size: .8125rem; color: var(--faint); }
@@ -80,8 +83,16 @@ td:last-child { text-align: right; color: var(--dim); font-variant-numeric: tabu
 .empty { color: var(--dim); text-align: center; padding: 2rem 1rem; }
 .list { margin: .5rem 0 0; padding-left: 1.1rem; }
 .list li { margin: .25rem 0; overflow-wrap: anywhere; }
+/* The bar itself spans the window — a tab bar that stops short of the edge on
+   a phone looks like a floating widget — but its buttons sit inside the same
+   column as the content. Left to stretch, four evenly-spread tabs on a 1440px
+   monitor put "Today" in one corner and "Vault" in the other, a thousand pixels
+   from the text they belong to. The padding collapses to the safe-area inset
+   once the window is narrower than the column, which is every phone. */
 nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex;
       background: var(--panel); border-top: 1px solid var(--line);
+      padding-left: max(env(safe-area-inset-left), calc((100% - var(--col)) / 2));
+      padding-right: max(env(safe-area-inset-right), calc((100% - var(--col)) / 2));
       padding-bottom: env(safe-area-inset-bottom); }
 nav button { border: 0; border-radius: 0; background: none; color: var(--faint); font-size: .8125rem; min-height: 3.25rem; }
 nav button[aria-current="true"] { color: var(--accent); }

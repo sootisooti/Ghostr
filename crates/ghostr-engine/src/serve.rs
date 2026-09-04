@@ -143,14 +143,30 @@ const MAX_CONNECTIONS: usize = 32;
 /// `Sync`, so there is one writer by construction and no interleaving to get
 /// wrong.
 ///
+/// # Why `ready` is a callback
+///
+/// Everything a caller wants to say at startup — the port, the URL, the token,
+/// the QR code — is only true once the listener exists. Printing it first and
+/// binding afterwards produces a banner for a server that never came up, and
+/// when the port is already held by *another* vault's `ghostr serve`, it
+/// prints an invitation to open somebody else's memories with a token that
+/// will not work there. Taking the banner as a closure makes that ordering
+/// impossible to get wrong rather than merely documented.
+///
 /// # Errors
 ///
 /// Returns [`Error::Config`](crate::Error::Config) if a listener cannot be
-/// bound.
-pub fn serve(engine: Engine, bind: &Bind, token: &Token) -> crate::Result<()> {
+/// bound, in which case `ready` is never called.
+pub fn serve(
+    engine: Engine,
+    bind: &Bind,
+    token: &Token,
+    ready: impl FnOnce(),
+) -> crate::Result<()> {
     use std::io::Write as _;
 
     let listeners = Listeners::bind(&engine, bind)?;
+    ready();
     let engine = std::sync::Mutex::new(engine);
     let live = std::sync::atomic::AtomicUsize::new(0);
 

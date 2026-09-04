@@ -835,8 +835,12 @@ fn cmd_serve(dir: &std::path::Path, http: Option<&str>, lan: bool) -> Result<()>
         lan_acknowledged: lan,
     };
 
-    println!("{}", render::serve_banner(dir, &bind, &token)?);
-    serve::serve(engine, &bind, &token).context("serving")
+    // Rendered here, printed only once the listener is up. The banner names a
+    // port and hands out a token, and both are claims about a server that
+    // exists — printing them before the bind tells a user to open a link that
+    // may belong to whatever else already had the port.
+    let banner = render::serve_banner(dir, &bind, &token)?;
+    serve::serve(engine, &bind, &token, || println!("{banner}")).context("serving")
 }
 
 /// Parses a bind address, allowing a bare port or a bare host.
