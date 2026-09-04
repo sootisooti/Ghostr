@@ -78,6 +78,16 @@ pub struct IngestBatch {
     /// Counted rather than fatal: one malformed row in a five-year archive
     /// should not abort the import. Reported so the user knows it happened.
     pub unparseable_skipped: u32,
+    /// Records the source returned that the adapter did not ask for.
+    ///
+    /// Separate from `unparseable_skipped`, because it means something else
+    /// entirely: those were malformed, these were well-formed and *wrong* — a
+    /// relay answering a filter with events from another author, of another
+    /// kind, or with a signature that does not check out. A networked source
+    /// deciding what enters the corpus is the attack this count makes visible,
+    /// so folding it into a parse-failure tally would hide the one number worth
+    /// looking at (THREAT_MODEL §T7).
+    pub rejected_untrusted: u32,
 }
 
 /// How an adapter derives a memory's occurrence time.

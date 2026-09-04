@@ -489,6 +489,7 @@ impl crate::adapter::IngestAdapter for StructLogAdapter {
             has_more,
             duplicates_skipped: 0,
             unparseable_skipped: unparseable,
+            rejected_untrusted: 0,
         })
     }
 
@@ -529,6 +530,7 @@ fn empty_batch(cursor: ghostr_core::source::SyncCursor) -> crate::adapter::Inges
         has_more: false,
         duplicates_skipped: 0,
         unparseable_skipped: 0,
+        rejected_untrusted: 0,
     }
 }
 

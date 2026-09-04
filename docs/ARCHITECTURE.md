@@ -85,6 +85,7 @@ flowchart TD
   nostr --> crypto
   ingest --> core
   ingest --> store
+  ingest -. "nostr feature" .-> nostr
   persona --> core
   persona --> store
   persona --> llm
@@ -277,6 +278,20 @@ Adapters are feature-gated (`nostr`, `rss`, `markdown`, `archive`, `journal`,
 dependencies with them. Adding a source is: implement the trait, register it, add
 a fixture-driven test from `ghostr-testkit`. No changes anywhere else.
 
+**The `nostr` feature is the one edge out of this layer.** With it enabled,
+`ghostr-ingest` depends on `ghostr-nostr` and `ghostr-crypto`, which is a
+downward edge — both sit below ingest — rather than a sideways one between the
+domain crates §3.2 keeps apart. It exists so the feed adapter can *re-verify*
+what a relay returned: signature, author, and kind, checked in the crate that
+turns the result into corpus rather than trusted to the transport that fetched
+it. A narrower fetch trait defined here would have made that impossible, leaving
+only a doc comment asking the transport to have verified — and a promise nothing
+enforces is the failure mode this codebase keeps finding in itself.
+
+The adapter is **not** in `AdapterRegistry::with_builtins`, because it takes a
+relay client and choosing relays is a composition-root decision. `ghostr-engine`
+builds it per pull (§4.10).
+
 ### 4.5 `ghostr-anchor`
 
 ```rust
@@ -439,6 +454,7 @@ The default build has **no model path at all**, not even a local one:
 ```toml
 # ghostr-ingest
 default = ["markdown", "journal", "structlog"]   # local files only
+nostr   = [...]                                  # off here; on in engine and cli
 # ghostr-engine, ghostr-cli
 default = []
 llm-local  = [...]   # an Ollama-compatible runtime on loopback

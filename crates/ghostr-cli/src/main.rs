@@ -174,15 +174,29 @@ enum Command {
 enum SourceCommand {
     /// Add a source, after showing what adding it means.
     Add {
-        /// Which adapter: `markdown`, `journal`, or `structlog`.
+        /// Which adapter: `markdown`, `journal`, `structlog`, or `nostr`.
         kind: String,
-        /// Path it reads from. Omitted for `journal`, which has none.
+        /// Path it reads from. Omitted for `journal` and `nostr`, which have none.
         #[arg(default_value = "")]
         path: String,
         /// For `structlog`, which schema its rows conform to:
         /// `places`, `people`, `habits`, `health`, or `media`.
         #[arg(long)]
         schema: Option<String>,
+        /// For `nostr`, whose feed: an `npub1...` or a 64-character hex pubkey.
+        #[arg(long)]
+        pubkey: Option<String>,
+        /// For `nostr`, a relay to read from. Repeat for more than one.
+        ///
+        /// Named per feed rather than taken from the vault's relay list: where
+        /// a backup goes and where somebody else's notes come from are two
+        /// different decisions.
+        #[arg(long = "relay")]
+        relays: Vec<String>,
+        /// For `nostr`, which event kinds to read: `1` (short notes) and
+        /// `30023` (long-form). Both, by default.
+        #[arg(long = "kind-filter")]
+        kind_filters: Vec<u16>,
     },
     /// List configured sources.
     List,
@@ -330,9 +344,22 @@ fn run(cli: Cli) -> Result<()> {
             remote,
         } => cmd_memoria(&dir, &date, dry_run, remote),
         Command::Recap { date } => cmd_recap(&dir, &date),
-        Command::Source(SourceCommand::Add { kind, path, schema }) => {
-            cmd_source_add(&dir, &kind, &path, schema.as_deref())
-        }
+        Command::Source(SourceCommand::Add {
+            kind,
+            path,
+            schema,
+            pubkey,
+            relays,
+            kind_filters,
+        }) => cmd_source_add(
+            &dir,
+            &kind,
+            &path,
+            schema.as_deref(),
+            pubkey.as_deref(),
+            &relays,
+            &kind_filters,
+        ),
         Command::Source(SourceCommand::List) => cmd_source_list(&dir),
         Command::Source(SourceCommand::Sync { id }) => cmd_source_sync(&dir, id.as_deref()),
         Command::Thread(ThreadCommand::List) => cmd_thread_list(&dir),
@@ -912,20 +939,67 @@ fn cmd_recap(dir: &std::path::Path, date: &str) -> Result<()> {
     Ok(())
 }
 
+/// Turns what a user pasted into the hex pubkey a filter needs.
+///
+/// Accepts either form because both are what a nostr client puts on screen: an
+/// `npub` is what a profile page shows, hex is what a developer copies out of a
+/// relay. Refusing one of them would mean the user has to go and convert it.
+fn feed_pubkey(raw: &str) -> Result<String> {
+    if raw.starts_with("npub1") {
+        let npub = ghostr_core::identity::Npub::parse(raw.to_owned())
+            .map_err(|_| anyhow::anyhow!("`{raw}` is not a valid npub"))?;
+        let key = ghostr_crypto::nip19::decode_npub(&npub)
+            .map_err(|_| anyhow::anyhow!("`{raw}` is not a valid npub"))?;
+        return Ok(key.to_hex());
+    }
+    // Checked here as well as in the engine, so a typo gets a sentence a person
+    // can act on rather than the adapter's own "unparseable data at pubkey".
+    if raw.len() != 64 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("`{raw}` is not a pubkey — expected an npub1… or 64 hex characters");
+    }
+    Ok(raw.to_owned())
+}
+
 fn cmd_source_add(
     dir: &std::path::Path,
     kind: &str,
     path: &str,
     schema: Option<&str>,
+    pubkey: Option<&str>,
+    relays: &[String],
+    kind_filters: &[u16],
 ) -> Result<()> {
     use ghostr_core::source::{LogSchema, SourceKindTag};
-    use ghostr_engine::sources::{self, NewSource};
+    use ghostr_engine::sources::{self, FeedConfig, NewSource};
 
     let kind = match kind {
         "markdown" | "markdown_vault" => SourceKindTag::MarkdownVault,
         "journal" => SourceKindTag::Journal,
         "structlog" | "structured_log" => SourceKindTag::StructuredLog,
-        other => bail!("unknown source kind `{other}` (try markdown, journal, or structlog)"),
+        "nostr" | "nostr_feed" => SourceKindTag::NostrFeed,
+        other => {
+            bail!("unknown source kind `{other}` (try markdown, journal, structlog, or nostr)")
+        }
+    };
+
+    let feed = if kind == SourceKindTag::NostrFeed {
+        let Some(pubkey) = pubkey else {
+            bail!("a nostr feed needs --pubkey (an npub or a hex pubkey)");
+        };
+        if relays.is_empty() {
+            bail!("a nostr feed needs at least one --relay");
+        }
+        Some(FeedConfig {
+            pubkey: feed_pubkey(pubkey)?,
+            relays: relays.to_vec(),
+            kinds: if kind_filters.is_empty() {
+                ghostr_ingest::nostr::READABLE_KINDS.to_vec()
+            } else {
+                kind_filters.to_vec()
+            },
+        })
+    } else {
+        None
     };
     let schema = match schema {
         Some("places") => Some(LogSchema::Places),
@@ -944,6 +1018,7 @@ fn cmd_source_add(
             kind,
             location: path.to_owned(),
             schema,
+            feed,
         },
     )
     .context("adding the source")?;
@@ -967,7 +1042,31 @@ fn cmd_source_sync(dir: &std::path::Path, id: Option<&str>) -> Result<()> {
         ),
         None => None,
     };
-    let report = ghostr_engine::sources::sync(&engine, only).context("syncing")?;
+    // Built from the feeds' own relays, and only when a feed is configured. Two
+    // things follow, both deliberate.
+    //
+    // A vault of local sources needs no relay list to run `source sync`, so an
+    // offline command never asks for the network.
+    //
+    // And the list is the feeds' own, never the vault's `relays` config — that
+    // one is where encrypted backup is published, and reaching for it here
+    // would mean adding a feed had quietly widened where the user's history
+    // goes. The client is built with no publish scopes at all, so this one
+    // cannot publish even if something later asked it to.
+    let read_relays = ghostr_engine::sources::feed_relays(&engine).context("reading feeds")?;
+    let relays: Option<std::sync::Arc<dyn ghostr_nostr::RelayClient>> = if read_relays.is_empty() {
+        None
+    } else {
+        Some(std::sync::Arc::new(
+            ghostr_nostr::client::websocket::WebsocketRelayClient::new(
+                read_relays,
+                std::collections::HashSet::new(),
+            ),
+        ))
+    };
+
+    let report = block_on(ghostr_engine::sources::sync(&engine, only, relays.as_ref()))
+        .context("syncing")?;
     println!("{}", render::source_sync(&report));
     Ok(())
 }

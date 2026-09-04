@@ -307,6 +307,7 @@ impl crate::adapter::IngestAdapter for JournalAdapter {
             has_more: false,
             duplicates_skipped: 0,
             unparseable_skipped: 0,
+            rejected_untrusted: 0,
         })
     }
 

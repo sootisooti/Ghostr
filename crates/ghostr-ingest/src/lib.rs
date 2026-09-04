@@ -26,9 +26,11 @@
 //!
 //! # Status
 //!
-//! Three local adapters are implemented: `markdown`, `journal`, and `structlog`.
-//! The networked ones — `nostr`, `rss`, `archive` — arrive with M2 and are not
-//! compiled into a default build.
+//! Four adapters are implemented: `markdown`, `journal`, `structlog`, and
+//! `nostr`. The first three are the offline default set. `nostr` is off in a
+//! default build and, unlike the others, cannot be constructed by
+//! [`AdapterRegistry::with_builtins`] — it needs a relay client, and choosing
+//! one is the composition root's job. `rss` and `archive` remain unimplemented.
 
 #![forbid(unsafe_code)]
 // CLAUDE.md §5 denies unwrap/expect/panic in library code, and names tests as
@@ -41,6 +43,8 @@ pub mod error;
 pub mod journal;
 #[cfg(feature = "markdown")]
 pub mod markdown;
+#[cfg(feature = "nostr")]
+pub mod nostr;
 pub mod registry;
 #[cfg(feature = "structlog")]
 pub mod structlog;

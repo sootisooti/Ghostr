@@ -29,8 +29,8 @@ pub struct Engine {
     dir: PathBuf,
     keystore: FileKeystore,
     store: SqliteStore,
-    clock: Box<dyn Clock>,
-    rng: Box<dyn Rng>,
+    clock: std::sync::Arc<dyn Clock>,
+    rng: std::sync::Arc<dyn Rng>,
 }
 
 impl core::fmt::Debug for Engine {
@@ -163,8 +163,8 @@ impl Engine {
                 dir: dir.to_path_buf(),
                 keystore,
                 store,
-                clock: Box::new(clock),
-                rng: Box::new(rng),
+                clock: std::sync::Arc::new(clock),
+                rng: std::sync::Arc::new(rng),
             },
             InitOutcome {
                 npub,
@@ -289,8 +289,14 @@ impl Engine {
             dir: dir.to_path_buf(),
             keystore,
             store,
-            clock: clock.unwrap_or_else(|| Box::new(SystemClock::new(home_tz))),
-            rng: rng.unwrap_or_else(|| Box::new(OsRng)),
+            clock: clock.map_or_else(
+                || std::sync::Arc::new(SystemClock::new(home_tz)) as std::sync::Arc<dyn Clock>,
+                std::sync::Arc::from,
+            ),
+            rng: rng.map_or_else(
+                || std::sync::Arc::new(OsRng) as std::sync::Arc<dyn Rng>,
+                std::sync::Arc::from,
+            ),
         })
     }
 
@@ -322,6 +328,22 @@ impl Engine {
     #[must_use]
     pub fn rng(&self) -> &dyn Rng {
         self.rng.as_ref()
+    }
+
+    /// The clock, as a shared handle.
+    ///
+    /// For the adapters that outlive one call and take ownership. Sharing the
+    /// engine's clock rather than making a second one is what keeps a fake
+    /// clock fake all the way down (ARCHITECTURE §4.7).
+    #[must_use]
+    pub fn clock_arc(&self) -> std::sync::Arc<dyn Clock> {
+        std::sync::Arc::clone(&self.clock)
+    }
+
+    /// The RNG, as a shared handle. See [`Engine::clock_arc`].
+    #[must_use]
+    pub fn rng_arc(&self) -> std::sync::Arc<dyn Rng> {
+        std::sync::Arc::clone(&self.rng)
     }
 
     /// The identity npub.

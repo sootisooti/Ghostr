@@ -20,6 +20,13 @@ pulldown-cmark = { workspace = true }
 serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+# Both optional, and both only under the `nostr` feature. A feed adapter has to
+# reach a relay and has to check a signature itself rather than take the
+# transport's word for it, so it needs the client trait and the event type; a
+# default build has neither, which is what keeps the offline path offline.
+ghostr-nostr = { workspace = true, optional = true }
+ghostr-crypto = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 
 # Adapters are feature-gated so a build can exclude sources it does not want and
 # shed their dependencies with them. The default set is the offline path: a
@@ -33,7 +40,7 @@ journal = []
 ## Structured logs: places, people, habits, health.
 structlog = ["dep:serde_json"]
 ## A nostr feed. THIRD-PARTY CONTENT — see THREAT_MODEL §T7.
-nostr = []
+nostr = ["dep:ghostr-nostr", "dep:ghostr-crypto", "dep:hex"]
 ## RSS and Atom. THIRD-PARTY CONTENT.
 rss = []
 ## Exported social archives.
@@ -41,6 +48,9 @@ archive = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Signing test events for the nostr adapter. Already in the tree via
+# ghostr-crypto, and dev-only, so this adds no release surface (THREAT_MODEL §T8).
+secp256k1 = { workspace = true }
 chrono-tz = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 

@@ -32,12 +32,17 @@ impl AdapterRegistry {
         Self::default()
     }
 
-    /// A registry with every adapter this build enables.
+    /// A registry with every *offline* adapter this build enables.
     ///
     /// The clock and entropy source are passed in rather than reached for:
     /// nothing outside the composition root calls `SystemTime::now` or `OsRng`,
     /// which is what makes an ingest run reproducible under a fake clock
     /// (ARCHITECTURE §4.7).
+    ///
+    /// Networked adapters are absent by construction, not by omission: a nostr
+    /// feed needs a relay client, and this function has no way to make one and
+    /// no business choosing which relays to trust. The composition root builds
+    /// that adapter and [`register`](Self::register)s it.
     #[must_use]
     pub fn with_builtins(
         clock: std::sync::Arc<dyn ghostr_core::time::Clock>,
@@ -158,7 +163,9 @@ mod tests {
         assert!(kinds.contains(&SourceKindTag::Journal));
         #[cfg(feature = "structlog")]
         assert!(kinds.contains(&SourceKindTag::StructuredLog));
-        // Networked adapters arrive with M2 and are not in this build.
+        // A networked adapter never comes from the builtins, whatever this
+        // build enables: it takes a relay client this constructor cannot
+        // supply. Registering one is the composition root's decision.
         assert!(!kinds.contains(&SourceKindTag::NostrFeed));
     }
 
@@ -182,8 +189,8 @@ mod tests {
         assert_eq!(registry.available_kinds().len(), before);
     }
 
-    /// No local adapter may claim it stays offline while reaching the network,
-    /// and none of the three in this build reaches it at all.
+    /// No builtin may claim it stays offline while reaching the network, and
+    /// none of the three this constructor registers reaches it at all.
     #[cfg(all(feature = "markdown", feature = "journal", feature = "structlog"))]
     #[test]
     fn every_builtin_in_this_build_is_offline() {

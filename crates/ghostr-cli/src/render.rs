@@ -391,6 +391,23 @@ pub(crate) fn source_sync(report: &SyncReport) -> String {
         out.push_str(&format!(", {} unreachable", report.unreachable));
     }
     out.push('\n');
+    if report.needs_relays > 0 {
+        // Not an error and not silence: the feed was never asked. A feed that
+        // quietly produces nothing looks exactly like an author who stopped
+        // posting, and those are very different facts.
+        out.push_str(&format!(
+            "{} feed(s) skipped: no relays configured\n",
+            report.needs_relays
+        ));
+    }
+    if report.rejected > 0 {
+        // The one line here that can mean somebody is trying something: a relay
+        // answered a filter with events nobody asked for (THREAT_MODEL §T7).
+        out.push_str(&format!(
+            "{} event(s) refused: a relay returned what was not asked for\n",
+            report.rejected
+        ));
+    }
     out
 }
 
