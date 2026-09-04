@@ -13,9 +13,11 @@ every model call falls back to a deterministic path. `ghostr serve` puts the
 loop on a page a phone can open. The three model-written quest kinds
 (`VoiceProbe`, `Counterfactual`, `Prediction`) land through
 `ghostr_quests::llm`, and the day's quest set is committed into the footage
-Merkle tree. M3 has its crypto, its event codec and its relay
-transport; what remains is wiring that transport into the engine — sync and
-restore ([docs/ROADMAP.md](docs/ROADMAP.md)).
+Merkle tree. M3 has its crypto, its event codec, its relay transport, `ghostr
+sync`/`restore`, auto-seal, and the nostr feed adapter — so hostile text now
+enters the corpus and the `TrustLevel::ThirdParty` gate is load-bearing rather
+than declared. Every M3 exit criterion is met except the NIP submission, which
+is a human's to make ([docs/ROADMAP.md](docs/ROADMAP.md)).
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented, and
 `cargo xtask lint-deps` to check the dependency rules in §2.
@@ -50,7 +52,7 @@ all ← engine ← cli
 | `ghostr-crypto` | NIP-06/19/44, keystore, `Signer`. The only place secret bytes exist. |
 | `ghostr-store` | Encrypted SQLite, blobs, vector index. |
 | `ghostr-llm` | `LanguageModel`/`Embedder` traits, prompts, **the egress gate**. |
-| `ghostr-ingest` | `IngestAdapter` + feature-gated source adapters. |
+| `ghostr-ingest` | `IngestAdapter` + feature-gated source adapters. Under `nostr` only, depends on `ghostr-nostr` so the feed adapter can re-verify what a relay returned. |
 | `ghostr-persona` | Persona build / merge / diff / retrieval. |
 | `ghostr-memoria` | The daily compile pipeline. |
 | `ghostr-quests` | Generation, verdicts, scoring, fidelity math. |
@@ -63,7 +65,9 @@ all ← engine ← cli
 **Dependency rules (CI-enforced via `xtask lint-deps`):**
 1. `ghostr-core` gets no I/O dependencies. Ever.
 2. No sideways deps between `ingest`/`persona`/`memoria`/`quests` — compose them
-   in `engine`.
+   in `engine`. `ingest → nostr` under the `nostr` feature is downward, not
+   sideways, and is there so signature, author and kind are re-checked in the
+   crate that makes corpus out of the result.
 3. Only `ghostr-llm` may depend on a provider SDK or an HTTP client for
    inference.
 4. Only `ghostr-crypto` touches secret key bytes.

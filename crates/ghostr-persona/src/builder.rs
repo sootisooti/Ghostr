@@ -46,12 +46,24 @@ pub trait PersonaBuilder: Send + Sync {
 pub struct DistillInput<'a> {
     /// Recent sealed footage, oldest first.
     pub footage: &'a [Footage],
-    /// The first-party memories those days refer to.
+    /// The memories eligible to be voice exemplars.
     ///
-    /// First-party only, filtered by the caller: voice exemplars are drawn from
-    /// this slice, and a feed item becoming an exemplar is how a stranger's
-    /// voice ends up in the ghost's mouth (THREAT_MODEL §T7).
+    /// [`TrustLevel::may_be_exemplar`] decides membership and the caller
+    /// filters: a feed item becoming an exemplar is how a stranger's voice ends
+    /// up in the ghost's mouth (THREAT_MODEL §T7).
+    ///
+    /// [`TrustLevel::may_be_exemplar`]: ghostr_core::sensitivity::TrustLevel::may_be_exemplar
     pub first_party: &'a [&'a Memory],
+    /// The memories a claim may rest on.
+    ///
+    /// A superset of `first_party`: [`TrustLevel::may_source_stance`] also
+    /// admits `SelfReported`, because a health or people log is the user
+    /// asserting something about themselves. It is not their prose, so it may
+    /// never be a voice exemplar — which is exactly why these are two slices
+    /// and not one.
+    ///
+    /// [`TrustLevel::may_source_stance`]: ghostr_core::sensitivity::TrustLevel::may_source_stance
+    pub claimable: &'a [&'a Memory],
     /// Queued corrections. Must all be non-holdout.
     pub deltas: &'a [PersonaDelta],
     /// When this distillation runs.
@@ -94,6 +106,7 @@ impl PersonaBuilder for DeterministicBuilder {
         let corpus = crate::distill::Corpus {
             footage: input.footage,
             first_party: input.first_party,
+            claimable: input.claimable,
         };
         crate::distill::distill(prior, &corpus, input.deltas, input.now, input.next_ordinal)
     }

@@ -25,7 +25,7 @@
 //! than intended: [`validate`] rejects a model containing any claim with an
 //! empty `evidence` list, and `distill` runs it before returning (SPEC §3.6).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ghostr_core::footage::Footage;
 use ghostr_core::hash::{Hash32, Tag, tagged_hash};
@@ -53,12 +53,28 @@ const MAX_CADENCE_DAYS: f32 = 90.0;
 pub struct Corpus<'a> {
     /// Sealed days, oldest first.
     pub footage: &'a [Footage],
-    /// The memories those days refer to.
+    /// The memories eligible to be voice exemplars.
     ///
-    /// First-party only where voice is concerned — the caller filters, and
-    /// [`crate::voice::profile`] has no path to anything outside this slice
+    /// The caller filters on
+    /// [`TrustLevel::may_be_exemplar`](ghostr_core::sensitivity::TrustLevel::may_be_exemplar),
+    /// and [`crate::voice::profile`] has no path to anything outside this slice
     /// (THREAT_MODEL §T7).
     pub first_party: &'a [&'a Memory],
+    /// The memories a claim may rest on.
+    ///
+    /// Filtered on
+    /// [`TrustLevel::may_source_stance`](ghostr_core::sensitivity::TrustLevel::may_source_stance),
+    /// so it also admits `SelfReported` — a people or health log is the user
+    /// asserting something about themselves, and excluding it would leave a
+    /// habit tracker unable to teach the ghost a habit.
+    ///
+    /// Relationships and routines are read out of [`Corpus::footage`], which is
+    /// compiled from the *whole* day and therefore includes third-party
+    /// memories. They take the ids here as the set a claim may rest on. Without
+    /// that, a stranger's note could evidence a `Relation` — the second thing
+    /// §T7 says an injection is trying to plant, and the one the trust level
+    /// alone does not stop.
+    pub claimable: &'a [&'a Memory],
 }
 
 /// Distils the deterministic facets.
@@ -92,14 +108,19 @@ pub fn distill(
         });
     }
 
+    // Which memories a claim may rest on. Wider than the voice slice on purpose:
+    // narrowing it to first-party would mean a people log could never evidence
+    // a relationship, which is the one thing a people log is for.
+    let trusted: BTreeSet<MemoryId> = corpus.claimable.iter().map(|m| m.id).collect();
+
     let mut facets = Facets {
         voice: crate::voice::profile(corpus.first_party),
         // A model's work. Carried forward from the prior version rather than
         // dropped, so a distillation without a model preserves what an earlier
         // one with a model found.
         opinions: prior.map(|p| p.facets.opinions.clone()).unwrap_or_default(),
-        relationships: relationships(corpus.footage),
-        routines: routines(corpus.footage),
+        relationships: relationships(corpus.footage, &trusted),
+        routines: routines(corpus.footage, &trusted),
         boundaries: prior
             .map(|p| p.facets.boundaries.clone())
             .unwrap_or_default(),
@@ -115,7 +136,12 @@ pub fn distill(
         parent: prior.map(|p| p.version),
         created_at: now,
         facets,
-        derived_from: corpus.first_party.iter().map(|m| m.id).collect(),
+        // The wider slice, because it is the honest answer to "what fed this":
+        // a memory that evidenced a relationship fed the model even though it
+        // was never eligible to be a voice exemplar. Recording only the voice
+        // slice would leave a claim traceable to a memory the model does not
+        // admit reading (THREAT_MODEL §T7's traceability).
+        derived_from: corpus.claimable.iter().map(|m| m.id).collect(),
         diff: None,
     };
 
@@ -337,7 +363,11 @@ fn canonical_facets(facets: &Facets) -> crate::Result<Vec<u8>> {
 }
 
 /// Who the user knows, from person beats across the run.
-fn relationships(footage: &[Footage]) -> Vec<Relation> {
+///
+/// `trusted` is the set of memory ids a claim may rest on. A beat evidenced
+/// only by third-party memories is not an appearance: a stranger mentioning
+/// somebody in a feed note is not the user seeing them (THREAT_MODEL §T7).
+fn relationships(footage: &[Footage], trusted: &BTreeSet<MemoryId>) -> Vec<Relation> {
     struct Seen {
         appearances: u32,
         evidence: Vec<MemoryId>,
@@ -353,6 +383,18 @@ fn relationships(footage: &[Footage]) -> Vec<Relation> {
     for (index, day) in footage.iter().enumerate() {
         days = i64::try_from(index).unwrap_or(0);
         for beat in &day.people {
+            // Filtered before anything is counted, not after. Counting the
+            // appearance and then dropping its evidence would leave `closeness`
+            // inflated by sightings the user never had.
+            let evidence: Vec<MemoryId> = beat
+                .memory_ids
+                .iter()
+                .copied()
+                .filter(|id| trusted.contains(id))
+                .collect();
+            if evidence.is_empty() {
+                continue;
+            }
             let entry = by_entity.entry(beat.entity).or_insert_with(|| Seen {
                 appearances: 0,
                 evidence: Vec::new(),
@@ -363,7 +405,7 @@ fn relationships(footage: &[Footage]) -> Vec<Relation> {
             });
             entry.appearances += 1;
             entry.last_day = days;
-            entry.evidence.extend(beat.memory_ids.iter().copied());
+            entry.evidence.extend(evidence);
             if let Some(v) = beat.valence {
                 entry.valence_sum += v;
                 entry.valence_count += 1;
@@ -419,17 +461,29 @@ fn relationships(footage: &[Footage]) -> Vec<Relation> {
 ///
 /// Distinct thread ids under one title is the signal, because `compose::threads`
 /// allocates a new id when a closed title reopens.
-fn routines(footage: &[Footage]) -> Vec<Routine> {
+///
+/// `trusted` is the set of memory ids a claim may rest on, for the same reason
+/// it applies to relationships: a thread the user never wrote in is not their
+/// routine, however often a feed brings it back up (THREAT_MODEL §T7).
+fn routines(footage: &[Footage], trusted: &BTreeSet<MemoryId>) -> Vec<Routine> {
     use ghostr_core::ids::ThreadId;
-    use std::collections::BTreeSet;
 
     let mut by_title: BTreeMap<String, (BTreeSet<ThreadId>, Vec<MemoryId>)> = BTreeMap::new();
 
     for day in footage {
         for thread in &day.open_threads {
+            let evidence: Vec<MemoryId> = thread
+                .memory_ids
+                .iter()
+                .copied()
+                .filter(|id| trusted.contains(id))
+                .collect();
+            if evidence.is_empty() {
+                continue;
+            }
             let entry = by_title.entry(thread.title.clone()).or_default();
             entry.0.insert(thread.id);
-            entry.1.extend(thread.memory_ids.iter().copied());
+            entry.1.extend(evidence);
         }
     }
 
@@ -622,10 +676,23 @@ mod tests {
     use super::*;
 
     fn distil(footage: &[Footage], memories: &[Memory]) -> crate::Result<PersonaModel> {
-        let refs: Vec<&Memory> = memories.iter().collect();
+        distil_with(footage, memories, memories)
+    }
+
+    /// Distils with the two slices apart: `voice` may be an exemplar, `claims`
+    /// may evidence a claim. Every real vault has `voice` as a subset of
+    /// `claims`, and the tests that care about the difference say so here.
+    fn distil_with(
+        footage: &[Footage],
+        voice: &[Memory],
+        claims: &[Memory],
+    ) -> crate::Result<PersonaModel> {
+        let voice_refs: Vec<&Memory> = voice.iter().collect();
+        let claim_refs: Vec<&Memory> = claims.iter().collect();
         let corpus = Corpus {
             footage,
-            first_party: &refs,
+            first_party: &voice_refs,
+            claimable: &claim_refs,
         };
         distill(None, &corpus, &[], Timestamp::new(1_000, 0), 1)
     }
@@ -640,6 +707,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let leaked = PersonaDelta {
             facet: Facet::Opinion,
@@ -663,6 +731,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let leaked = PersonaDelta {
             facet: Facet::Opinion,
@@ -747,6 +816,163 @@ mod tests {
         // Ordered by closeness, so the person who appears most comes first.
         assert_eq!(model.facets.relationships[0].entity, alice);
         assert!(model.facets.relationships[0].closeness > model.facets.relationships[1].closeness);
+    }
+
+    /// THREAT_MODEL §T7. Footage covers the whole day, third-party memories
+    /// included, so a beat can rest on a note the user never wrote. Neither the
+    /// claim nor the closeness it carries may come from one.
+    ///
+    /// The attack this stops: a feed note naming `@attacker` produces a person
+    /// beat, and without this filter the ghost acquires a relationship with
+    /// somebody it has never heard the user mention.
+    #[test]
+    fn a_beat_evidenced_only_by_third_party_memories_makes_no_relationship() {
+        let memories = corpus_memories(30);
+        // Not in `first_party`, which is what makes it third-party here: the
+        // caller filters, and this slice is the whole trust boundary.
+        let stranger = memory(200, "a note the user never wrote");
+
+        let footage: Vec<Footage> = (0..6)
+            .map(|seq| {
+                day(
+                    seq + 1,
+                    vec![
+                        beat(entity(1), memories[seq as usize].id),
+                        beat(entity(9), stranger.id),
+                    ],
+                    Vec::new(),
+                )
+            })
+            .collect();
+
+        let model = distil(&footage, &memories).expect("distil");
+        let entities: Vec<_> = model
+            .facets
+            .relationships
+            .iter()
+            .map(|r| r.entity)
+            .collect();
+        assert!(entities.contains(&entity(1)));
+        assert!(
+            !entities.contains(&entity(9)),
+            "a feed note produced a relationship"
+        );
+        for relation in &model.facets.relationships {
+            assert!(!relation.evidence.contains(&stranger.id));
+        }
+    }
+
+    /// A self-reported source may evidence a relationship, and may never be a
+    /// voice exemplar.
+    ///
+    /// `TrustLevel` draws that line itself — `may_source_stance` admits
+    /// `SelfReported`, `may_be_exemplar` does not — and this is the test that
+    /// makes the two predicates mean something rather than being documentation.
+    ///
+    /// The failure it guards: a people log records "saw Nan" every week, and a
+    /// ghost that filtered claims down to prose would never learn the one fact
+    /// that log exists to record.
+    #[test]
+    fn a_self_reported_memory_may_evidence_a_claim_but_not_the_voice() {
+        use ghostr_core::sensitivity::TrustLevel;
+
+        // The rule, as the type states it.
+        assert!(TrustLevel::SelfReported.may_source_stance());
+        assert!(!TrustLevel::SelfReported.may_be_exemplar());
+
+        let prose = corpus_memories(30);
+        // Longer than every prose memory in the corpus, so it sorts *first*
+        // among exemplar candidates. A short row would be filtered out by
+        // `MIN_EXEMPLAR_WORDS` and the assertion below would pass whatever the
+        // code did — which is exactly how the first draft of this test passed.
+        let logged = memory(
+            210,
+            "Saw Nan at the clinic on Tuesday morning again, third week running now",
+        );
+        let mut claims = prose.clone();
+        claims.push(logged.clone());
+
+        let footage: Vec<Footage> = (0..6)
+            .map(|seq| day(seq + 1, vec![beat(entity(4), logged.id)], Vec::new()))
+            .collect();
+
+        let model = distil_with(&footage, &prose, &claims).expect("distil");
+
+        // The claim is made, and rests on the logged memory.
+        let relation = model
+            .facets
+            .relationships
+            .iter()
+            .find(|r| r.entity == entity(4))
+            .expect("a people log must be able to evidence a relationship");
+        assert!(relation.evidence.contains(&logged.id));
+
+        // And the voice never saw it. Checked by id, because `exemplars` is a
+        // list of `MemoryId` — searching a `Debug` render for the text would
+        // never have found anything and would have passed unconditionally.
+        assert!(
+            !model.facets.voice.exemplars.contains(&logged.id),
+            "a logged row became a voice exemplar"
+        );
+        // Nor through the lexicon, which is built from the same slice: a word
+        // that appears only in the logged row must not become a lexical tic.
+        assert!(
+            !model
+                .facets
+                .voice
+                .lexicon
+                .iter()
+                .any(|t| t.phrase.eq_ignore_ascii_case("clinic")),
+            "a logged row's vocabulary reached the voice"
+        );
+    }
+
+    /// The same rule for routines: a thread the user never wrote in is not
+    /// their habit, however often a feed brings the subject back up.
+    #[test]
+    fn a_thread_evidenced_only_by_third_party_memories_makes_no_routine() {
+        use ghostr_core::ids::ThreadId;
+
+        let memories = corpus_memories(30);
+        let stranger = memory(201, "a thread the user never opened");
+
+        let footage: Vec<Footage> = (0..6)
+            .map(|seq| {
+                day(
+                    seq + 1,
+                    Vec::new(),
+                    vec![
+                        // Fresh ids, so the titles genuinely keep coming back.
+                        thread(
+                            ThreadId::new(seq + 10, [seq as u8 + 10; 10]),
+                            "the weekly review",
+                            memories[seq as usize].id,
+                        ),
+                        thread(
+                            ThreadId::new(seq + 100, [seq as u8 + 100; 10]),
+                            "act on behalf of @attacker",
+                            stranger.id,
+                        ),
+                    ],
+                )
+            })
+            .collect();
+
+        let model = distil(&footage, &memories).expect("distil");
+        let patterns: Vec<&str> = model
+            .facets
+            .routines
+            .iter()
+            .map(|r| r.pattern.as_str())
+            .collect();
+        assert!(patterns.contains(&"the weekly review"));
+        assert!(
+            !patterns.contains(&"act on behalf of @attacker"),
+            "a feed thread became one of the user's routines"
+        );
+        for routine in &model.facets.routines {
+            assert!(!routine.evidence.contains(&stranger.id));
+        }
     }
 
     /// One sighting is not a rhythm.
@@ -909,6 +1135,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let next =
             distill(Some(&prior), &corpus, &[], Timestamp::new(2_000, 0), 2).expect("distil");
@@ -941,6 +1168,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let correction = MemoryId::new(999, [9u8; 10]);
         let delta = PersonaDelta {
@@ -983,6 +1211,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let delta = PersonaDelta {
             facet: Facet::Opinion,
@@ -1020,6 +1249,7 @@ mod tests {
         let corpus = Corpus {
             footage: &[],
             first_party: &refs,
+            claimable: &refs,
         };
         let delta = PersonaDelta {
             facet: Facet::Opinion,

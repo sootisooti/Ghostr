@@ -172,6 +172,7 @@ $ alias ghostr=./target/release/ghostr
 $ ghostr init --tz Asia/Bangkok            # generate a nostr keypair, encrypt to disk
 $ ghostr source add markdown ./notes/      # says what you are agreeing to, first
 $ ghostr source add structlog ./health/ --schema health
+$ ghostr source add nostr --pubkey npub1… --relay wss://relay.example
 $ ghostr source sync                       # pull from every enabled source
 $ ghostr journal add "shipped the parser"  # straight into the encrypted vault
 $ ghostr recap today                       # today's recap, sealing nothing
@@ -204,6 +205,34 @@ added src:9f21ab04  structured_log
   sensitivity  secret  (never leaves this device)
   network      no
 ```
+
+A nostr feed is the one source that carries somebody else's writing, and it says
+so in the same place:
+
+```console
+$ ghostr source add nostr --pubkey npub180cvv07… --relay wss://relay.example
+added src:9b3538a1  nostr_feed
+  trust        third-party
+  sensitivity  public
+  network      yes — this source will talk to the internet
+```
+
+**third-party** is a security control rather than a quality score. Content at
+that level is summarised and kept, and it never becomes a voice exemplar, never
+sources a claim about what you believe, and never contributes to a relationship
+or routine the ghost thinks is yours. The adapter returns it unconditionally —
+not as a function of whose feed you named — so it cannot be relaxed from a
+settings file. Whether your *own* signed notes should be an exception is
+[SPEC §14 Q23](docs/SPEC.md), and the answer today is no.
+
+The relays are the feed's own. Adding a feed does not touch the relay list your
+encrypted backup is published to, and reading a feed needs no publishing relays
+configured at all.
+
+Nor is the relay believed about what it served: every event's signature, author
+and kind is re-checked after the transport has already checked them, and
+anything the filter did not ask for is dropped and counted where you will see
+it.
 
 Before anything can go to a remote model, you can see exactly what would:
 

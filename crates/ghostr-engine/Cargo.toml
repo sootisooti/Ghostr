@@ -14,7 +14,11 @@ authors.workspace = true
 ghostr-core = { workspace = true }
 ghostr-crypto = { workspace = true }
 ghostr-store = { workspace = true }
-ghostr-ingest = { workspace = true }
+# The `nostr` feature is on here and nowhere else: the composition root is the
+# only place that can hand a feed adapter a relay client, so enabling it in a
+# lower crate would buy nothing and would put a transport dependency under code
+# that has no business opening a socket.
+ghostr-ingest = { workspace = true, features = ["nostr"] }
 # The composition root is where a model gets wired in. No provider is on by
 # default; `llm-local` turns Ollama on and `llm-remote` the gated providers.
 ghostr-llm = { workspace = true, optional = true }

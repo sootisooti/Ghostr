@@ -309,7 +309,7 @@ archives — and feeds it to a language model. A hostile publisher writes:
 `Relation` the ghost then acts on), corrupted footage, quests that manipulate the
 user, or — worst case — an injected instruction driving a tool call.
 
-**Mitigations (planned):**
+**Mitigations (implemented):**
 - **The extraction path has no tools and no network access.** There is nothing
   for an injected instruction to actuate. This is the structural mitigation and
   the one that matters; the rest are defence in depth.
@@ -318,17 +318,61 @@ user, or — worst case — an injected instruction driving a tool call.
 - All extraction uses **schema-validated structured output**. Prose that isn't
   valid against the schema is discarded, not interpreted.
 - `TrustLevel::ThirdParty` content **never** becomes a voice exemplar and never
-  sources a `Stance` about the user.
+  sources a `Stance` about the user. The nostr feed adapter returns
+  `ThirdParty` unconditionally — not as a function of the configured pubkey, so
+  it cannot be relaxed from a settings file (SPEC §14 Q23).
+- **A feed note is a `MemoryKind::Observation`, never an `Utterance`.** The
+  voice corpus is addressed by kind as well as by trust, so getting one wrong
+  does not open the other.
+- **Footage-derived claims are filtered by trust.** Footage covers the whole
+  day, third-party memories included, so a person beat or a thread can rest on a
+  note the user never wrote. Distillation takes a set of memories a claim may
+  rest on, and a beat or thread with no evidence in it contributes neither the
+  claim nor the frequency behind it. Without this, a feed note naming
+  `@attacker` produced a `Relation` — which is the second thing this section
+  says an injection is trying to plant, and the one the trust level alone did
+  not stop.
+- **The two rules are two sets, because `TrustLevel` says they are two rules.**
+  `may_be_exemplar` admits `FirstParty` alone and decides the voice; the ghost
+  speaks from that slice and nothing else. `may_source_stance` also admits
+  `SelfReported` and decides what may evidence a claim, because a people or
+  health log *is* the user asserting something about themselves. Collapsing
+  them into one set breaks one of the two: widened, a step count becomes an
+  utterance the ghost speaks; narrowed, a habit tracker can teach the ghost
+  nothing. The predicates are the enforcement point rather than a description
+  of one — the engine calls them instead of comparing to `FirstParty`, so the
+  rule has one definition.
+- **A relay is not believed about what it served.** The feed adapter re-checks
+  every event's signature, author and kind after the transport has already
+  checked them, counts what it refused, and surfaces the count — so a relay
+  substituting a stranger's note is visible rather than silent.
 - Every persona claim carries `evidence: Vec<MemoryId>`, so a poisoned belief is
-  traceable to the exact note that introduced it — and removable.
+  traceable to the exact note that introduced it — and removable. A feed memory
+  carries the nostr event id in `provenance.external_id`, so the trail reaches
+  past the vault to the event itself.
 - `PersonaDiff` between versions is reviewable, so a sudden new stance is visible
   rather than silent.
+
+All of the above are held by `crates/ghostr-engine/tests/hostile_feed.rs`, which
+runs the attack the way it actually arrives: signed nostr notes, fetched from a
+relay, ingested, sealed, distilled.
 
 **Residual risk:** structured output constrains the *shape* of a model's response,
 not its *content*. A sufficiently clever injection can still bias a summary
 inside a valid schema. Defence is traceability — the ability to find and shred
 the source — not prevention. Users should review `PersonaDiff` before large
 version bumps, and the UI should make that easy rather than optional.
+
+Two narrower residuals, both in **footage** rather than persona, and both
+deliberate: a feed note appears in the day's highlights, and contributes to the
+day's mood reading. That is this section's own rule — third-party content "may
+be summarised and referenced" — and suppressing it would leave a corpus unable
+to show the user what their feed actually carried. What is held instead is that
+such a highlight is attributed only to the feed memory, never mixed into one of
+the user's own, and ranks below every first-party note because the adapter files
+feed content at a lower salience. The mood contribution is not bounded today; a
+feed of relentlessly bleak notes would drag a day's reading, and the fix — mood
+weighted by trust — is not yet written.
 
 ---
 

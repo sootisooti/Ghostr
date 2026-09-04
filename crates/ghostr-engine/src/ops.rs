@@ -1006,6 +1006,7 @@ const DISTILL_WINDOW_DAYS: usize = 90;
 /// corpus, if a held-out correction reached the queue, or if a claim carries no
 /// evidence.
 pub fn propose_persona(engine: &Engine) -> crate::Result<CandidateVersion> {
+    use ghostr_core::sensitivity::TrustLevel;
     use ghostr_persona::{DeterministicBuilder, DistillInput};
 
     let dek = engine.dek()?;
@@ -1021,14 +1022,26 @@ pub fn propose_persona(engine: &Engine) -> crate::Result<CandidateVersion> {
         .cloned()
         .collect();
 
-    // First-party only. Voice exemplars are drawn from this slice, and a feed
-    // item becoming an exemplar is how a stranger's voice ends up in the
+    // Two slices, because the two rules are different and `TrustLevel` says so.
+    //
+    // Voice is first-party only: a feed item — or a step count — becoming an
+    // exemplar is how something that is not the user's prose ends up in the
     // ghost's mouth (THREAT_MODEL §T7).
+    //
+    // Claims also admit self-reported sources. A people log *is* the user
+    // asserting they saw someone, and a vault whose relationships could only
+    // come from prose would leave a habit tracker unable to teach the ghost a
+    // habit.
     let all = engine.store().all_memories(dek)?;
-    let trusted = first_party_sources(engine)?;
+    let exemplar_sources = sources_where(engine, TrustLevel::may_be_exemplar)?;
+    let claim_sources = sources_where(engine, TrustLevel::may_source_stance)?;
     let first_party: Vec<&Memory> = all
         .iter()
-        .filter(|m| trusted.contains(&m.source_id))
+        .filter(|m| exemplar_sources.contains(&m.source_id))
+        .collect();
+    let claimable: Vec<&Memory> = all
+        .iter()
+        .filter(|m| claim_sources.contains(&m.source_id))
         .collect();
 
     // Read, not drained: a proposal the user never adopts must not consume the
@@ -1042,6 +1055,7 @@ pub fn propose_persona(engine: &Engine) -> crate::Result<CandidateVersion> {
         DistillInput {
             footage: &recent,
             first_party: &first_party,
+            claimable: &claimable,
             deltas: &deltas,
             now: engine.now(),
             next_ordinal,
@@ -1113,19 +1127,24 @@ pub fn persona_history(
     Ok(engine.store().persona_history(limit)?)
 }
 
-/// The sources whose content counts as the user's own voice.
+/// The sources whose trust level satisfies `permits`.
 ///
-/// Read from the store rather than assumed: a markdown vault is first-party, a
-/// health export is self-reported, and a feed is neither. Getting this wrong in
-/// the permissive direction is a vulnerability, not a bug (THREAT_MODEL §T7).
-fn first_party_sources(engine: &Engine) -> crate::Result<std::collections::BTreeSet<SourceId>> {
-    use ghostr_core::sensitivity::TrustLevel;
-
+/// The predicate comes from [`TrustLevel`] itself rather than being spelled out
+/// here as an equality check: `may_be_exemplar` and `may_source_stance` are
+/// where the rule is written down, and a second copy of it in the engine is a
+/// second copy to get wrong. Read from the store rather than assumed — a
+/// markdown vault is first-party, a health export is self-reported, and a feed
+/// is neither. Getting this wrong in the permissive direction is a
+/// vulnerability, not a bug (THREAT_MODEL §T7).
+fn sources_where(
+    engine: &Engine,
+    permits: fn(ghostr_core::sensitivity::TrustLevel) -> bool,
+) -> crate::Result<std::collections::BTreeSet<SourceId>> {
     Ok(engine
         .store()
         .all_sources(engine.dek()?)?
         .into_iter()
-        .filter(|s| s.trust == TrustLevel::FirstParty)
+        .filter(|s| permits(s.trust))
         // I7. Held-out corrections are first-party and are excluded anyway:
         // training on one would mean the ghost had seen the answer to a
         // question it is about to be scored on (SPEC Q18).

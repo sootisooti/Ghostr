@@ -251,6 +251,14 @@ rebuilds the whole history on a machine that has the seed and nothing else. A
 restored machine is a **replica** and cannot seal, because two devices advancing
 one `seq` forks the chain (SPEC §14 Q10, now resolved).
 
+The feed is a source. `ghostr source add nostr --pubkey <npub|hex> --relay
+wss://…` adds one, and `source sync` pulls it — behind the `nostr` feature, off
+in a default build. Everything it returns is `TrustLevel::ThirdParty` and a
+`MemoryKind::Observation`, neither of which is a function of configuration, and
+the adapter re-verifies every event's signature, author and kind rather than
+believing the transport that fetched them. A relay answering a filter with
+somebody else's notes is counted and reported, not silently ingested.
+
 **Scope**
 - `ghostr-nostr`: relay client, NIP-44 v2, event codec for kinds 31780–31789 with
   the NIP-78 (30078) mirror, NIP-65 relay lists, NIP-59 gift wrap (opt-in),
@@ -261,7 +269,7 @@ one `seq` forks the chain (SPEC §14 Q10, now resolved).
   replicas.
 - Nostr feed and RSS ingest adapters. **`TrustLevel::ThirdParty` enforcement is a
   hard gate here** — this is the milestone where hostile text first enters the
-  corpus (THREAT_MODEL §T7).
+  corpus (THREAT_MODEL §T7). The nostr adapter is in; RSS is not.
 - Optional `FidelityAttestation` publishing (31786), signed and chain-bound.
 - Optional ghost publishing (kind 1) with mandatory disclosure tags (SPEC §9.3),
   off by default, explicit per-scope opt-in.
@@ -285,8 +293,16 @@ one `seq` forks the chain (SPEC §14 Q10, now resolved).
       without them cannot be constructed — `GhostNoteBuilder` is the only
       constructor and emits them unconditionally
       (`a_ghost_note_cannot_be_built_without_disclosure`).
-- [ ] Injected instructions in an ingested nostr note do not alter footage or
-      produce a persona claim — adversarial corpus fixture in CI.
+- [x] Injected instructions in an ingested nostr note do not alter footage or
+      produce a persona claim — `hostile_feed.rs` runs every `InjectionKind`
+      through the whole path: signed note, relay, adapter, seal, distil. It
+      found a real hole. Footage covers the whole day, so a person beat could
+      rest on a feed note, and a `Relation` was being built from one; claims
+      derived from footage are now filtered through the first-party slice.
+      The day is still recorded — a feed note appears as a highlight, ranked
+      below the user's own and attributed only to itself, because THREAT_MODEL
+      §T7's own rule is that third-party content may be summarised and
+      referenced.
 - [x] Ciphertext lengths are bucketed; publish times jittered. Bucketing is
       NIP-44 v2's own plaintext padding rather than a second pass over the
       ciphertext — `nip44_bucketing_already_quantises_length` is what holds that

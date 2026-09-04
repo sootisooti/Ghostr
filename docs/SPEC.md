@@ -1640,3 +1640,39 @@ which chain, or which journal.
 
 The cost, recorded rather than glossed: this grows the account table §8.1 had
 fixed at four, and every vault now derives one more key it may never use.
+
+---
+
+**Q23 — Are the user's *own* nostr notes third-party?**
+
+Today they are, and the answer is not obviously right.
+
+`IngestAdapter::default_trust` is per *adapter*, not per *source*, so the nostr
+feed adapter returns `TrustLevel::ThirdParty` for every feed it reads —
+including one configured with the user's own pubkey. The consequence is real:
+someone whose main body of public writing is on nostr cannot have any of it
+count as their voice, and their ghost is built only from what they typed into a
+local file.
+
+The argument for changing it is that a signature settles authorship. A note
+signed by the user's identity key *is* something the user wrote, checkably, and
+Ghostr verifies that signature twice before storing it. Treating it as a
+stranger's text discards a fact the crypto already established.
+
+The argument against is that trust would become a function of configuration. A
+`pubkey` field in a vault's source config would decide whether text is eligible
+to be a voice exemplar — and configuration is what an attacker who has any write
+access to the vault reaches for first. It would also make the promotion silent:
+nothing in the UI distinguishes "this feed is you" from "this feed is someone you
+read", and a user who pasted the wrong key would be training their ghost on a
+stranger without ever being told.
+
+> **Recommendation:** leave it `ThirdParty` until there is a path that does not
+> route the decision through a config field. The shape that would work is a
+> **proof rather than a setting**: the vault already holds the identity key, so
+> it can require that a feed's pubkey equal the key it can sign with, checked at
+> ingest against the keystore rather than read from a source row. That is a
+> narrow change and worth doing — but it is a change to the *adapter trait*,
+> which returns one trust level per adapter and has no way to express "first
+> party if and only if this is provably me". Doing it properly means widening
+> that seam, which is M4 work, not a patch to a feed reader.

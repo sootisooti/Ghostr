@@ -24,6 +24,9 @@ ghostr-persona = { workspace = true }
 ghostr-quests = { workspace = true }
 ghostr-store = { workspace = true }
 ghostr-anchor = { workspace = true }
+# For the feed adapter's kind tag and its list of readable kinds, so `source
+# add nostr` offers the same defaults the adapter enforces.
+ghostr-ingest = { workspace = true, features = ["nostr"] }
 ghostr-llm = { workspace = true, optional = true }
 # The relay transport, for `sync` and `restore`. The CLI is a composition root:
 # it is where a vault's configured relays become a client.
