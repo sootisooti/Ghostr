@@ -624,6 +624,117 @@ pub fn anchor(engine: &Engine, client: &OtsClient) -> crate::Result<AnchorRecord
     Ok(record)
 }
 
+/// How long a pending proof stays worth asking about, per SPEC §7.4.
+///
+/// The spec's schedule is "hourly for 24h, then daily for 7d", which presumes a
+/// scheduler. There is no daemon: `serve`'s sealer loop makes no network calls
+/// at all, and anchoring is a command the user runs. So **the invocation is the
+/// cadence** — each `ghostr anchor` upgrades what it finds — and the only part
+/// of the schedule this enforces is its end. A calendar that has not reached a
+/// block in eight days is not going to, and asking a free service forever is
+/// the rude version of a bug.
+const UPGRADE_WINDOW_DAYS: i64 = 8;
+
+/// What one upgrade pass did.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpgradeReport {
+    /// Pending proofs that were still inside the window and got asked about.
+    pub asked: u64,
+    /// Proofs that gained a Bitcoin attestation on this pass.
+    pub confirmed: u64,
+    /// Proofs the calendars had nothing new for. The normal answer for hours.
+    pub still_pending: u64,
+    /// Proofs past the window, left alone.
+    pub abandoned: u64,
+}
+
+/// Asks the calendars whether pending proofs have reached a Bitcoin block.
+///
+/// This is SPEC §7.4 step 3, and it is what makes [`AnchorRecordState::Confirmed`]
+/// reachable at all: before it, `submit` stored a calendar attestation, nothing
+/// ever went back, and every anchored day read "pending" for ever — while M0's
+/// exit criterion "a day sealed today is OTS-confirmed within 24h" sat
+/// unchecked.
+///
+/// Failure is not an error. A calendar being unreachable, or simply not having
+/// the aggregate in a block yet, is the expected state for the first hours after
+/// a seal; the proof stays pending and the next run asks again.
+///
+/// **The chain is not touched.** An upgrade rewrites a `.ots` file and an anchor
+/// row, both of which sit beside the chain rather than in it — a link is
+/// immutable (I3) and gaining an attestation is not a change to what was sealed.
+///
+/// # Errors
+///
+/// Returns a store error if the anchor rows cannot be read or written.
+pub fn upgrade_anchors<F>(engine: &Engine, fetch: &F) -> crate::Result<UpgradeReport>
+where
+    F: ghostr_anchor::ots::CalendarFetch + ?Sized,
+{
+    let Some(tip) = engine.store().tip()? else {
+        return Ok(UpgradeReport::default());
+    };
+
+    let mut report = UpgradeReport::default();
+    let now = engine.now();
+
+    for seq in 1..=tip.seq {
+        let Some(mut record) = engine.store().get_anchor(seq)? else {
+            continue;
+        };
+        if record.state != AnchorRecordState::Pending {
+            continue;
+        }
+        let Some(ots) = record.ots.clone() else {
+            // Pending with no proof to upgrade: the submission was accepted but
+            // the body was unreadable. Nothing to ask about.
+            continue;
+        };
+
+        if let Some(submitted) = record.submitted_at {
+            let age_days = (now.utc_millis() - submitted.utc_millis()) / (1000 * 60 * 60 * 24);
+            if age_days >= UPGRADE_WINDOW_DAYS {
+                report.abandoned += 1;
+                continue;
+            }
+        }
+
+        report.asked += 1;
+        let Ok(upgrade) = ghostr_anchor::ots::upgrade(record.digest, &ots, fetch) else {
+            // A stored proof that will not parse is not made better by writing
+            // over it. Counted as pending and left exactly as it is.
+            report.still_pending += 1;
+            continue;
+        };
+
+        let Some(bytes) = upgrade.ots_bytes else {
+            report.still_pending += 1;
+            continue;
+        };
+
+        if let AnchorState::Confirmed { block_height } = upgrade.state {
+            record.state = AnchorRecordState::Confirmed;
+            record.block_height = Some(block_height);
+            report.confirmed += 1;
+        } else {
+            // Something merged but no Bitcoin attestation yet — a calendar can
+            // answer with more aggregation and still not be in a block. Worth
+            // keeping, not worth claiming.
+            report.still_pending += 1;
+        }
+
+        // The file first: it is the proof, and it is readable without the vault.
+        let dir = engine.dir().join("anchors");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(dir.join(format!("{seq}.ots")), &bytes);
+        }
+        record.ots = Some(bytes);
+        engine.store().put_anchor(&record)?;
+    }
+
+    Ok(report)
+}
+
 /// The result of verifying a chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyReport {

@@ -358,6 +358,48 @@ fn swap_protection((pinned, total): (usize, usize)) -> String {
     }
 }
 
+/// Renders what an upgrade pass found, or nothing when it had nothing to do.
+///
+/// `None` on an empty pass rather than "0 proofs upgraded": a vault with no
+/// pending anchors is the normal state after a run of confirmations, and a line
+/// reporting zero of everything is noise that trains people to stop reading.
+pub(crate) fn upgrades(report: &ghostr_engine::ops::UpgradeReport) -> Option<String> {
+    if report.asked == 0 && report.abandoned == 0 {
+        return None;
+    }
+    let mut out = String::new();
+    if report.confirmed > 0 {
+        // The good news first, and specific: this is the moment the chain stops
+        // being merely ours and becomes checkable against Bitcoin.
+        out.push_str(&format!(
+            "confirmed {} day(s) into a Bitcoin block",
+            report.confirmed
+        ));
+    }
+    if report.still_pending > 0 {
+        if !out.is_empty() {
+            out.push_str(" · ");
+        }
+        // Not a warning. A calendar aggregates for hours before its root reaches
+        // a block, so "still pending" is what a correct system says most of the
+        // time.
+        out.push_str(&format!(
+            "{} still waiting on a calendar",
+            report.still_pending
+        ));
+    }
+    if report.abandoned > 0 {
+        if !out.is_empty() {
+            out.push_str(" · ");
+        }
+        out.push_str(&format!(
+            "{} given up on after 8 days (the link is still valid, just unattested)",
+            report.abandoned
+        ));
+    }
+    Some(out)
+}
+
 /// Renders the result of adding a source.
 ///
 /// States the two things the user is agreeing to — how the content will be

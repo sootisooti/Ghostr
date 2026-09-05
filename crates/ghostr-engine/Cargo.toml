@@ -58,6 +58,12 @@ llm-remote = ["llm", "ghostr-llm/remote"]
 # The relay double in `sync_restore` implements an async trait.
 async-trait = { workspace = true }
 ghostr-testkit = { workspace = true }
+# Dev only, and already in the tree via `ghostr-anchor`. `anchor_upgrade` builds
+# the two byte strings a real calendar exchange consists of — a pending proof and
+# a Bitcoin attestation — so the upgrade path can be driven end to end without a
+# network call (CLAUDE.md §4.8). Hand-rolling those bytes would be testing the
+# fixture rather than the merge.
+opentimestamps = { workspace = true }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

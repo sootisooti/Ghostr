@@ -229,6 +229,53 @@ impl OtsClient {
     }
 }
 
+impl CalendarFetch for OtsClient {
+    /// `GET {uri}/timestamp/{commitment}` — the calendar's upgrade endpoint.
+    ///
+    /// The URI comes from the pending attestation inside a proof this vault
+    /// stored, so it is only ever a calendar that already answered a submission.
+    /// It is still treated as untrusted input: whatever comes back has to
+    /// deserialise *and* graft onto the commitment it was asked about, or the
+    /// merge is dropped and the existing proof kept.
+    fn fetch(&self, uri: &str, commitment: &[u8]) -> Result<Vec<u8>, String> {
+        let url = format!(
+            "{}/timestamp/{}",
+            uri.trim_end_matches('/'),
+            hex_lower(commitment)
+        );
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(self.timeout)
+            .timeout_read(self.timeout)
+            .build();
+
+        let response = agent
+            .get(&url)
+            .set("Accept", "application/vnd.opentimestamps.v1")
+            .call()
+            .map_err(|e| format!("{uri}: {e}"))?;
+
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+            .map_err(|e| format!("{uri}: reading response: {e}"))?;
+        if bytes.is_empty() {
+            // 200 with an empty body is how some calendars say "not yet".
+            return Err(format!("{uri}: nothing yet"));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Lowercase hex, for the one place a commitment goes into a URL.
+fn hex_lower(bytes: &[u8]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, b| {
+        // Writing to a String cannot fail; the result is discarded rather than
+        // unwrapped so this stays panic-free (CLAUDE.md §4.11).
+        let _ = write!(out, "{b:02x}");
+        out
+    })
+}
+
 /// Wraps a calendar response into a complete detached `.ots` file.
 ///
 /// The calendar returns the timestamp *operations* for the digest it was given;
@@ -260,6 +307,184 @@ pub fn to_detached_file(digest: Hash32, calendar_body: &[u8]) -> crate::Result<V
     file.to_writer(&mut out)
         .map_err(|_| crate::Error::MalformedProof)?;
     Ok(out)
+}
+
+/// Where an upgrade goes to ask whether a pending attestation has landed.
+///
+/// A trait rather than a bare HTTP call so the *merge* — the part that can
+/// silently corrupt a proof — is testable without a network (CLAUDE.md §4.8).
+/// [`OtsClient`] is the real implementation; the tests hand it recorded bytes.
+pub trait CalendarFetch {
+    /// Asks `uri` for the timestamp it holds for `commitment`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a transport description on failure. Being unable to reach a
+    /// calendar is an expected condition, not an exceptional one: the proof
+    /// stays pending and the next pass tries again.
+    fn fetch(&self, uri: &str, commitment: &[u8]) -> Result<Vec<u8>, String>;
+}
+
+/// What one upgrade pass over one proof found.
+#[derive(Debug, Clone)]
+pub struct Upgrade {
+    /// Where the anchor stands now.
+    pub state: AnchorState,
+    /// The rewritten `.ots`, when the proof actually gained something.
+    ///
+    /// `None` means nothing was merged — no calendar answered, or none of them
+    /// had anything new. The caller keeps the file it already had rather than
+    /// rewriting it with an identical copy.
+    pub ots_bytes: Option<Vec<u8>>,
+}
+
+/// Attempts to complete a pending proof into a Bitcoin attestation.
+///
+/// This is SPEC §7.4 step 3, which had never been implemented: `submit` stored
+/// a *calendar* attestation and nothing ever went back to ask whether the
+/// calendar's aggregate had reached a block. Until this existed,
+/// [`AnchorState::Confirmed`] was constructed nowhere but its own unit tests and
+/// every anchored day read "pending" forever.
+///
+/// # How a merge works
+///
+/// A pending attestation is a leaf carrying a URI, and the step's `output` is
+/// the commitment the calendar knows it by. Asking for that commitment returns
+/// the operations from there onward. They are attached by **replacing the leaf
+/// with a fork** holding the original attestation and the new path: an `Op`
+/// step serialises only its first child and an `Attestation` step serialises
+/// none, so a fork is the only shape that keeps both. Keeping the pending
+/// attestation matters — it is what a later pass uses to ask again if this
+/// calendar has more to give.
+///
+/// # Errors
+///
+/// Returns [`Error::MalformedProof`](crate::Error::MalformedProof) if the stored
+/// bytes are not a detached timestamp, or
+/// [`Error::ProofDigestMismatch`](crate::Error::ProofDigestMismatch) if they
+/// commit to a different digest than `digest`. A calendar that answers with
+/// somebody else's timestamp is broken or hostile; either way the merge is
+/// refused rather than written over a good proof.
+pub fn upgrade<F: CalendarFetch + ?Sized>(
+    digest: Hash32,
+    ots: &[u8],
+    fetch: &F,
+) -> crate::Result<Upgrade> {
+    use opentimestamps::DetachedTimestampFile;
+    use opentimestamps::ser::Deserializer;
+    use opentimestamps::timestamp::Timestamp as OtsTimestamp;
+
+    let mut file =
+        DetachedTimestampFile::from_reader(ots).map_err(|_| crate::Error::MalformedProof)?;
+    if file.timestamp.start_digest != digest.as_bytes() {
+        return Err(crate::Error::ProofDigestMismatch);
+    }
+
+    let mut merged = 0usize;
+    for (uri, commitment) in pending_requests(&file.timestamp.first_step) {
+        let Ok(body) = fetch.fetch(&uri, &commitment) else {
+            continue;
+        };
+        let mut de = Deserializer::new(&body[..]);
+        let Ok(fragment) = OtsTimestamp::deserialize(&mut de, commitment.clone()) else {
+            // A calendar that answers with something unparseable has told us
+            // nothing. The proof we already hold is untouched.
+            continue;
+        };
+        if graft(
+            &mut file.timestamp.first_step,
+            &commitment,
+            &uri,
+            fragment.first_step,
+        ) {
+            merged += 1;
+        }
+    }
+
+    let state = match bitcoin_height(&file.timestamp.first_step) {
+        Some(height) => AnchorState::Confirmed {
+            block_height: height,
+        },
+        None => AnchorState::Pending {
+            submitted_at: Timestamp::new(0, 0),
+            calendars: pending_requests(&file.timestamp.first_step)
+                .into_iter()
+                .map(|(uri, _)| uri)
+                .collect(),
+        },
+    };
+
+    let ots_bytes = if merged == 0 {
+        None
+    } else {
+        let mut out = Vec::new();
+        file.to_writer(&mut out)
+            .map_err(|_| crate::Error::MalformedProof)?;
+        Some(out)
+    };
+
+    Ok(Upgrade { state, ots_bytes })
+}
+
+/// Every `(calendar uri, commitment)` a pending attestation is waiting on.
+fn pending_requests(step: &opentimestamps::timestamp::Step) -> Vec<(String, Vec<u8>)> {
+    use opentimestamps::attestation::Attestation;
+    use opentimestamps::timestamp::StepData;
+
+    let mut out = Vec::new();
+    if let StepData::Attestation(Attestation::Pending { ref uri }) = step.data {
+        out.push((uri.clone(), step.output.clone()));
+    }
+    for child in &step.next {
+        out.extend(pending_requests(child));
+    }
+    out
+}
+
+/// The block height of the first Bitcoin attestation in the tree, if any.
+fn bitcoin_height(step: &opentimestamps::timestamp::Step) -> Option<u32> {
+    use opentimestamps::attestation::Attestation;
+    use opentimestamps::timestamp::StepData;
+
+    if let StepData::Attestation(Attestation::Bitcoin { height }) = step.data {
+        return u32::try_from(height).ok();
+    }
+    step.next.iter().find_map(bitcoin_height)
+}
+
+/// Replaces the pending leaf for `(commitment, uri)` with a fork carrying it and
+/// `addition`, and answers whether it found one.
+fn graft(
+    step: &mut opentimestamps::timestamp::Step,
+    commitment: &[u8],
+    uri: &str,
+    addition: opentimestamps::timestamp::Step,
+) -> bool {
+    use opentimestamps::attestation::Attestation;
+    use opentimestamps::timestamp::{Step, StepData};
+
+    let is_target = matches!(
+        step.data,
+        StepData::Attestation(Attestation::Pending { uri: ref u }) if u == uri
+    ) && step.output == commitment;
+
+    if is_target {
+        let original = Step {
+            data: step.data.clone(),
+            output: step.output.clone(),
+            next: Vec::new(),
+        };
+        step.data = StepData::Fork;
+        step.next = vec![original, addition];
+        return true;
+    }
+
+    for child in &mut step.next {
+        if graft(child, commitment, uri, addition.clone()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Reads a detached `.ots` file back, for `ghostr verify` and for inspection.
@@ -295,6 +520,148 @@ mod tests {
         assert!(cals.len() >= 2, "one calendar is a single point of failure");
         let hosts: std::collections::HashSet<_> = cals.iter().map(|c| &c.url).collect();
         assert_eq!(hosts.len(), cals.len(), "calendars must be distinct");
+    }
+
+    /// Builds a `.ots` holding one pending attestation, the way `submit` does.
+    fn pending_proof(digest: Hash32, uri: &str) -> Vec<u8> {
+        use opentimestamps::DetachedTimestampFile;
+        use opentimestamps::attestation::Attestation;
+        use opentimestamps::ser::DigestType;
+        use opentimestamps::timestamp::{Step, StepData, Timestamp as OtsTimestamp};
+
+        let file = DetachedTimestampFile {
+            digest_type: DigestType::Sha256,
+            timestamp: OtsTimestamp {
+                start_digest: digest.as_bytes().to_vec(),
+                first_step: Step {
+                    data: StepData::Attestation(Attestation::Pending {
+                        uri: uri.to_owned(),
+                    }),
+                    output: digest.as_bytes().to_vec(),
+                    next: Vec::new(),
+                },
+            },
+        };
+        let mut out = Vec::new();
+        file.to_writer(&mut out).expect("write");
+        out
+    }
+
+    /// The bytes a calendar returns once its aggregate is in a block: the
+    /// operations from the commitment onward, with no envelope.
+    fn calendar_says_confirmed(height: usize) -> Vec<u8> {
+        use opentimestamps::attestation::Attestation;
+        use opentimestamps::ser::Serializer;
+
+        let mut out = Vec::new();
+        {
+            let mut ser = Serializer::new(&mut out);
+            ser.write_byte(0x00).expect("attestation tag");
+            Attestation::Bitcoin { height }
+                .serialize(&mut ser)
+                .expect("serialize");
+        }
+        out
+    }
+
+    /// A fetch that answers every calendar with the same recorded bytes.
+    struct Recorded(Result<Vec<u8>, String>);
+    impl CalendarFetch for Recorded {
+        fn fetch(&self, _uri: &str, _commitment: &[u8]) -> Result<Vec<u8>, String> {
+            self.0.clone()
+        }
+    }
+
+    /// The whole point of the milestone criterion: a pending proof becomes a
+    /// confirmed one, and the result is still a readable `.ots` for the same
+    /// digest.
+    ///
+    /// Until `upgrade` existed, `AnchorState::Confirmed` was built nowhere but a
+    /// unit test and every anchored day read "pending" forever.
+    #[test]
+    fn a_calendar_in_a_block_turns_a_pending_proof_into_a_confirmed_one() {
+        let digest = Hash32::from_bytes([7u8; 32]);
+        let before = pending_proof(digest, "https://alice.calendar");
+
+        let out = upgrade(
+            digest,
+            &before,
+            &Recorded(Ok(calendar_says_confirmed(886_123))),
+        )
+        .expect("upgrade");
+
+        assert_eq!(
+            out.state,
+            AnchorState::Confirmed {
+                block_height: 886_123
+            }
+        );
+        let bytes = out.ots_bytes.expect("a merged proof must be written back");
+        assert_ne!(bytes, before, "the file must actually have changed");
+        read_detached_file(&bytes, digest).expect("the upgraded proof must still parse");
+    }
+
+    /// A calendar that has nothing yet must leave the proof exactly as it was.
+    ///
+    /// This is the common case for the first hours after a seal, and the
+    /// dangerous one: rewriting the file on every pass would risk corrupting a
+    /// good proof for no gain, and reporting anything but `Pending` would claim
+    /// a Bitcoin attestation that does not exist.
+    #[test]
+    fn a_calendar_with_nothing_yet_leaves_the_proof_alone() {
+        let digest = Hash32::from_bytes([9u8; 32]);
+        let before = pending_proof(digest, "https://alice.calendar");
+
+        let out = upgrade(digest, &before, &Recorded(Err("504".to_owned()))).expect("upgrade");
+
+        assert!(matches!(out.state, AnchorState::Pending { .. }));
+        assert!(
+            out.ots_bytes.is_none(),
+            "nothing was merged, so nothing should be rewritten"
+        );
+    }
+
+    /// A proof for someone else's digest is refused before anything is written.
+    ///
+    /// `read_detached_file` already guards the read path; the upgrade path has
+    /// its own opportunity to overwrite a good proof with a foreign one, so it
+    /// checks separately rather than trusting its caller.
+    #[test]
+    fn an_upgrade_refuses_a_proof_for_a_different_digest() {
+        let mine = Hash32::from_bytes([1u8; 32]);
+        let theirs = Hash32::from_bytes([2u8; 32]);
+        let proof = pending_proof(theirs, "https://alice.calendar");
+
+        let err = upgrade(mine, &proof, &Recorded(Ok(calendar_says_confirmed(1))))
+            .expect_err("a proof for another digest must be refused");
+        assert!(matches!(err, crate::Error::ProofDigestMismatch));
+    }
+
+    /// The pending attestation survives the merge.
+    ///
+    /// It is what a later pass uses to ask the same calendar again — dropping it
+    /// would make the first upgrade the only one that could ever happen.
+    #[test]
+    fn merging_keeps_the_pending_attestation_to_ask_again_with() {
+        let digest = Hash32::from_bytes([3u8; 32]);
+        let before = pending_proof(digest, "https://alice.calendar");
+
+        let out = upgrade(
+            digest,
+            &before,
+            &Recorded(Ok(calendar_says_confirmed(700_000))),
+        )
+        .expect("upgrade");
+        let bytes = out.ots_bytes.expect("merged");
+
+        let file = opentimestamps::DetachedTimestampFile::from_reader(&bytes[..]).expect("parse");
+        let still_pending = pending_requests(&file.timestamp.first_step);
+        assert_eq!(
+            still_pending.len(),
+            1,
+            "the calendar must still be listed so a later pass can ask again"
+        );
+        assert_eq!(still_pending[0].0, "https://alice.calendar");
     }
 
     #[test]

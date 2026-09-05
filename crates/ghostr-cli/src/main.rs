@@ -798,8 +798,16 @@ fn cmd_anchor(dir: &std::path::Path) -> Result<()> {
             .collect(),
         std::time::Duration::from_secs(15),
     );
+    // Upgrade first, submit second. A pass that ran after the submission would
+    // immediately ask a calendar about a digest it accepted seconds ago, which
+    // is a guaranteed "nothing yet" and a wasted request to a free service.
+    let upgraded = ops::upgrade_anchors(&engine, &client).context("upgrading pending proofs")?;
     let record = ops::anchor(&engine, &client).context("anchoring the chain tip")?;
+
     println!("{}", render::anchor(&record));
+    if let Some(line) = render::upgrades(&upgraded) {
+        println!("{line}");
+    }
     Ok(())
 }
 

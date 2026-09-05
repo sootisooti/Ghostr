@@ -807,6 +807,14 @@ Properties this buys:
    pending proofs. Once a calendar's aggregated Merkle root lands in a Bitcoin
    transaction, the upgraded `.ots` contains a complete path: `link_n` → calendar
    aggregation → transaction → block header merkle root → block height.
+
+   *As built, the cadence is the user's: a schedule presumes a scheduler, and
+   there is none — `serve`'s sealer loop makes no network calls at all, and
+   anchoring is a command. Every `ghostr anchor` upgrades what it finds. The part
+   of the schedule that is enforced is its **end**: a proof more than eight days
+   old is left alone, because a calendar that has not reached a block by then is
+   not going to and a free service should not be asked forever. Merging keeps the
+   pending attestation, so a later pass can ask the same calendar again.*
 4. Record the resulting `AnchorState`:
 
 ```rust
