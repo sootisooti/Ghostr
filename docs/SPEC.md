@@ -989,8 +989,11 @@ passphrase ──Argon2id──▶ KEK ──unwraps──▶ seed ──NIP-06�
                                      XChaCha20-Poly1305 ──▶ database + blobs
 ```
 
-- The passphrase never leaves the process. The KEK is derived on unlock, held in
-  `zeroize`-on-drop memory, and `mlock`ed where the platform allows.
+- The passphrase never leaves the process. The KEK is derived on unlock and held
+  in a page of its own, zeroized on drop and `mlock`ed where the platform allows
+  — as are the DEK and each derived account secret. Whether the lock was granted
+  is reported by `ghostr status` rather than assumed: `RLIMIT_MEMLOCK` can refuse
+  and the syscall fails quietly.
 - **The DEK is derived from the identity secret key, not stored.** The store is
   therefore readable only by whoever can reach the nostr key, and there is no
   second secret to back up, lose, or leak. Nothing on disk holds the DEK.

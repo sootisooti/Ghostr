@@ -529,6 +529,21 @@ impl Keystore for FileKeystore {
         self.unlocked = None;
     }
 
+    fn pinned_secrets(&self) -> (usize, usize) {
+        let Some(unlocked) = self.unlocked.as_ref() else {
+            // Locked: the secrets do not exist to be pinned, which is a stronger
+            // guarantee than pinning them would have been.
+            return (0, 0);
+        };
+        let mut pinned = usize::from(unlocked.dek.is_pinned());
+        let mut total = 1;
+        for key in &unlocked.keys {
+            pinned += usize::from(key.is_pinned());
+            total += 1;
+        }
+        (pinned, total)
+    }
+
     fn is_locked(&self) -> bool {
         self.unlocked.is_none()
     }

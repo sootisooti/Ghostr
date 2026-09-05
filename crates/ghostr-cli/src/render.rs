@@ -321,10 +321,12 @@ pub(crate) fn verify(report: &VerifyReport) -> String {
 
 /// Renders vault status.
 pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
+    use ghostr_crypto::signer::Keystore as _;
+
     let tip = engine.store().tip()?;
     let memories = engine.store().memory_count()?;
     Ok(format!(
-        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\nmodel   none (M0 is offline; no LLM is compiled in)",
+        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)",
         engine.dir().display(),
         engine.npub().as_str(),
         engine.home_tz()?.name(),
@@ -333,7 +335,27 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
             || "none sealed".to_owned(),
             |t| format!("seq {} · {}", t.seq, t.link.short())
         ),
+        swap_protection(engine.keystore().pinned_secrets()),
     ))
+}
+
+/// How much of the in-memory key material is pinned out of swap.
+///
+/// Printed even when everything worked, because the interesting case is the one
+/// where it did not and nothing else would say so. An unlocked vault holds six
+/// secrets in a page each, and whether the kernel pins them depends on
+/// `RLIMIT_MEMLOCK`, on `CAP_IPC_LOCK`, and on the container runtime — so the
+/// honest thing is to measure rather than to promise. A short answer is
+/// actionable: `ulimit -l` is the knob (THREAT_MODEL §T1).
+fn swap_protection((pinned, total): (usize, usize)) -> String {
+    match (pinned, total) {
+        (_, 0) => "no keys held in this process".to_owned(),
+        (p, t) if p == t => format!("{p}/{t} keys pinned out of swap"),
+        (0, t) => format!("0/{t} keys pinned — nothing is protected from swap. Raise `ulimit -l`"),
+        (p, t) => {
+            format!("{p}/{t} keys pinned — the rest can be swapped to disk. Raise `ulimit -l`")
+        }
+    }
 }
 
 /// Renders the result of adding a source.
@@ -1091,4 +1113,54 @@ fn local_addresses(port: u16) -> Vec<String> {
         out.push(format!("<this machine's address>:{port}"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reporting line is the deliverable, not the lock.
+    ///
+    /// `mlock` succeeding cannot be asserted — it depends on `RLIMIT_MEMLOCK`,
+    /// on `CAP_IPC_LOCK` and on the runtime, and a test that demanded success
+    /// would be the flaky kind CLAUDE.md §6 calls a design bug. Measured on this
+    /// machine, every page pinned even unprivileged under `ulimit -l 8192`, so
+    /// the *failure* path cannot be produced here at all.
+    ///
+    /// What can be pinned down is that each outcome says something different,
+    /// and that a partial or absent lock never reads as success. That is the
+    /// part a user's trust actually rests on.
+    #[test]
+    fn a_partial_lock_never_reads_as_a_full_one() {
+        let all = swap_protection((6, 6));
+        let some = swap_protection((2, 6));
+        let none = swap_protection((0, 6));
+        let empty = swap_protection((0, 0));
+
+        assert!(all.contains("6/6"));
+        assert!(
+            !all.contains("swapped") && !all.contains("ulimit"),
+            "a full lock must not warn: {all}"
+        );
+
+        for (label, line) in [("partial", &some), ("none", &none)] {
+            assert!(
+                line.contains("ulimit"),
+                "the {label} case must name the knob: {line}"
+            );
+        }
+        assert!(
+            some.contains("2/6") && some.contains("the rest"),
+            "a partial lock must say how much is unprotected: {some}"
+        );
+        assert!(
+            none.contains("nothing is protected"),
+            "no lock at all must say so plainly: {none}"
+        );
+
+        // A remote signer holds nothing locally, and "0 of 0" would read as a
+        // failure rather than as the correct answer.
+        assert!(empty.contains("no keys held"), "{empty}");
+        assert!(!empty.contains("ulimit"), "nothing to fix here: {empty}");
+    }
 }

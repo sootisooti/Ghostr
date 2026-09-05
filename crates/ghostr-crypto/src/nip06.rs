@@ -11,7 +11,7 @@ use secp256k1::{Secp256k1, SecretKey};
 use sha2::Sha512;
 use zeroize::Zeroizing;
 
-use crate::secret::{SecretBytes, SecretString};
+use crate::secret::{SecretBytes, SecretPage, SecretString};
 
 /// NIP-06's coin type. 1237 is nostr's SLIP-44 registration.
 const NOSTR_COIN_TYPE: u32 = 1237;
@@ -192,7 +192,7 @@ impl MasterKey {
         Ok(DerivedKey {
             public: PublicKey::from_bytes(xonly.serialize()),
             account,
-            secret: SecretBytes::new(secret.secret_bytes()),
+            secret: SecretPage::new(&mut secret.secret_bytes()),
         })
     }
 }
@@ -252,7 +252,18 @@ pub struct DerivedKey {
     pub public: PublicKey,
     /// Which account this came from.
     pub account: Account,
-    secret: SecretBytes<32>,
+    /// In a locked page, not a plain array: SPEC §8 derives the DEK *from* this
+    /// key, so pinning the DEK while leaving its parent swappable would protect
+    /// the copy and not the original.
+    secret: SecretPage<32>,
+}
+
+impl DerivedKey {
+    /// Whether this account secret's page is actually pinned out of swap.
+    #[must_use]
+    pub const fn is_pinned(&self) -> bool {
+        self.secret.is_locked()
+    }
 }
 
 impl core::fmt::Debug for DerivedKey {
@@ -286,14 +297,14 @@ impl DerivedKey {
     /// the bytes are not a valid secp256k1 scalar — zero, or above the curve
     /// order. Checked here rather than at first use, so an unusable key is
     /// refused at import instead of at the first signature.
-    pub(crate) fn from_secret(account: Account, secret: [u8; 32]) -> crate::Result<Self> {
+    pub(crate) fn from_secret(account: Account, mut secret: [u8; 32]) -> crate::Result<Self> {
         let secp = Secp256k1::new();
         let sk = SecretKey::from_byte_array(secret).map_err(|_| crate::Error::InvalidPublicKey)?;
         let (x_only, _parity) = sk.x_only_public_key(&secp);
         Ok(Self {
             public: PublicKey::from_bytes(x_only.serialize()),
             account,
-            secret: SecretBytes::new(secret),
+            secret: SecretPage::new(&mut secret),
         })
     }
 

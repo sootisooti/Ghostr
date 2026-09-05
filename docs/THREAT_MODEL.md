@@ -90,7 +90,15 @@ body, not beside the commitment digest.
   swapped between records.
 - Keystore in the OS keychain where available (Keychain / Secret Service / DPAPI),
   which adds hardware-backed rate limiting on platforms that support it.
-- Zeroize-on-drop and `mlock` for KEK/DEK in memory.
+- Zeroize-on-drop and `mlock` for key material in memory — the KEK, the DEK,
+  and the five derived account secrets, each in a page of its own. A page per
+  secret rather than a lock per allocation is the point: `mlock` and `munlock`
+  work on whole pages, so two secrets sharing one would mean dropping either
+  unlocks both while the survivor still reported itself locked.
+- **Whether the kernel honours it is reported, not assumed.** `RLIMIT_MEMLOCK`,
+  `CAP_IPC_LOCK` and the container runtime all decide, and a failure is silent
+  at the syscall. `ghostr status` prints how many of the six pages are pinned,
+  so a guarantee that did not hold says so instead of looking like one that did.
 
 **Residual risk — read this part:**
 - **The metadata leak is real and unfixed.** Encrypting the index would make the
@@ -101,7 +109,11 @@ body, not beside the commitment digest.
 - A weak passphrase defeats everything above. Enforce a strength floor at `init`
   and offer a generated passphrase.
 - **Cold-boot / swap / hibernation:** an image captured while unlocked may contain
-  the DEK. `mlock` helps; it is not a guarantee across suspend.
+  the DEK. `mlock` helps; it is not a guarantee across suspend — hibernation
+  writes all of RAM to disk whatever is pinned. It also narrows one link rather
+  than the chain: Argon2's output block and secp256k1's own `SecretKey` each
+  held a copy on an unlocked stack before the locked page existed, and are wiped
+  only when they drop.
 - Any decrypted material the user exported themselves (a rendered recap in
   `~/Documents`) is outside our protection entirely.
 

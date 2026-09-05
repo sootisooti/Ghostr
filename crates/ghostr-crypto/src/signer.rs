@@ -209,6 +209,21 @@ pub trait Keystore: Send + Sync {
     /// Whether the keystore is currently locked.
     fn is_locked(&self) -> bool;
 
+    /// How many in-memory secrets are pinned out of swap, of how many held.
+    ///
+    /// `(0, 0)` from a keystore that holds no secrets locally — a remote signer
+    /// has nothing to pin, and reporting "0 of 0 locked" is the honest answer
+    /// rather than an alarming one.
+    ///
+    /// This exists to be *shown*. THREAT_MODEL §T1 promises `mlock` for the KEK
+    /// and DEK, and whether the kernel honours it depends on `RLIMIT_MEMLOCK`,
+    /// on `CAP_IPC_LOCK`, and on the container runtime. A guarantee whose
+    /// failure is invisible is not a guarantee, so `ghostr status` prints this
+    /// whether it succeeded or not.
+    fn pinned_secrets(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
     /// A reference to one NIP-06 account's key.
     ///
     /// # Errors

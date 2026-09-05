@@ -29,7 +29,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::secret::{SecretBytes, SecretString};
+use crate::secret::{SecretBytes, SecretPage, SecretString};
 
 /// Domain separation for the store's data key.
 ///
@@ -101,7 +101,12 @@ impl Argon2Params {
 }
 
 /// The key encryption key, derived from the passphrase. Wraps the seed.
-pub struct Kek(SecretBytes<32>);
+///
+/// Held in a [`SecretPage`] rather than plain [`SecretBytes`]: THREAT_MODEL §T1
+/// and SPEC §8 both name the KEK as `mlock`ed, and it is long-lived — it exists
+/// for as long as the vault is unlocked, which is exactly the window in which a
+/// page can be swapped out.
+pub struct Kek(SecretPage<32>);
 
 impl core::fmt::Debug for Kek {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -112,7 +117,23 @@ impl core::fmt::Debug for Kek {
 /// The data encryption key, which actually encrypts the corpus.
 ///
 /// Derived from the identity secret key, never persisted.
-pub struct Dek(SecretBytes<32>);
+///
+/// Held in a [`SecretPage`] for the same reason as the KEK, and with more at
+/// stake: this is the key the whole corpus is encrypted under, and it is in
+/// memory for the entire life of an unlocked vault.
+pub struct Dek(SecretPage<32>);
+
+impl Dek {
+    /// Whether the DEK's page is actually pinned out of swap.
+    ///
+    /// Reported rather than assumed: `RLIMIT_MEMLOCK` can refuse, and the whole
+    /// point of surfacing it is that a silent failure of THREAT_MODEL §T1's
+    /// promise would look exactly like success.
+    #[must_use]
+    pub const fn is_pinned(&self) -> bool {
+        self.0.is_locked()
+    }
+}
 
 impl core::fmt::Debug for Dek {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -171,7 +192,10 @@ pub fn derive_kek(
         .map_err(|_| crate::Error::Backend {
             operation: "argon2 derivation",
         })?;
-    Ok(Kek(SecretBytes::new(*out)))
+    // A mutable local so the copy this function made is wiped too, rather
+    // than lingering on the stack beside the locked page that replaced it.
+    let mut raw = *out;
+    Ok(Kek(SecretPage::new(&mut raw)))
 }
 
 /// Wraps a BIP-39 seed under a KEK.
@@ -305,9 +329,10 @@ pub fn derive_dek(identity_secret: &[u8; 32]) -> Dek {
     // `expand` fails only when the output length exceeds 255 * HashLen; 32 bytes
     // cannot reach that, so the fallback branch is unreachable in practice.
     if hk.expand(DEK_INFO, out.as_mut_slice()).is_err() {
-        return Dek(SecretBytes::new([0u8; 32]));
+        return Dek(SecretPage::new(&mut [0u8; 32]));
     }
-    Dek(SecretBytes::new(*out))
+    let mut raw = *out;
+    Dek(SecretPage::new(&mut raw))
 }
 
 /// Encrypts a row payload under the DEK.
