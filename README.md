@@ -83,7 +83,13 @@ relationships, and routines are computed from the corpus exactly — sentence
 lengths and punctuation rates are arithmetic, not estimates — while opinions,
 boundaries, and lore wait for a model rather than being guessed. Quests are
 issued with their answers already committed, answered, and scored, and the day's
-quest set is committed into the footage Merkle tree.
+quest set is **not** committed into the footage Merkle tree — this line claimed
+it was, and the claim did not survive being checked. `Tag::QuestLeaf` is
+referenced by nothing but property tests, and `Footage` has no quest field. The
+score names the chain `seq` it was computed at, which dates it and commits
+nothing; SPEC §5.4's *"backdating a good streak requires breaking SHA-256 or
+Bitcoin"* is the intention, not yet the implementation. Tracked as M2's
+unchecked criterion.
 
 M3 is the nostr surface: NIP-44 v2 against all 128 reference vectors, NIP-19,
 NIP-46 remote signing, NIP-59 gift wrap, the relay transport, `sync` and
