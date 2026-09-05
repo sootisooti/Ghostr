@@ -6,15 +6,32 @@ description: Run exactly what CI runs, in both thread shapes, before pushing. Us
 # Run what CI runs, before CI does
 
 ```sh
+set -e   # or check every exit status by hand; see the warning below
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo clippy --all-targets -- -D warnings          # default features too
-RUSTDOCFLAGS=-D warnings cargo doc --no-deps --all-features
-cargo xtask lint-deps                               # ARCHITECTURE §2 rules
-cargo xtask scaffold-status                         # should stay at 0
-cargo nextest run --all-features                    # or cargo test
+cargo clippy --all-targets -- -D warnings            # default features too
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+cargo xtask lint-deps                                 # ARCHITECTURE §2 rules
+cargo xtask scaffold-status                           # should stay at 0
+cargo xtask unused-pub                                # a report; read it
+cargo nextest run --all-features                      # or cargo test
 cargo nextest run --all-features -- --test-threads=1
 ```
+
+## Judge these by their exit status, never by grepping their output
+
+This cost a red CI once already, and the failure looked exactly like success.
+
+`RUSTDOCFLAGS=-D warnings cargo doc …` — **unquoted** — makes the shell read
+`warnings` as the command name and `RUSTDOCFLAGS=-D` as its environment. The
+result is `warnings: command not found`, exit 127, and *no output at all*. A
+step that pipes into `grep -E "^(error|warning)"` then finds nothing and reports
+clean. The quotes are load-bearing.
+
+The general rule, and it is the same one `prove` makes about tests: **a check
+whose only failure mode is "printed something I grepped for" is not a check.**
+Read the exit status. `set -e`, or `cmd || echo FAILED`, or look at `$?` — but
+do not conclude a build passed because a pipeline was quiet.
 
 ## Why each one is not optional
 

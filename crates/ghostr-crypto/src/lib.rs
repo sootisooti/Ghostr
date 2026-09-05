@@ -22,7 +22,7 @@
 //! `forbid(unsafe_code)`, because locking key material out of swap needs it. It
 //! is still denied workspace-wide, so each site must opt in explicitly and carry
 //! a safety comment. There is exactly one such pair, in
-//! [`secret::MemoryLock`].
+//! [`secret::SecretPage`].
 //!
 //! # Status
 //!
