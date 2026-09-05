@@ -38,7 +38,8 @@ impl core::fmt::Debug for SecretString {
 /// Fixed-size secret bytes: a KEK, a DEK, a derived private key.
 ///
 /// Zeroized on drop. Callers that hold one for more than an instant should also
-/// have locked it out of swap — see [`MemoryLock`].
+/// have locked it out of swap — see [`SecretPage`], which owns its memory so
+/// that locking is not a step a caller can forget.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretBytes<const N: usize>([u8; N]);
 
