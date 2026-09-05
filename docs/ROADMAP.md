@@ -55,8 +55,18 @@ harassment — can use this and stop here.
 - [x] NIP-06/19 test vectors from the NIPs repo pass verbatim.
 - [x] An empty day still seals and the chain stays gapless.
 - [ ] A day sealed today is OTS-**confirmed** within 24h on mainnet.
-      *Submission works and produces a valid `.ots`; upgrading a pending proof
-      to a Bitcoin attestation is the one M0 criterion carried into M1.*
+      *The code path exists now and is tested end to end — `ghostr anchor` asks
+      every pending calendar whether its aggregate reached a block, merges what
+      comes back, and records the block height
+      (`a_calendar_reaching_a_block_confirms_the_day`). Until this, nothing ever
+      went back to ask: `submit` stored a calendar attestation,
+      `AnchorState::Confirmed` was built nowhere but a unit test, and every
+      anchored day read "pending" for ever.*
+      **Still unchecked, and only a human can check it:** the criterion says
+      *on mainnet*, within 24h. That needs a real calendar, a real block, and a
+      day of waiting — none of which a test suite can do (CLAUDE.md §4.8). Run
+      `ghostr memoria` then `ghostr anchor`, wait, run `ghostr anchor` again,
+      and tick this when `ghostr status` shows the day confirmed.*
 - [ ] Missed cutoff (machine asleep) seals on wake.
       *Half-done in M1: `cutoff::pending_windows` computes every window a
       sleeping machine missed, in order and gapless. What is still absent is the

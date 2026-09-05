@@ -690,6 +690,7 @@ dependencies = [
  "ghostr-store",
  "ghostr-testkit",
  "hex",
+ "opentimestamps",
  "rusqlite",
  "secp256k1",
  "serde",
