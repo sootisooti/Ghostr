@@ -1706,3 +1706,44 @@ than sidestepping it.
 > relays to fix an inconsistency that nothing currently observes, and the
 > narrower fix — adopt what the history proves, forget what it does not — is
 > the one that cannot be wrong.
+
+---
+
+**Q25 — Should ingest care that a note is ghost-authored?**
+
+§9.3 makes disclosure mandatory on the way *out*: any kind-1 event signed by a
+ghost key carries `["ghostr","v1","ghost-authored"]` and a `p` tag naming its
+principal, and `GhostNoteBuilder` is the only constructor, so an undisclosed
+ghost note is not something a caller can build wrong — it is something they
+cannot express.
+
+Nothing says what happens on the way *in*. `NostrFeedAdapter` ingests kind-1
+notes from a relay and makes `TrustLevel::ThirdParty` / `MemoryKind::Observation`
+corpus out of them. If one of those notes is ghost-authored, the corpus records
+a machine's output as a person's words. `has_disclosure` exists to tell the two
+apart and is called by nothing.
+
+Three things could be meant, and the spec picks none of them:
+
+1. **Ignore it.** A ghost note is third-party text like any other, and `T7`
+   already assumes third-party text is hostile. Simplest, and defensible: the
+   trust level does not claim the author is human.
+2. **Mark it.** Ingest it, but record that it was disclosed as ghost-authored,
+   so a persona claim can say *who* — or what — it came from. Needs a field
+   `Provenance` does not have.
+3. **Drop it.** Refuse to build corpus from a machine imitating a person. Safest
+   and the most likely to lose something the user wanted.
+
+There is also the case the disclosure tags are *absent* from a note that is in
+fact ghost-authored, which is the one `has_disclosure` cannot help with: an
+impersonator simply omits the tags. Detection is not available, only honesty
+is, and that asymmetry is worth stating rather than implying.
+
+> **Recommendation:** (2), and not yet. Marking is the only option that keeps
+> the information instead of discarding it, and it is the one that lets the
+> question be revisited without re-ingesting a corpus. But it needs a
+> `Provenance` field, which is a stored-row change, and there is no ghost
+> publishing anywhere in the wild yet to ingest — Ghostr itself cannot publish a
+> ghost note today. Decide this alongside the M3 public-surface work that
+> creates the thing being detected; until then (1) is what happens, and it is
+> safe rather than merely convenient.

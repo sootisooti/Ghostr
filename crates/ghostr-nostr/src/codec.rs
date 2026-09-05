@@ -301,6 +301,20 @@ impl GhostNoteBuilder {
 ///
 /// For inbound events, where a third party may have published something claiming
 /// to be a ghost without disclosing it. Outbound events cannot lack the tags.
+///
+/// # Nothing calls this yet, on purpose
+///
+/// The feed adapter ingests kind-1 notes without asking, so a ghost-authored
+/// note becomes corpus as if a person had written it. Whether that matters —
+/// ignore, mark, or drop — is **SPEC §14 Q25**, open, with a recommendation to
+/// mark; marking needs a `Provenance` field that does not exist yet.
+///
+/// Keeping the function rather than deleting it is deliberate and narrow: it is
+/// the inbound half of §9.3, whose outbound half is built, and the M3 exit
+/// criterion covering it is now listed unchecked rather than silently absent.
+/// It also cannot help against the case that matters most — an impersonator
+/// simply omits the tags — which is why the answer is a spec decision and not a
+/// call site.
 #[must_use]
 pub fn has_disclosure(event: &UnsignedEvent) -> bool {
     let marked = event.tags.iter().any(|t| t.as_slice() == DISCLOSURE_TAG);
