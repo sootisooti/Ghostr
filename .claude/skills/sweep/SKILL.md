@@ -37,6 +37,19 @@ For each line the report prints, answer **"what calls this?"** out loud:
   happening instead?* That gap is the defect, and it is usually bigger than the
   missing call.
 
+## It only looks at functions
+
+`unused-pub` reads `pub fn`. **An enum variant or a struct field that nothing
+constructs is invisible to it**, and that is not a hypothetical: `LeafKind::Quest`
+and `Tag::QuestLeaf` are referenced by nothing but `ghostr-core`'s own property
+tests, so the day's quest set is not in the Merkle tree — while CLAUDE.md and
+the README both said it was. Found by reading a ROADMAP criterion that
+contradicted them, not by the tool.
+
+So when a claim rests on a *type* rather than a call — a leaf kind, a hash tag,
+a field that ought to be populated — grep for the variant and check who
+constructs it. The question is the same one: what puts this here?
+
 ## It under-reports
 
 References match by bare name, so a namesake elsewhere hides a dead function.
