@@ -135,10 +135,24 @@ bare name, so a namesake elsewhere hides a dead function. `MemoryLock::is_locked
 is absent from the report for exactly that reason. An empty report means nothing
 was found, not that there is nothing to find.
 
-Still open, from the same sweep: `is_confirmed`,
-`Account::derivation_path` (which builds a BIP-32 path independently of
-`ghostr-crypto`'s, with nothing checking they agree), and `MemoryLock`, so
-`mlock` is documented rather than real.
+Still open, from the same sweep: `is_confirmed`, `Account::derivation_path`, and
+`MemoryLock`, so `mlock` is documented rather than real.
+
+`derivation_path` was described here as building a path independently of
+`ghostr-crypto`'s, with nothing checking they agree. That was overstated, and
+the correction is more interesting than the claim: both go through
+`Account::index()`, so the account numbers cannot drift. What is duplicated is
+only the *rendering* — `"m/44'/1237'/{i}'/0/0"` writes `44` and `1237` as
+literals beside the `NOSTR_COIN_TYPE` constant that derives the actual key. They
+agree today. Nothing would notice if they stopped, but a stale string is a label,
+not a wrong key.
+
+It has no caller for a different reason: the only field it would fill is
+`DerivationInfo.path`, which belongs to `Identity` — a SPEC §3.1 type nothing in
+the workspace constructs. The engine keeps the npub and the keystore's pubkey
+directly and never assembles the composite. Same shape as the M3 finding above,
+one layer down: a type described in the spec, declared in `core`, and never
+built.
 
 `has_disclosure` was the next one triaged, and the answer to *what calls this?*
 turned out to be the largest finding yet — not a missing call but a missing
