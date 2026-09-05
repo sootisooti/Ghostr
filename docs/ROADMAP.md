@@ -209,6 +209,11 @@ hashing and Merkle proofs, which found and fixed a loose depth bound in
 
 > **Ships:** your ghost on nostr — encrypted backup and sync across your devices,
 > your feed as a source, and an optional public attestation.
+>
+> **Status: the first two ship. The third does not** — see the unchecked exit
+> criteria below. Backup, sync, restore and the feed are in and tested; every
+> public-surface deliverable (ghost manifest, attestation publishing, ghost
+> notes) is a type in `ghostr-nostr` with no caller.
 
 **Progress:** the crypto and the codec are done. `ghostr-crypto` carries NIP-44
 v2 (checked against all 128 reference vectors), NIP-19 `nprofile`/`naddr`, the
@@ -332,8 +337,37 @@ somebody else's notes is counted and reported, not silently ingested.
       rebuilds a chain from a relay that holds no 3178x event at all. Until
       this, `mirror_as_nip78` was called by nothing outside its own unit tests
       — the fallback this criterion leans on was documented and absent.
+- [ ] A `GhostManifest` can be created, signed and revoked from the CLI.
+      `GhostManifest` exists as a type in `ghostr-nostr` and is exercised by its
+      codec tests. Nothing in `ghostr-engine` or `ghostr-cli` names it, and
+      there is no `ghost` subcommand, so account `1'` is derivable and has never
+      been used.
+- [ ] A `FidelityAttestation` can be published, and a reader can check its
+      signature and its chain link. Same shape: the type and its codec are in
+      `ghostr-nostr` with tests; no engine op and no `publish attestation`
+      command exist. §9.4's "here is my ghost's score, and here is the
+      Bitcoin-anchored commitment it was computed from" is a claim nothing can
+      currently make.
+- [ ] A ghost-authored kind-1 note can be published under an explicit per-scope
+      opt-in, off by default. `GhostNoteBuilder` makes disclosure unforgeable at
+      construction — that part is done and its own criterion above is true — but
+      it has no caller outside its unit tests, there is no publishing scope, and
+      no CLI reaches it.
+- [ ] `has_disclosure` is called by something. It is the inbound half: a third
+      party can publish a kind-1 note *claiming* to be a ghost without the tags,
+      and the feed adapter ingests kind-1 notes today without asking. Whether
+      ingest should care is SPEC §14 Q25, open.
 
-**Not in M3:** GUI, third-party verifier tooling.
+**These four were in M3's scope list from the start and were never built.** The
+exit criteria above did not cover them, so "every exit criterion is met" was
+true and read as "M3 is done" — which is how a third of a milestone goes missing
+without any check failing. They are listed here, unchecked, rather than moved to
+M4: the milestone that claims to ship "an optional public attestation" has not
+shipped one.
+
+**Not in M3:** GUI, third-party verifier tooling. RSS ingest was in the scope
+list and is not built either; it is the least load-bearing of these, since the
+nostr adapter already proves the `ThirdParty` path.
 
 ---
 

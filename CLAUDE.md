@@ -16,8 +16,15 @@ loop on a page a phone can open. The three model-written quest kinds
 Merkle tree. M3 has its crypto, its event codec, its relay transport, `ghostr
 sync`/`restore`, auto-seal, and the nostr feed adapter — so hostile text now
 enters the corpus and the `TrustLevel::ThirdParty` gate is load-bearing rather
-than declared. Every M3 exit criterion is met except the NIP submission, which
-is a human's to make ([docs/ROADMAP.md](docs/ROADMAP.md)).
+than declared.
+
+**M3's public surface is not built.** Backup, sync, restore and the feed are in
+and tested; the ghost manifest, attestation publishing and ghost notes are types
+in `ghostr-nostr` with no caller. That was invisible because the exit criteria
+never covered them — "every exit criterion is met" was true and read as "M3 is
+done". They are now listed unchecked in
+[docs/ROADMAP.md](docs/ROADMAP.md), along with the NIP submission, which is a
+human's to make.
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented,
 `cargo xtask lint-deps` to check the dependency rules in §2, and `cargo xtask

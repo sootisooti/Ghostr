@@ -67,8 +67,8 @@ chained, anchored. Corrections are amendments, never rewrites.
 
 ## Status
 
-**Pre-alpha. M0, M1 and M2 are implemented, M3 is complete bar one human step,
-and the current work is an audit rather than a feature.**
+**Pre-alpha. M0, M1 and M2 are implemented, M3's private half is and its public
+half is not, and the current work is an audit rather than a feature.**
 
 M0 works end to end: an encrypted local vault, markdown ingest, deterministic
 daily footage, a Bitcoin-anchored hash chain, and `ghostr verify`.
@@ -89,8 +89,20 @@ M3 is the nostr surface: NIP-44 v2 against all 128 reference vectors, NIP-19,
 NIP-46 remote signing, NIP-59 gift wrap, the relay transport, `sync` and
 `restore`, auto-seal, and a nostr feed as a source — which is the point at which
 hostile text can actually enter the corpus, so `TrustLevel::ThirdParty` stopped
-being a declaration and started being load-bearing. Every M3 exit criterion is
-met except submitting the NIP that claims kinds 31780–31789, which is a human's
+being a declaration and started being load-bearing.
+
+**Half of M3 is not built.** The private half — backup, sync, restore, the feed —
+is in and tested. The public half is not: the ghost manifest, `FidelityAttestation`
+publishing and ghost-authored notes are types in `ghostr-nostr` with no caller,
+no engine op and no CLI command. The milestone's summary line promises "an
+optional public attestation", and nothing in the tree can currently make one.
+
+That went unnoticed for a reason worth writing down. Every M3 exit criterion
+*was* met — but the criteria never mentioned the public surface, so a list that
+passed completely covered two thirds of the scope it was gating. "All checks
+green" and "the milestone is done" turn out to be different claims, and only one
+of them was being made. The missing criteria are now listed, unchecked, in
+[docs/ROADMAP.md](docs/ROADMAP.md), beside the NIP submission that is a human's
 to send.
 
 ### What is being worked on now
@@ -123,10 +135,30 @@ bare name, so a namesake elsewhere hides a dead function. `MemoryLock::is_locked
 is absent from the report for exactly that reason. An empty report means nothing
 was found, not that there is nothing to find.
 
-Still open, from the same sweep: `has_disclosure`, `is_confirmed`,
-`Account::derivation_path` (which builds a BIP-32 path independently of
-`ghostr-crypto`'s, with nothing checking they agree), and `MemoryLock`, so
-`mlock` is documented rather than real.
+Still open, from the same sweep: `is_confirmed`, `Account::derivation_path`, and
+`MemoryLock`, so `mlock` is documented rather than real.
+
+`derivation_path` was described here as building a path independently of
+`ghostr-crypto`'s, with nothing checking they agree. That was overstated, and
+the correction is more interesting than the claim: both go through
+`Account::index()`, so the account numbers cannot drift. What is duplicated is
+only the *rendering* — `"m/44'/1237'/{i}'/0/0"` writes `44` and `1237` as
+literals beside the `NOSTR_COIN_TYPE` constant that derives the actual key. They
+agree today. Nothing would notice if they stopped, but a stale string is a label,
+not a wrong key.
+
+It has no caller for a different reason: the only field it would fill is
+`DerivationInfo.path`, which belongs to `Identity` — a SPEC §3.1 type nothing in
+the workspace constructs. The engine keeps the npub and the keystore's pubkey
+directly and never assembles the composite. Same shape as the M3 finding above,
+one layer down: a type described in the spec, declared in `core`, and never
+built.
+
+`has_disclosure` was the next one triaged, and the answer to *what calls this?*
+turned out to be the largest finding yet — not a missing call but a missing
+third of M3, described above. Its own question, whether ingest should care that
+a note is ghost-authored, is now SPEC §14 Q25 rather than a default nobody
+chose.
 
 Alongside it, a second and much dumber technique: **look at the thing**.
 [docs/ui/](docs/ui/) is every screen of the served page at five real device
