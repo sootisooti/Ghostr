@@ -644,6 +644,11 @@ fn finish(ctx: &QuestContext<'_>, draft: Draft, index: usize) -> crate::Result<Q
     ctx.rng.fill(&mut random);
     let mut nonce = [0u8; 32];
     ctx.rng.fill(&mut nonce);
+    // Drawn separately rather than derived from `nonce`: the two commitments
+    // must stay independent, because revealing the leaf salt is routine and
+    // revealing the answer nonce is not (SPEC §14 Q26).
+    let mut leaf_salt = [0u8; 32];
+    ctx.rng.fill(&mut leaf_salt);
 
     let holdout = draws_below(ctx.rng, ctx.holdout.fraction);
     // A decoy is never held out: it is a deliberately wrong claim, so scoring
@@ -670,6 +675,7 @@ fn finish(ctx: &QuestContext<'_>, draft: Draft, index: usize) -> crate::Result<Q
         // Replaced immediately below, before this value can escape.
         answer_commitment: ghostr_core::hash::Hash32::zero(),
         nonce,
+        leaf_salt,
         holdout,
         decoy,
         expires_at: Timestamp::new(
@@ -852,6 +858,17 @@ mod tests {
                 "a quest escaped without a commitment"
             );
             assert_ne!(quest.nonce, [0u8; 32], "and without a blinding nonce");
+            assert_ne!(quest.leaf_salt, [0u8; 32], "or a leaf salt");
+            // The one that matters, and it is asserted here rather than on a
+            // hand-built fixture because the fixture would only prove the
+            // fixture. `answer_commitment` ranges over about 5 × 10^4 values,
+            // so a verifier handed a leaf salt equal to the nonce could
+            // brute-force what the ghost committed to (SPEC §14 Q26).
+            assert_ne!(
+                quest.leaf_salt, quest.nonce,
+                "the leaf salt is revealed to verifiers; the answer nonce must \
+                 not come with it"
+            );
         }
     }
 

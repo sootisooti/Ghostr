@@ -594,6 +594,7 @@ pub(crate) mod fixtures {
             confidence: 0.7,
             answer_commitment: Hash32::zero(),
             nonce: [n; 32],
+            leaf_salt: [n ^ 0xFF; 32],
             holdout: true,
             decoy: false,
             expires_at: Timestamp::new(86_400_000, 0),

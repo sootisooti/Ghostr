@@ -45,8 +45,30 @@ pub struct Quest {
     /// client to peek at the user's response and adjust the ghost's before
     /// scoring (SPEC §4.3).
     pub answer_commitment: Hash32,
-    /// Blinding factor for [`Quest::answer_commitment`].
+    /// Blinding factor for [`Quest::answer_commitment`], and nothing else.
+    ///
+    /// Deliberately **not** reused as the Merkle leaf's salt. The committed
+    /// value ranges over about five verdict variants times a fixed-point
+    /// confidence — roughly 5 × 10⁴ possibilities — so anyone holding this
+    /// nonce can brute-force `answer_commitment` immediately. Revealing a leaf
+    /// salt is the normal case (§7.3 has a verifier recompute the score from
+    /// Merkle paths); revealing this one would quietly turn I6 into decoration.
+    /// See SPEC §14 Q26.
     pub nonce: [u8; 32],
+    /// Blinding factor for this quest's Merkle leaf, and nothing else.
+    ///
+    /// Independent of [`Quest::nonce`] so that proving a quest existed on a
+    /// given day — which means handing this over — says nothing about what the
+    /// ghost committed to answering (SPEC §7.2, §14 Q26).
+    ///
+    /// `default` because a quest stored before this field existed has no such
+    /// key, and rows are plain CBOR: without it, adding the field would make
+    /// every already-open quest undecodable. Zero is safe for exactly those
+    /// rows and no others — a quest sealed before this change was never in a
+    /// tree, and I2 forbids re-sealing the day it belonged to, so its salt can
+    /// never be used to blind anything.
+    #[serde(default)]
+    pub leaf_salt: [u8; 32],
     /// Whether this quest is scored but never trained on (SPEC I7).
     pub holdout: bool,
     /// Whether this claim is deliberately wrong.
@@ -429,5 +451,82 @@ mod tests {
             reason: "the question named my therapist".to_owned(),
         };
         assert_eq!(format!("{verdict:?}"), "Void");
+    }
+
+    /// A quest stored before `leaf_salt` existed must still decode.
+    ///
+    /// Rows are plain CBOR maps, so adding a field without a default makes
+    /// every previously written quest undecodable — the whole open set, gone,
+    /// with a green build and no failing test to say so. This is the assertion
+    /// that would have caught it, and it is written against bytes that omit the
+    /// key rather than against a struct that happens to have it.
+    #[test]
+    fn a_quest_written_before_the_leaf_salt_existed_still_decodes() {
+        let quest = sample_quest();
+        let full = ciborium::Value::serialized(&quest).expect("serialize");
+
+        // Drop the key, the way a row written by an older build would not have
+        // had it in the first place.
+        let ciborium::Value::Map(entries) = full else {
+            panic!("a quest encodes as a map");
+        };
+        let older: Vec<_> = entries
+            .into_iter()
+            .filter(|(k, _)| k.as_text() != Some("leaf_salt"))
+            .collect();
+
+        let decoded: Quest = ciborium::Value::Map(older)
+            .deserialized()
+            .expect("a quest without leaf_salt must still decode");
+
+        assert_eq!(decoded.id, quest.id);
+        assert_eq!(decoded.nonce, quest.nonce, "the answer nonce survives");
+        assert_eq!(
+            decoded.leaf_salt, [0u8; 32],
+            "an absent salt reads as zero, which is safe only because a quest \
+             from before this change was never in a tree and I2 forbids \
+             re-sealing the day it belonged to"
+        );
+    }
+
+    /// The two blinding factors are drawn independently.
+    ///
+    /// If they were ever equal, handing a verifier the leaf salt would hand
+    /// them the answer nonce, and `answer_commitment` ranges over few enough
+    /// values to brute-force (SPEC §14 Q26). Asserted on the type rather than
+    /// on the generator so that any future constructor has to keep it true.
+    #[test]
+    fn the_leaf_salt_is_not_the_answer_nonce() {
+        let quest = sample_quest();
+        assert_ne!(
+            quest.leaf_salt, quest.nonce,
+            "reusing the answer nonce to blind the leaf destroys I6"
+        );
+    }
+
+    /// A quest with both blinding factors set, for the two tests above.
+    fn sample_quest() -> Quest {
+        Quest {
+            id: crate::ids::QuestId::new(1, [2u8; 10]),
+            issued_for: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).expect("date"),
+            issued_at: Timestamp::new(1_700_000_000_000, 0),
+            persona_version: PersonaVersion::genesis(),
+            kind: QuestKind::FactRecall {
+                claim: "you keep coming back to the lease".to_owned(),
+                as_of: chrono::NaiveDate::from_ymd_opt(2026, 8, 24).expect("date"),
+            },
+            facet: Facet::Routine,
+            difficulty: 0.4,
+            evidence: Vec::new(),
+            confidence: 0.7,
+            answer_commitment: Hash32::zero(),
+            nonce: [7u8; 32],
+            leaf_salt: [9u8; 32],
+            holdout: true,
+            decoy: false,
+            expires_at: Timestamp::new(1_700_086_400_000, 0),
+            status: QuestStatus::Open,
+            verdict: None,
+        }
     }
 }
