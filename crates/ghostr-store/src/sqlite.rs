@@ -4259,6 +4259,7 @@ mod quest_tests {
             confidence: 0.7,
             answer_commitment: tagged_hash(Tag::QuestAnswer, &[n]),
             nonce: [n; 32],
+            leaf_salt: [n ^ 0xFF; 32],
             holdout,
             decoy,
             expires_at: Timestamp::new(1_700_000_100_000, 0),
