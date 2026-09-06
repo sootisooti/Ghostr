@@ -144,8 +144,25 @@ fn anchor_label(anchor: Option<&AnchorRecord>) -> &'static str {
     }
 }
 
+/// What a day committed to beyond its memories.
+///
+/// Silent when there is nothing, so a day from before quests reached the tree
+/// does not grow a line of zeroes it has no business explaining.
+fn committed_line((quests, verdicts): (usize, usize)) -> String {
+    if quests == 0 && verdicts == 0 {
+        return String::new();
+    }
+    format!("also committed {quests} quest(s), {verdicts} verdict(s)\n")
+}
+
 /// Renders one footage in full.
-pub(crate) fn footage_show(footage: &Footage) -> String {
+///
+/// `committed` is how many quests and verdicts went into this day's Merkle
+/// root. It is shown rather than left implicit because a commitment nobody can
+/// see is one nobody has reason to trust — and because `empty` means "no
+/// memories fell in this window", which stopped meaning "this day committed to
+/// nothing" once quests reached the tree (SPEC §7.3).
+pub(crate) fn footage_show(footage: &Footage, committed: (usize, usize)) -> String {
     let mut out = format!(
         "seq {}  {}  {}\n",
         footage.seq,
@@ -158,6 +175,8 @@ pub(crate) fn footage_show(footage: &Footage) -> String {
         footage.commitment.prev_link.short(),
         footage.commitment.merkle_root.short(),
     ));
+
+    out.push_str(&committed_line(committed));
 
     if footage.empty {
         out.push_str("\n(no memories fell in this window; the day still sealed)\n");
@@ -481,9 +500,13 @@ pub(crate) fn source_sync(report: &SyncReport) -> String {
 }
 
 /// Renders a recap.
-pub(crate) fn recap(recap: &Recap) -> String {
+///
+/// `committed` is what the day's Merkle root covers beyond its memories, and is
+/// `(0, 0)` for an unsealed day — a preview commits to nothing at all, which is
+/// what the first line says.
+pub(crate) fn recap(recap: &Recap, committed: (usize, usize)) -> String {
     if recap.sealed {
-        return footage_show(&recap.footage);
+        return footage_show(&recap.footage, committed);
     }
     // Said first, and plainly, and the commitment lines are dropped: a preview
     // has none, and printing a row of zeroes where a link belongs invites
@@ -492,7 +515,7 @@ pub(crate) fn recap(recap: &Recap) -> String {
         "{} is not sealed yet — this is a preview, and nothing here is committed\n\n",
         recap.date
     );
-    let full = footage_show(&recap.footage);
+    let full = footage_show(&recap.footage, (0, 0));
     for line in full.lines() {
         if line.starts_with("link ") || line.starts_with("prev ") || line.starts_with("root ") {
             continue;
@@ -1160,6 +1183,23 @@ fn local_addresses(port: u16) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A day sealed before quests reached the tree must not grow a line of
+    /// zeroes it has no business explaining — and a day that did commit to
+    /// something must say so, because `empty` means "no memories fell in this
+    /// window" and stopped meaning "committed to nothing" (SPEC §7.3).
+    #[test]
+    fn a_day_says_what_it_committed_to_only_when_it_committed_to_something() {
+        assert_eq!(committed_line((0, 0)), "");
+        assert_eq!(
+            committed_line((3, 0)),
+            "also committed 3 quest(s), 0 verdict(s)\n"
+        );
+        assert_eq!(
+            committed_line((0, 2)),
+            "also committed 0 quest(s), 2 verdict(s)\n"
+        );
+    }
 
     /// The reporting line is the deliverable, not the lock.
     ///

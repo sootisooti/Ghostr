@@ -69,6 +69,28 @@ pub struct Quest {
     /// never be used to blind anything.
     #[serde(default)]
     pub leaf_salt: [u8; 32],
+    /// Blinding factor for this quest's *verdict* leaf, and nothing else.
+    ///
+    /// A third salt rather than a reuse of [`Quest::leaf_salt`], for the reason
+    /// that made `leaf_salt` a separate field in the first place. A verdict
+    /// leaf commits to `{quest_id, verdict, severity, answered_at}` — five
+    /// verdict variants times three severities times the milliseconds in a day,
+    /// so on the order of 10¹⁰ possibilities. Anyone handed the quest leaf's
+    /// salt to check "a quest existed on day N" could otherwise brute-force
+    /// *how it was answered* out of the verdict leaf beside it, which is a
+    /// larger disclosure than the one they were granted.
+    ///
+    /// Drawn at issue rather than at answer time so that the quest row is
+    /// written once with every secret it will ever need, and so a verdict
+    /// recorded by a crashed-and-resumed run cannot draw a second one.
+    ///
+    /// `default` for the same reason as [`Quest::leaf_salt`]: rows are plain
+    /// CBOR and a quest stored before this field existed has no such key. Zero
+    /// is safe for exactly those rows — a quest answered before this change was
+    /// never in a tree, and I2 forbids re-sealing the day that would have held
+    /// it.
+    #[serde(default)]
+    pub verdict_salt: [u8; 32],
     /// Whether this quest is scored but never trained on (SPEC I7).
     pub holdout: bool,
     /// Whether this claim is deliberately wrong.
@@ -264,6 +286,29 @@ pub enum Facet {
     Lore,
 }
 
+impl Facet {
+    /// The stable name of a facet.
+    ///
+    /// Hand-written rather than a `Debug` rendering, because this goes into a
+    /// Merkle leaf preimage (SPEC §7.2). A `Debug` impl is a formatting
+    /// decision, and formatting decisions get changed — one of these moving
+    /// would silently fork every chain sealed after it, which is unrecoverable
+    /// because the old roots are in Bitcoin.
+    ///
+    /// Matched exhaustively with no catch-all on purpose, so adding a variant
+    /// stops the build here rather than hashing under a shared fallback name.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Voice => "voice",
+            Self::Opinion => "opinion",
+            Self::Relationship => "relationship",
+            Self::Routine => "routine",
+            Self::Lore => "lore",
+        }
+    }
+}
+
 /// Where a quest stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -340,6 +385,72 @@ pub enum Severity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These strings are in Merkle leaf preimages (SPEC §7.2), so they are
+    /// frozen: a rename is a chain fork, and a chain fork is unrecoverable
+    /// because the old roots are already in Bitcoin. This test exists so that a
+    /// rename fails here, next to the reason, rather than in whichever
+    /// integration suite happens to notice a root moved.
+    #[test]
+    fn preimage_names_are_frozen() {
+        assert_eq!(Facet::Voice.as_str(), "voice");
+        assert_eq!(Facet::Opinion.as_str(), "opinion");
+        assert_eq!(Facet::Relationship.as_str(), "relationship");
+        assert_eq!(Facet::Routine.as_str(), "routine");
+        assert_eq!(Facet::Lore.as_str(), "lore");
+
+        let date = NaiveDate::from_ymd_opt(2026, 3, 1).expect("date");
+        assert_eq!(
+            QuestKind::VoiceProbe {
+                prompt: String::new(),
+                ghost_answer: String::new()
+            }
+            .variant_name(),
+            "VoiceProbe"
+        );
+        assert_eq!(
+            QuestKind::FactRecall {
+                claim: String::new(),
+                as_of: date
+            }
+            .variant_name(),
+            "FactRecall"
+        );
+        assert_eq!(
+            QuestKind::Prediction {
+                claim: String::new(),
+                horizon: date
+            }
+            .variant_name(),
+            "Prediction"
+        );
+        assert_eq!(
+            QuestKind::Preference {
+                a: String::new(),
+                b: String::new(),
+                ghost_choice: Choice::A
+            }
+            .variant_name(),
+            "Preference"
+        );
+        assert_eq!(
+            QuestKind::Cloze {
+                context: String::new(),
+                redacted: Span { start: 0, end: 0 },
+                ghost_completion: String::new()
+            }
+            .variant_name(),
+            "Cloze"
+        );
+        assert_eq!(
+            QuestKind::Counterfactual {
+                scenario: String::new(),
+                ghost_answer: String::new()
+            }
+            .variant_name(),
+            "Counterfactual"
+        );
+    }
 
     /// I6 and I8. A `Debug` that printed the committed answer would defeat the
     /// pre-commitment it exists to protect.
@@ -504,6 +615,22 @@ mod tests {
         );
     }
 
+    /// And the verdict salt is a third value again. A quest leaf's salt gets
+    /// handed to whoever is checking that a quest existed on a given day; if
+    /// the verdict leaf beside it shared that salt, its preimage —
+    /// `{quest_id, verdict, severity, answered_at}`, on the order of 10¹⁰
+    /// possibilities — falls to a brute force, and "prove a quest existed"
+    /// quietly becomes "learn how it was answered" (SPEC §14 Q26).
+    #[test]
+    fn the_verdict_salt_is_a_third_independent_value() {
+        let quest = sample_quest();
+        assert_ne!(
+            quest.verdict_salt, quest.leaf_salt,
+            "revealing the quest leaf's salt would expose the verdict"
+        );
+        assert_ne!(quest.verdict_salt, quest.nonce);
+    }
+
     /// A quest with both blinding factors set, for the two tests above.
     fn sample_quest() -> Quest {
         Quest {
@@ -522,6 +649,7 @@ mod tests {
             answer_commitment: Hash32::zero(),
             nonce: [7u8; 32],
             leaf_salt: [9u8; 32],
+            verdict_salt: [11u8; 32],
             holdout: true,
             decoy: false,
             expires_at: Timestamp::new(1_700_086_400_000, 0),

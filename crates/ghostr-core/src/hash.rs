@@ -166,6 +166,8 @@ pub enum Tag {
     MemoryLeaf,
     /// A [`Quest`](crate::quest::Quest) leaf. Nonced.
     QuestLeaf,
+    /// A verdict's leaf in the day it was given.
+    VerdictLeaf,
     /// The footage metadata leaf.
     MetaLeaf,
     /// A Merkle internal node.
@@ -198,6 +200,7 @@ impl Tag {
         match self {
             Self::MemoryLeaf => "ghostr/v1/memory-leaf",
             Self::QuestLeaf => "ghostr/v1/quest-leaf",
+            Self::VerdictLeaf => "ghostr/v1/verdict-leaf",
             Self::MetaLeaf => "ghostr/v1/meta-leaf",
             Self::Node => "ghostr/v1/node",
             Self::FootageRoot => "ghostr/v1/footage-root",
@@ -327,6 +330,7 @@ mod frozen_tags {
     fn tag_strings_are_frozen() {
         assert_eq!(Tag::MemoryLeaf.as_str(), "ghostr/v1/memory-leaf");
         assert_eq!(Tag::QuestLeaf.as_str(), "ghostr/v1/quest-leaf");
+        assert_eq!(Tag::VerdictLeaf.as_str(), "ghostr/v1/verdict-leaf");
         assert_eq!(Tag::MetaLeaf.as_str(), "ghostr/v1/meta-leaf");
         assert_eq!(Tag::Node.as_str(), "ghostr/v1/node");
         assert_eq!(Tag::FootageRoot.as_str(), "ghostr/v1/footage-root");

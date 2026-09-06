@@ -644,11 +644,15 @@ fn finish(ctx: &QuestContext<'_>, draft: Draft, index: usize) -> crate::Result<Q
     ctx.rng.fill(&mut random);
     let mut nonce = [0u8; 32];
     ctx.rng.fill(&mut nonce);
-    // Drawn separately rather than derived from `nonce`: the two commitments
-    // must stay independent, because revealing the leaf salt is routine and
-    // revealing the answer nonce is not (SPEC §14 Q26).
+    // Three independent draws, not one derived from another. Revealing a leaf
+    // salt is routine — §7.3 has a verifier recompute a score from Merkle paths
+    // — while revealing the answer nonce would collapse I6, and revealing the
+    // verdict salt would turn "prove a quest existed" into "learn how it was
+    // answered" (SPEC §14 Q26).
     let mut leaf_salt = [0u8; 32];
     ctx.rng.fill(&mut leaf_salt);
+    let mut verdict_salt = [0u8; 32];
+    ctx.rng.fill(&mut verdict_salt);
 
     let holdout = draws_below(ctx.rng, ctx.holdout.fraction);
     // A decoy is never held out: it is a deliberately wrong claim, so scoring
@@ -676,6 +680,7 @@ fn finish(ctx: &QuestContext<'_>, draft: Draft, index: usize) -> crate::Result<Q
         answer_commitment: ghostr_core::hash::Hash32::zero(),
         nonce,
         leaf_salt,
+        verdict_salt,
         holdout,
         decoy,
         expires_at: Timestamp::new(

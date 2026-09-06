@@ -783,7 +783,17 @@ fn cmd_footage_show(dir: &std::path::Path, seq: u64) -> Result<()> {
         .store()
         .get_footage(engine.dek()?, seq)?
         .ok_or_else(|| anyhow::anyhow!("no footage with sequence {seq}"))?;
-    println!("{}", render::footage_show(&footage));
+    let dek = engine.dek()?;
+    println!(
+        "{}",
+        render::footage_show(
+            &footage,
+            (
+                engine.store().quests_committed_at(dek, seq)?.len(),
+                engine.store().verdicts_committed_at(dek, seq)?.len(),
+            )
+        )
+    );
     Ok(())
 }
 
@@ -954,7 +964,17 @@ fn cmd_recap(dir: &std::path::Path, date: &str) -> Result<()> {
     let engine = open(dir)?;
     let day = engine.resolve_date(date)?;
     let recap = ops::recap(&engine, day).context("reading the recap")?;
-    println!("{}", render::recap(&recap));
+    let committed = if recap.sealed {
+        let dek = engine.dek()?;
+        let seq = recap.footage.seq;
+        (
+            engine.store().quests_committed_at(dek, seq)?.len(),
+            engine.store().verdicts_committed_at(dek, seq)?.len(),
+        )
+    } else {
+        (0, 0)
+    };
+    println!("{}", render::recap(&recap, committed));
     Ok(())
 }
 

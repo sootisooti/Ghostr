@@ -8,7 +8,8 @@
 //!
 //! ```text
 //! leaf      = H_tag(<kind>, salt || canonical_cbor(value))
-//! root_n    = merkle_root(sorted([meta_leaf, memory_leaf*]))
+//! root_n    = merkle_root(sorted([meta_leaf, memory_leaf*, quest_leaf*,
+//!                                  verdict_leaf*]))
 //! link_0    = H_tag(Genesis, identity_pubkey || genesis_millis || chain_id)
 //! link_n    = H_tag(Link, link_{n-1} || root_n || u64_be(seq) || date || tz)
 //! ```
@@ -60,6 +61,35 @@ pub fn genesis(identity: &PublicKey, chain_id: ChainId, at: Timestamp) -> Hash32
 #[must_use]
 pub fn memory_leaf(salt: &[u8; 32], canonical_bytes: &[u8]) -> Hash32 {
     leaf(LeafKind::Memory, salt, canonical_bytes)
+}
+
+/// A quest's leaf, blinded with [`Quest::leaf_salt`].
+///
+/// Not the quest's answer nonce, and not the verdict salt. Domain separation
+/// alone would not save a reuse here: revealing a salt is the *normal* case for
+/// a leaf — §7.3 has a verifier recompute a score from Merkle paths — and the
+/// preimages on the other side of a reuse are small enough to brute-force. The
+/// answer commitment ranges over about 5 × 10⁴ values and a verdict over about
+/// 10¹⁰, so one shared salt would turn "prove a quest existed on this day" into
+/// "learn what the ghost committed to, and how the user answered" (SPEC §14
+/// Q26).
+///
+/// [`Quest::leaf_salt`]: ghostr_core::quest::Quest::leaf_salt
+#[must_use]
+pub fn quest_leaf(leaf_salt: &[u8; 32], canonical_bytes: &[u8]) -> Hash32 {
+    leaf(LeafKind::Quest, leaf_salt, canonical_bytes)
+}
+
+/// A verdict's leaf, in the day it was given, blinded with
+/// [`Quest::verdict_salt`].
+///
+/// Its own salt for the reason above: a verdict leaf must survive its quest
+/// leaf's salt being handed to a third party.
+///
+/// [`Quest::verdict_salt`]: ghostr_core::quest::Quest::verdict_salt
+#[must_use]
+pub fn verdict_leaf(verdict_salt: &[u8; 32], canonical_bytes: &[u8]) -> Hash32 {
+    leaf(LeafKind::Verdict, verdict_salt, canonical_bytes)
 }
 
 /// The metadata leaf, which every day has even when it is empty.

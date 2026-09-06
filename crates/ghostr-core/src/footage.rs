@@ -223,6 +223,53 @@ pub struct Commitment {
     pub link: Hash32,
     /// How many leaves went into the root, which pins proof shape.
     pub leaf_count: u32,
+    /// Which leaf set this day's root was built over.
+    ///
+    /// The one field that makes changing the commitment scheme survivable. A
+    /// day is verified under the rules it was *sealed* under, not the rules the
+    /// current build prefers — so adding a leaf kind does not invalidate every
+    /// chain that predates it, which would be unrecoverable for users because
+    /// the old roots are already in Bitcoin (CLAUDE.md §4.7).
+    ///
+    /// Deliberately **outside every preimage**: the link commits to
+    /// `prev_link || merkle_root || seq || date || tz` and nothing else, so
+    /// recording a version here moves no existing hash.
+    #[serde(default = "CommitmentVersion::original")]
+    pub version: CommitmentVersion,
+}
+
+/// Which leaves a day's Merkle root was built over.
+///
+/// Ordered oldest first. A new variant is added when the leaf set changes, and
+/// the old variants stay forever — a chain sealed under one of them still has
+/// to verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CommitmentVersion {
+    /// Metadata and memories.
+    ///
+    /// Everything sealed before quests reached the tree. Assumed for any stored
+    /// footage that carries no version at all, which is exactly the days sealed
+    /// by a build that had never heard of this field.
+    MemoriesOnly,
+    /// Metadata, memories, the quests issued that day, and the verdicts given
+    /// that day (SPEC §7.3).
+    WithQuests,
+}
+
+impl CommitmentVersion {
+    /// What a footage with no recorded version was sealed under.
+    #[must_use]
+    pub const fn original() -> Self {
+        Self::MemoriesOnly
+    }
+
+    /// What this build seals new days under.
+    #[must_use]
+    pub const fn current() -> Self {
+        Self::WithQuests
+    }
 }
 
 /// The head of the chain.
