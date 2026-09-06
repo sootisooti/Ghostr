@@ -1758,3 +1758,61 @@ is, and that asymmetry is worth stating rather than implying.
 > ghost note today. Decide this alongside the M3 public-surface work that
 > creates the thing being detected; until then (1) is what happens, and it is
 > safe rather than merely convenient.
+
+---
+
+**Q26 — What blinds a quest leaf, given the answer commitment already uses the
+only nonce a quest has?**
+
+§5.4 rests the whole integrity argument for the fidelity score on committing the
+quest set into the day's tree: *"backdating a good streak requires breaking
+SHA-256 or Bitcoin."* That is not implemented (M2's unchecked criterion), and
+designing it turns up a hazard worth settling before any of it is written.
+
+**Most of the design is forced rather than chosen.**
+
+*Which day a quest belongs to* is decided by I2. A verdict arrives after the day
+it judges has sealed, and a sealed footage is immutable, so a verdict can never
+join the tree of the day it is about. What a day's tree can commit to is what
+happened **inside its own window**: quests *issued* before the cutoff and
+verdicts *given* before the cutoff. `Quest::issued_at` and the verdict's
+timestamp are the window-relative times; `issued_for` is not.
+
+*Whether this breaks existing chains* is answerable from the code rather than by
+opinion, and the answer is no. `verify` rebuilds a day's root from the leaves
+that day stored, and the metadata leaf counts memories only — so a day sealed
+before this change recomputes exactly as it does today. The change is additive.
+The `leaf_count` check in `verify` has to learn about the second leaf table, and
+that is the whole of the migration.
+
+**The hazard.** A quest carries one blinding factor, `nonce`, and it is already
+spent:
+
+```
+answer_commitment = H_tag(QuestAnswer, quest_id ‖ CBOR(answer, confidence) ‖ nonce)
+```
+
+`answer` is one of about five verdict variants and `confidence` is fixed point,
+so the committed value ranges over roughly 5 × 10⁴ possibilities. **Revealing
+`nonce` makes that commitment brute-forceable in milliseconds.**
+
+Reusing `nonce` as the Merkle leaf's salt therefore destroys I6. Revealing a
+quest leaf is not an edge case — it is the *point*: §7.3 has a verifier
+recompute the score from Merkle paths, which means handing over the salt. The
+naive design silently trades the pre-commitment for the anchor, and nothing
+would fail.
+
+> **Recommendation:** a separate `leaf_salt: [u8; 32]` on `Quest`, drawn from the
+> same RNG as `nonce` and used only for the leaf. It costs 32 bytes a quest and a
+> stored-type change, and it keeps the two commitments independent: revealing a
+> quest to a verifier proves the quest existed on that day without revealing what
+> the ghost committed to answering.
+>
+> Deriving it from `nonce` — `H_tag(QuestLeaf, nonce ‖ "leaf")` — would save the
+> field and is *probably* fine, but "probably fine" is how the reuse above would
+> have been justified too. Two independent secrets is the version that does not
+> need an argument.
+>
+> Not built yet. This is a chain-format change under CLAUDE.md §7 and touches
+> `ghostr-anchor`, so it wants the second reviewer §8 asks for, and it should
+> land with a golden vector proving a day sealed before it still verifies after.
