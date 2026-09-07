@@ -12,20 +12,23 @@ issue, answer, score — all work, and all work with no model at all, because
 every model call falls back to a deterministic path. `ghostr serve` puts the
 loop on a page a phone can open. The three model-written quest kinds
 (`VoiceProbe`, `Counterfactual`, `Prediction`) land through
-`ghostr_quests::llm`.
+`ghostr_quests::llm`, and the day's quests and verdicts are committed into its
+Merkle root.
 
-**The day's quest set is *not* committed into the footage Merkle tree**, though
-this file said it was until the claim was checked. `LeafKind::Quest` and
-`Tag::QuestLeaf` exist and are referenced by nothing but `ghostr-core`'s own
-property tests; `ghostr-anchor::chain` builds memory and meta leaves only, and
-`Footage` carries `memory_ids` with no quest field. A score names the chain
-`seq` it was computed at, which dates it but commits nothing. SPEC §5.4 rests a
-lot on this — *"backdating a good streak requires breaking SHA-256 or Bitcoin"*
-— and until it is built, that sentence describes an intention. It is M2's
-unchecked criterion in [docs/ROADMAP.md](docs/ROADMAP.md). M3 has its crypto, its event codec, its relay transport, `ghostr
-sync`/`restore`, auto-seal, and the nostr feed adapter — so hostile text now
-enters the corpus and the `TrustLevel::ThirdParty` gate is load-bearing rather
-than declared.
+**The day's quest set is committed into the footage Merkle tree**, which this
+file claimed for months before the claim was checked and found false. It is true
+now: `chain::quest_leaf` and `chain::verdict_leaf` are built at every cutoff, a
+day commits to what was *pending* at its cutoff rather than to what its date
+window contains, and `ghostr verify` re-derives them. The leaf set is versioned
+(`Commitment::version`) so that a day sealed before this change keeps verifying
+under the rules it was sealed under — its root is already in Bitcoin and there
+is no re-seal available, because immutability is the point. SPEC §5.4's
+*"backdating a good streak requires breaking SHA-256 or Bitcoin"* is now a
+description rather than an intention.
+
+M3 has its crypto, its event codec, its relay transport, `ghostr sync`/`restore`,
+auto-seal, and the nostr feed adapter — so hostile text now enters the corpus and
+the `TrustLevel::ThirdParty` gate is load-bearing rather than declared.
 
 **M3's public surface is not built.** Backup, sync, restore and the feed are in
 and tested; the ghost manifest, attestation publishing and ghost notes are types

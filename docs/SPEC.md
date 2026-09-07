@@ -742,6 +742,7 @@ Tags in use:
 ```
 ghostr/v1/memory-leaf
 ghostr/v1/quest-leaf
+ghostr/v1/verdict-leaf
 ghostr/v1/meta-leaf
 ghostr/v1/node
 ghostr/v1/footage-root
@@ -754,9 +755,55 @@ ghostr/v1/quest-answer
 
 ```
 memory_leaf(m)  = H_tag("ghostr/v1/memory-leaf",  m.salt || canonical_cbor(m))
-quest_leaf(q)   = H_tag("ghostr/v1/quest-leaf",   q.nonce || canonical_cbor(q_public_fields))
+quest_leaf(q)   = H_tag("ghostr/v1/quest-leaf",   q.leaf_salt || canonical_cbor(q_public_fields))
+verdict_leaf(v) = H_tag("ghostr/v1/verdict-leaf", q.verdict_salt || canonical_cbor(v_public_fields))
 meta_leaf(f)    = H_tag("ghostr/v1/meta-leaf",    canonical_cbor(f.metadata))
 ```
+
+`q_public_fields` is the quest **as issued**, and deliberately holds no claim
+text:
+
+```
+{ id, issued_for, persona_ordinal, persona_content, kind, facet,
+  difficulty, confidence, answer_commitment, holdout, decoy }
+```
+
+A leaf is revealed along with its preimage when proving inclusion, so putting
+the claim in would mean "a quest existed on this day" could not be shown without
+disclosing what it asked. The commitment covers the claim transitively instead:
+recomputing `answer_commitment` from a claim proves the two match (§4.3), and
+this leaf proves that commitment was in the day's root. Two steps, and the
+second discloses nothing.
+
+`v_public_fields` is the shape of an answer, not its words:
+
+```
+{ quest_id, verdict, severity, answered_at }
+```
+
+A correction's text became a memory on the day it was given, so it is already a
+leaf in the same tree. Committing it twice would buy nothing and would put the
+user's own sentence into a preimage that gets revealed to prove a verdict
+happened.
+
+**A quest carries three independent secrets**, and the reason is the thing that
+makes leaf salts different from the answer nonce: revealing a leaf salt is the
+*normal* case. §7.3 has a verifier recompute a fidelity score from Merkle paths,
+which means handing over preimages. Domain separation does not save a shared
+secret from that, because the preimages on the other side are small:
+`answer_commitment` ranges over an answer times a fixed-point confidence, and a
+verdict over five names, three severities, and the milliseconds in a day — on
+the order of 10⁴ and 10¹⁰. Either falls to a search in seconds.
+
+| Secret | Blinds | Revealing it means |
+| --- | --- | --- |
+| `nonce` | `answer_commitment` (§4.3) | the ghost's committed answer is readable — I6 is gone |
+| `leaf_salt` | `quest_leaf` | "a quest existed on this day, with this facet and difficulty" |
+| `verdict_salt` | `verdict_leaf` | "it was answered this way, at this moment" |
+
+Each row is a disclosure someone might legitimately want to make on its own.
+One shared secret would make the first row's disclosure imply all three, which
+is why they are three draws and not one. See §14 Q26.
 
 The salt is essential. A memory is often low-entropy — "saw Nan today" has maybe
 30 bits of guessable content. An unsalted commitment to it is a hash anyone can
@@ -770,8 +817,33 @@ distinct leaf and internal prefixes (already handled by the tag separation
 above):
 
 ```
-root_n = merkle_root([ meta_leaf, memory_leaf*, quest_leaf* ])
+root_n = merkle_root([ meta_leaf, memory_leaf*, quest_leaf*, verdict_leaf* ])
 ```
+
+**A day commits to what was pending at its cutoff**, not to what its date
+window happens to contain. A quest stays answerable for 48 hours, so its verdict
+usually arrives after the day that asked has sealed — and a sealed footage is
+immutable (I2). So the quest is committed by the day that was open when it was
+issued, the verdict by the day that was open when it was given, and each is
+stamped with the `seq` that took it. Selecting by timestamp instead would let a
+late verdict join an already-sealed day's leaf set and break a root nobody can
+recompute.
+
+**The leaf set is versioned.** Each sealed day records which one it was built
+over:
+
+| Version | Leaves |
+| --- | --- |
+| `memories_only` | `meta_leaf`, `memory_leaf*` |
+| `with_quests` | the above, plus `quest_leaf*` and `verdict_leaf*` |
+
+A day is verified under the rules it was *sealed* under. Without that, adding a
+leaf kind would invalidate every chain that predates it — and those roots are
+already in Bitcoin, so there is no re-seal available to fix them. The version is
+recorded outside every preimage, so adding it moved no existing hash; and
+`meta_leaf` counts memories only, so a day with no quests hashes identically
+under either version, which is why chains sealed before this existed survive it
+untouched.
 
 Then each day links to the last:
 
@@ -1197,7 +1269,13 @@ Explicitly out of scope through M4:
 
 Where the brief was ambiguous or underspecified, the question is here rather than
 silently decided in the text above. Each carries a **recommendation** — that is a
-proposal with reasoning, not a resolution. Nothing here is settled.
+proposal with reasoning, not a resolution. An open question is not settled by
+being recommended.
+
+A question that *has* been settled keeps its heading, struck through, with what
+was decided and why underneath — deleting it would lose the reasoning that made
+the decision worth making, and the next person to have the same idea would have
+nothing to read. Q26 is the first.
 
 ---
 
@@ -1761,58 +1839,59 @@ is, and that asymmetry is worth stating rather than implying.
 
 ---
 
-**Q26 — What blinds a quest leaf, given the answer commitment already uses the
-only nonce a quest has?**
+~~**Q26 — What blinds a quest leaf, given the answer commitment already uses the
+only nonce a quest has?**~~ **Resolved: three independent secrets per quest.**
 
-§5.4 rests the whole integrity argument for the fidelity score on committing the
-quest set into the day's tree: *"backdating a good streak requires breaking
-SHA-256 or Bitcoin."* That is not implemented (M2's unchecked criterion), and
-designing it turns up a hazard worth settling before any of it is written.
-
-**Most of the design is forced rather than chosen.**
-
-*Which day a quest belongs to* is decided by I2. A verdict arrives after the day
-it judges has sealed, and a sealed footage is immutable, so a verdict can never
-join the tree of the day it is about. What a day's tree can commit to is what
-happened **inside its own window**: quests *issued* before the cutoff and
-verdicts *given* before the cutoff. `Quest::issued_at` and the verdict's
-timestamp are the window-relative times; `issued_for` is not.
-
-*Whether this breaks existing chains* is answerable from the code rather than by
-opinion, and the answer is no. `verify` rebuilds a day's root from the leaves
-that day stored, and the metadata leaf counts memories only — so a day sealed
-before this change recomputes exactly as it does today. The change is additive.
-The `leaf_count` check in `verify` has to learn about the second leaf table, and
-that is the whole of the migration.
-
-**The hazard.** A quest carries one blinding factor, `nonce`, and it is already
-spent:
+The hazard was real and is worth keeping on the record, because the design that
+has it looks tidier than the one that does not. A quest carried one blinding
+factor:
 
 ```
 answer_commitment = H_tag(QuestAnswer, quest_id ‖ CBOR(answer, confidence) ‖ nonce)
 ```
 
 `answer` is one of about five verdict variants and `confidence` is fixed point,
-so the committed value ranges over roughly 5 × 10⁴ possibilities. **Revealing
-`nonce` makes that commitment brute-forceable in milliseconds.**
+so the committed value ranges over roughly 5 × 10⁴ possibilities. Revealing
+`nonce` makes that commitment brute-forceable in milliseconds — and revealing a
+quest leaf's salt is not an edge case but the *point*, since §7.3 has a verifier
+recompute the score from Merkle paths. Reusing `nonce` as the leaf salt would
+have traded I6 for the anchor, and nothing would have failed.
 
-Reusing `nonce` as the Merkle leaf's salt therefore destroys I6. Revealing a
-quest leaf is not an edge case — it is the *point*: §7.3 has a verifier
-recompute the score from Merkle paths, which means handing over the salt. The
-naive design silently trades the pre-commitment for the anchor, and nothing
-would fail.
+**Decided:** `leaf_salt` and `verdict_salt`, drawn independently at issue,
+alongside `nonce`. Not derived from it — `H_tag(QuestLeaf, nonce ‖ "leaf")`
+would save 64 bytes a quest and is *probably* fine, but "probably fine" is how
+the reuse above would have been justified too.
 
-> **Recommendation:** a separate `leaf_salt: [u8; 32]` on `Quest`, drawn from the
-> same RNG as `nonce` and used only for the leaf. It costs 32 bytes a quest and a
-> stored-type change, and it keeps the two commitments independent: revealing a
-> quest to a verifier proves the quest existed on that day without revealing what
-> the ghost committed to answering.
->
-> Deriving it from `nonce` — `H_tag(QuestLeaf, nonce ‖ "leaf")` — would save the
-> field and is *probably* fine, but "probably fine" is how the reuse above would
-> have been justified too. Two independent secrets is the version that does not
-> need an argument.
->
-> Not built yet. This is a chain-format change under CLAUDE.md §7 and touches
-> `ghostr-anchor`, so it wants the second reviewer §8 asks for, and it should
-> land with a golden vector proving a day sealed before it still verifies after.
+**The second salt was not in the original recommendation, and building it is
+what turned it up.** One `leaf_salt` shared by the quest leaf and the verdict
+leaf has the same shape of bug one level down: a verdict leaf commits to
+`{quest_id, verdict, severity, answered_at}`, on the order of 10¹⁰
+possibilities, so handing over a quest leaf's salt to show *that a quest
+existed* would have let the holder brute-force *how it was answered*. The table
+in §7.2 is the resolution: three secrets, three disclosures, none implying
+another.
+
+**Also decided, and forced rather than chosen.** Which day a quest belongs to
+follows from I2: a verdict usually arrives after the day it judges has sealed,
+and a sealed footage is immutable, so a verdict can never join the tree of the
+day it is about. Each is committed by the day that was *open* when it happened,
+stamped with that `seq` and never moved — selecting by timestamp instead would
+let a late verdict join an already-sealed day's leaf set and break a root nobody
+can recompute.
+
+**What the migration turned out to cost**, against the original claim that "the
+change is additive" and needs nothing: a `Commitment::version`, because a day
+must be verified under the rules it was *sealed* under. The version sits outside
+every preimage so recording it moved no hash, and `meta_leaf` counts memories
+only so a day with no quests hashes identically under either version — which is
+why chains sealed before this survive untouched. That is asserted by
+`a_day_with_no_quests_hashes_the_same_under_either_version` and by
+`days_sealed_under_the_old_rules_still_verify_beside_new_ones`, and its converse
+by `restamping_a_day_as_the_old_rules_breaks_its_root`, so the version is shown
+to be load-bearing rather than assumed to be.
+
+The `leaf_count` check in `verify` did have to learn about the new leaves, and
+that was the one place the change was not additive: it counted memories plus the
+metadata leaf, so every day that issued a quest reported itself tampered with —
+as a finding, in the voice the tool uses for real tampering. See §7.2 and §7.3
+for the built form.
