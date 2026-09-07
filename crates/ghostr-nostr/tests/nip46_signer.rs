@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use ghostr_core::identity::{Account, KeyRef, PublicKey};
 use ghostr_crypto::event::{SignedEvent, UnsignedEvent};
 use ghostr_crypto::{Error as CryptoError, Signer};
+use ghostr_nostr::kinds::Kind;
 use ghostr_nostr::nip46::{Nip46Signer, Nip46Transport};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -171,10 +172,12 @@ fn body(pubkey: PublicKey) -> UnsignedEvent {
         pubkey,
         created_at: 1_756_252_800,
         kind: 31780,
-        tags: vec![vec![
-            "d".to_owned(),
-            "ghostr/v1/manifest/current".to_owned(),
-        ]],
+        // Derived, not hand-written. A literal here is a second copy of the
+        // protocol with nothing tying it to the first, and this one had already
+        // drifted: it still said `manifest` after `Kind::slug` moved to SPEC
+        // §9.1's `ghost`, and no test noticed because a signer does not care
+        // what it is signing.
+        tags: vec![vec!["d".to_owned(), Kind::GhostManifest.d_tag("current")]],
         content: String::new(),
     }
 }
