@@ -757,10 +757,23 @@ fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
         Err(ghostr_engine::Error::Quests(ghostr_quests::Error::InsufficientSample {
             have,
             need,
-        })) => println!(
-            "not enough evidence yet: {have} scored quest(s), need {need}
-               answer today's with `ghostr quest list`"
-        ),
+        })) => {
+            // Routed through the same `next_step` the status command uses. This
+            // arm used to say "answer today's with `ghostr quest list`"
+            // unconditionally — advice a new vault cannot follow, because a
+            // quest needs an adopted persona and a persona needs twenty
+            // memories. Telling someone to do an impossible thing is worse
+            // than telling them nothing.
+            let stage = if have == 0 {
+                render::stage(&engine)?
+            } else {
+                render::Stage::ShortOfScore { have, need }
+            };
+            println!(
+                "not enough evidence yet: {have} scored quest(s), need {need}\nnext    {}",
+                render::under_label(&render::next_step(&stage))
+            );
+        }
         Err(e) => return Err(anyhow::Error::new(e).context("scoring")),
     }
     Ok(())
