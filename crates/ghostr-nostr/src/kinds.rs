@@ -108,10 +108,19 @@ impl Kind {
     /// correctness must not depend on the 3178x block being ours — so renaming a
     /// variant must be a compile error to fix here, not a silent change to what
     /// every already-published event is called.
+    ///
+    /// The strings themselves are frozen by `every_slug_is_frozen`, which is
+    /// the half that was missing: nothing in this module compares a slug to
+    /// anything but another slug, so until that test existed a rename was a
+    /// silent change to the protocol with a green suite behind it.
     #[must_use]
     pub fn slug(self) -> &'static str {
         match self {
-            Self::GhostManifest => "manifest",
+            // `ghost`, not `manifest`: SPEC §9.1's table is the protocol, and
+            // the two had drifted apart with nothing to notice. Free to fix
+            // because nothing publishes a manifest yet — no event has ever
+            // carried either name.
+            Self::GhostManifest => "ghost",
             Self::SourceDescriptor => "source",
             Self::PersonaVersion => "persona",
             Self::FootageRecord => "footage",
@@ -201,6 +210,40 @@ mod tests {
         numbers.dedup();
         assert_eq!(numbers.len(), Kind::ALL.len());
         assert_eq!(numbers, (31780..=31788).collect::<Vec<_>>());
+    }
+
+    /// The nine strings that are the wire protocol, asserted literally.
+    ///
+    /// Modelled on `frozen_tags` in `ghostr-core`'s `hash.rs`, and here for the
+    /// same reason: a `d` tag names what an event *is* to every reader, and
+    /// SPEC Q3 rests correctness on that name rather than on the kind number.
+    /// Renaming one silently re-files every event published under it.
+    ///
+    /// The tests below this one cannot catch that. `every_slug_is_distinct` and
+    /// `every_kind_round_trips_through_its_d_tag` both compare `slug()` to
+    /// itself, so they hold under any rename — which is how `manifest` and
+    /// SPEC §9.1's `ghost` drifted apart without a failure.
+    #[test]
+    fn every_slug_is_frozen() {
+        assert_eq!(Kind::GhostManifest.slug(), "ghost");
+        assert_eq!(Kind::SourceDescriptor.slug(), "source");
+        assert_eq!(Kind::PersonaVersion.slug(), "persona");
+        assert_eq!(Kind::FootageRecord.slug(), "footage");
+        assert_eq!(Kind::AnchorReceipt.slug(), "anchor");
+        assert_eq!(Kind::QuestSet.slug(), "quests");
+        assert_eq!(Kind::FidelityAttestation.slug(), "fidelity");
+        assert_eq!(Kind::DeviceRegistration.slug(), "device");
+        assert_eq!(Kind::RevocationNotice.slug(), "revocation");
+
+        // And the prefix, which is half of every `d` tag. `ghostr/v1` is a
+        // namespace claim as much as a version: moving it orphans every event
+        // any Ghostr vault has ever published.
+        assert_eq!(D_TAG_PREFIX, "ghostr/v1");
+        assert_eq!(
+            Kind::FootageRecord.d_tag("7"),
+            "ghostr/v1/footage/7",
+            "the assembled tag, not just its parts"
+        );
     }
 
     #[test]

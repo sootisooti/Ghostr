@@ -190,10 +190,12 @@ async fn an_externally_signed_event_verifies() {
         pubkey: signer.public_key(key).expect("pubkey"),
         created_at: 1_756_252_800,
         kind: 31780,
-        tags: vec![vec![
-            "d".to_owned(),
-            "ghostr/v1/manifest/current".to_owned(),
-        ]],
+        // Derived, not hand-written. A literal here is a second copy of the
+        // protocol with nothing tying it to the first, and this one had already
+        // drifted: it still said `manifest` after `Kind::slug` moved to SPEC
+        // §9.1's `ghost`, and no test noticed because a signer does not care
+        // what it is signing.
+        tags: vec![vec!["d".to_owned(), Kind::GhostManifest.d_tag("current")]],
         content: String::new(),
     };
     let sig = signer.sign_event(key, &event).await.expect("sign");
