@@ -345,7 +345,7 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
     let tip = engine.store().tip()?;
     let memories = engine.store().memory_count()?;
     Ok(format!(
-        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)",
+        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)\nnext    {}",
         engine.dir().display(),
         engine.npub().as_str(),
         engine.home_tz()?.name(),
@@ -355,7 +355,127 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
             |t| format!("seq {} · {}", t.seq, t.link.short())
         ),
         swap_protection(engine.keystore().pinned_secrets()),
+        under_label(&next_step(&stage(engine)?)),
     ))
+}
+
+/// Where this vault is in the loop.
+///
+/// Ordered the way a vault actually moves through it. Every variant carries the
+/// numbers its message needs, so [`next_step`] is a total function of the stage
+/// and can be tested without a vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// Nothing recorded yet.
+    Empty,
+    /// Recording, but short of what a persona needs.
+    BuildingCorpus {
+        /// Memories held.
+        have: u32,
+        /// Memories [`ghostr_persona::distill::MIN_CORPUS`] asks for.
+        need: u32,
+    },
+    /// Enough corpus, no persona adopted.
+    ReadyToDistill,
+    /// A persona exists and nothing is waiting to be answered.
+    ///
+    /// Covers both a vault that has never issued and one that has answered
+    /// everything: "issue today's" is the right move either way. A separate
+    /// `Running` variant was written here and the compiler pointed out that
+    /// nothing constructed it — a stage with no producer is a message no user
+    /// can ever be shown.
+    NoOpenQuests,
+    /// Quests are waiting.
+    Answering {
+        /// How many are open.
+        open: u32,
+    },
+    /// Answering, but short of what a score needs.
+    ShortOfScore {
+        /// Scored quests held.
+        have: u32,
+        /// Scored quests the window asks for.
+        need: u32,
+    },
+}
+
+/// Reads the vault's stage.
+///
+/// Counts only — no memory is decrypted to work out what to suggest, which is
+/// the same rule `QuestEngagement` follows and for the same reason (I8).
+pub(crate) fn stage(engine: &Engine) -> anyhow::Result<Stage> {
+    let memories = engine.store().memory_count()?;
+    if memories == 0 {
+        return Ok(Stage::Empty);
+    }
+    let need = ghostr_persona::distill::MIN_CORPUS;
+    let have = u32::try_from(memories).unwrap_or(u32::MAX);
+    if have < need {
+        return Ok(Stage::BuildingCorpus { have, need });
+    }
+    if ghostr_engine::ops::persona_head(engine)?.is_none() {
+        return Ok(Stage::ReadyToDistill);
+    }
+    let open =
+        u32::try_from(ghostr_engine::ops::open_quests(engine, u32::MAX)?.len()).unwrap_or(u32::MAX);
+    if open == 0 {
+        return Ok(Stage::NoOpenQuests);
+    }
+    Ok(Stage::Answering { open })
+}
+
+/// The one thing to do next.
+///
+/// One function, so `status` and `fidelity` cannot disagree about what is
+/// possible. They used to: a brand-new vault was told by `fidelity` to "answer
+/// today's with `ghostr quest list`", which is not a step that exists until a
+/// persona has been adopted, and adopting one needs twenty memories. Every
+/// command pointed at another command that also refused, and nothing said how
+/// far away the loop was or that an existing notes folder skips the wait.
+pub(crate) fn next_step(stage: &Stage) -> String {
+    // Escaped newlines rather than literal ones: `cargo fmt` reflows a string
+    // that spans source lines, and it silently reflowed this one into a run of
+    // stray spaces the first time it was written that way.
+    match *stage {
+        Stage::Empty => concat!(
+            "`ghostr journal add \"…\"`, or point it at what you already write:\n",
+            "`ghostr source add markdown ./notes/` — a folder of notes you have ",
+            "already written starts the loop today rather than in three weeks"
+        )
+        .to_owned(),
+        Stage::BuildingCorpus { have, need } => {
+            let short = need.saturating_sub(have);
+            format!(
+                "{short} more memor{} before a persona can be distilled ({have}/{need}).\n\
+                 `ghostr source add markdown ./notes/` fills this from notes you already have",
+                if short == 1 { "y" } else { "ies" },
+            )
+        }
+        Stage::ReadyToDistill => {
+            "`ghostr persona distill`, then read the diff and `ghostr persona adopt`".to_owned()
+        }
+        Stage::NoOpenQuests => concat!(
+            "`ghostr quest issue` — today's claims, with the ghost's answers ",
+            "committed before you see them"
+        )
+        .to_owned(),
+        Stage::Answering { open } => format!(
+            "`ghostr quest list` — {open} waiting. `ghostr serve --http` puts them on a phone"
+        ),
+        Stage::ShortOfScore { have, need } => format!(
+            "{} more answered quest(s) before a score ({have}/{need}).\n\
+             Keep going with `ghostr quest list`",
+            need.saturating_sub(have)
+        ),
+    }
+}
+
+/// Indents the continuation lines of a value printed after a `label   ` column.
+///
+/// Kept out of [`next_step`] so the stage messages stay free of layout, and so
+/// the two callers cannot drift into indenting differently.
+pub(crate) fn under_label(text: &str) -> String {
+    text.replace('\n', "\n        ")
 }
 
 /// How much of the in-memory key material is pinned out of swap.
@@ -1183,6 +1303,115 @@ fn local_addresses(port: u16) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every stage this vault can be in, so a new one cannot be added without
+    /// deciding what it tells the user.
+    const EVERY_STAGE: [Stage; 6] = [
+        Stage::Empty,
+        Stage::BuildingCorpus { have: 1, need: 20 },
+        Stage::ReadyToDistill,
+        Stage::NoOpenQuests,
+        Stage::Answering { open: 3 },
+        Stage::ShortOfScore { have: 2, need: 10 },
+    ];
+
+    /// The bug this whole thing exists to fix, asserted directly.
+    ///
+    /// A vault with no persona cannot have a quest — `quest issue` refuses
+    /// without one, and a persona needs twenty memories. `fidelity` told such a
+    /// vault to "answer today's with `ghostr quest list`" anyway. Advice you
+    /// cannot follow is worse than none: it reads as "you missed a step" when
+    /// the step does not exist yet.
+    #[test]
+    fn a_vault_with_no_persona_is_never_told_to_answer_quests() {
+        for stage in [
+            Stage::Empty,
+            Stage::BuildingCorpus { have: 1, need: 20 },
+            Stage::ReadyToDistill,
+        ] {
+            let advice = next_step(&stage);
+            assert!(
+                !advice.contains("quest"),
+                "a vault that cannot have quests was told about them: {advice}"
+            );
+        }
+    }
+
+    /// And the other half, or the test above passes for the boring reason that
+    /// no stage ever mentions quests.
+    #[test]
+    fn a_vault_that_can_answer_is_told_to() {
+        let advice = next_step(&Stage::Answering { open: 3 });
+        assert!(advice.contains("ghostr quest list"), "{advice}");
+        assert!(advice.contains('3'), "the count is missing: {advice}");
+    }
+
+    /// Every command named in a suggestion is one the binary actually has.
+    ///
+    /// A suggestion is only useful if it runs. Checked against the subcommand
+    /// list rather than by eye, because a rename elsewhere would otherwise turn
+    /// every one of these into a dead end quietly.
+    #[test]
+    fn every_suggested_command_exists() {
+        const COMMANDS: [&str; 19] = [
+            "init",
+            "ingest",
+            "memoria",
+            "recap",
+            "source",
+            "thread",
+            "journal",
+            "egress",
+            "persona",
+            "footage",
+            "quest",
+            "fidelity",
+            "anchor",
+            "serve",
+            "verify",
+            "status",
+            "sync",
+            "restore",
+            "passphrase",
+        ];
+        for stage in EVERY_STAGE {
+            let advice = next_step(&stage);
+            for word in advice.split("`ghostr ").skip(1) {
+                let named = word
+                    .split([' ', '`'])
+                    .next()
+                    .expect("a command follows `ghostr ");
+                assert!(
+                    COMMANDS.contains(&named),
+                    "stage {stage:?} suggests `ghostr {named}`, which is not a subcommand"
+                );
+            }
+        }
+    }
+
+    /// No stage is silent. A `next` line that printed nothing would be worse
+    /// than the wall it replaced, because it looks like the vault is finished.
+    #[test]
+    fn every_stage_says_something() {
+        for stage in EVERY_STAGE {
+            let advice = next_step(&stage);
+            assert!(advice.len() > 20, "stage {stage:?} said only {advice:?}");
+            assert!(
+                advice.contains("`ghostr "),
+                "stage {stage:?} names no command"
+            );
+        }
+    }
+
+    /// The label column and the message are kept apart, so a multi-line
+    /// suggestion lines up under `next    ` instead of running back to column
+    /// zero. Written the first time as `\` continuations inside the literals,
+    /// which `cargo fmt` reflowed into a run of stray spaces.
+    #[test]
+    fn a_continuation_line_is_indented_under_its_label() {
+        assert_eq!(under_label("one\ntwo"), "one\n        two");
+        assert_eq!(under_label("no newline"), "no newline");
+    }
 
     /// A day sealed before quests reached the tree must not grow a line of
     /// zeroes it has no business explaining — and a day that did commit to

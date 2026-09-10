@@ -254,6 +254,19 @@ A default build runs **entirely offline with no model**. `anchor` is the one
 command that touches the network, and it degrades to a recorded failure rather
 than blocking anything.
 
+**Start from writing you already have.** A persona needs 20 memories before it
+can be distilled, and quests need a persona — so a vault fed one journal entry a
+day says nothing for three weeks. Pointing `source add markdown` at a folder of
+old notes collapses that to a single command, and `ghostr status` says which of
+the two you are in and what unlocks next:
+
+```console
+$ ghostr status
+memories 1
+next    19 more memories before a persona can be distilled (1/20).
+        `ghostr source add markdown ./notes/` fills this from notes you already have
+```
+
 ```console
 $ cargo build --release                    # not yet published to crates.io
 $ alias ghostr=./target/release/ghostr
