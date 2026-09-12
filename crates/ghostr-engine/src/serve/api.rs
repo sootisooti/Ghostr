@@ -154,6 +154,10 @@ struct StatusView {
     queued_corrections: u32,
     /// Today, in the vault's home timezone rather than the phone's.
     today: String,
+    /// Where the vault is in the loop, so the page can say what to do next
+    /// rather than offering a button that cannot succeed.
+    #[serde(flatten)]
+    stage: crate::ops::Stage,
 }
 
 fn status(engine: &Engine) -> Result<String, Status> {
@@ -166,6 +170,9 @@ fn status(engine: &Engine) -> Result<String, Status> {
             open_quests: crate::ops::open_quests(engine, 100)?.len(),
             queued_corrections: engine.store().queued_delta_count()?,
             today: engine.now().date_in(&tz).to_string(),
+            // The same stage the terminal reads, so the page cannot offer a
+            // step the CLI knows is impossible. A count, not content (I8).
+            stage: crate::ops::stage(engine)?,
         })
     };
     build().map_err(|e| classify(&e)).and_then(|v| encode(&v))
@@ -1001,6 +1008,51 @@ mod tests {
             engine.store().tip().expect("tip").map_or(0, |t| t.seq),
             before,
             "reading the recap advanced the chain"
+        );
+    }
+
+    /// The page is told where the vault is, not left to guess from counts.
+    ///
+    /// `/api/status` grew a flattened `stage` so the served page and the
+    /// terminal read the same answer. Nothing asserted it was in the response:
+    /// the field was added, the build went green, and a stale binary served the
+    /// old shape for an hour before a live `curl` caught it. A field nothing
+    /// tests is a field that can vanish in a refactor without a sound.
+    #[test]
+    fn status_says_which_stage_the_vault_is_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, token, _clock) = ready(dir.path());
+        let out = text(&route(
+            &engine,
+            &token,
+            &request(Method::Get, "/api/status", Some(token.expose())),
+            "",
+        ));
+        // `ready` has a corpus and an adopted persona and has issued nothing.
+        assert!(
+            out.contains("\"stage\":\"no_open_quests\""),
+            "no stage in the status response: {out}"
+        );
+    }
+
+    /// And it tracks the vault rather than being a constant.
+    ///
+    /// Without this the test above passes on a hardcoded string.
+    #[test]
+    fn the_stage_moves_when_the_vault_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (engine, token, _clock) = ready(dir.path());
+        let date = engine.now().date_in(&chrono_tz::Tz::UTC);
+        crate::ops::issue_quests(&engine, date).expect("issue");
+        let out = text(&route(
+            &engine,
+            &token,
+            &request(Method::Get, "/api/status", Some(token.expose())),
+            "",
+        ));
+        assert!(
+            out.contains("\"stage\":\"answering\""),
+            "issuing quests did not move the stage: {out}"
         );
     }
 

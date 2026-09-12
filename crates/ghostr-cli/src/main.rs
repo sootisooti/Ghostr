@@ -764,11 +764,14 @@ fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
             // quest needs an adopted persona and a persona needs twenty
             // memories. Telling someone to do an impossible thing is worse
             // than telling them nothing.
-            let stage = if have == 0 {
-                render::stage(&engine)?
-            } else {
-                render::Stage::ShortOfScore { have, need }
-            };
+            //
+            // The shortfall is stated once, on the line above, and the step
+            // comes from the vault rather than from these two numbers. An
+            // earlier version built a `ShortOfScore { have, need }` stage here
+            // for `have > 0` and hit the same bug one rung up: knowing you are
+            // nine short says nothing about whether a quest is open to answer,
+            // so it sent a vault with an empty queue to `ghostr quest list`.
+            let stage = ghostr_engine::ops::stage(&engine)?;
             println!(
                 "not enough evidence yet: {have} scored quest(s), need {need}\nnext    {}",
                 render::under_label(&render::next_step(&stage))

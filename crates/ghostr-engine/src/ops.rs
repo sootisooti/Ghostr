@@ -2104,6 +2104,86 @@ fn verdict_source(engine: &Engine, holdout: bool) -> crate::Result<SourceId> {
     )?)
 }
 
+/// Where a vault is in the daily loop.
+///
+/// Data, not advice. The stages are the same for every surface — the terminal
+/// and the served page agree about what is *possible* — while the words differ,
+/// because "run `ghostr source add markdown ./notes/`" is useful in a terminal
+/// and useless on a phone, which is the device `ghostr serve` exists for.
+///
+/// Ordered the way a vault moves through it.
+///
+/// Deliberately **not** `#[non_exhaustive]`, against the usual rule for a
+/// public enum (CLAUDE.md §5). That rule protects domain types a third party
+/// matches on; this one exists so that adding a stage stops the build in every
+/// surface that renders advice, and makes someone decide what it says. A
+/// catch-all arm here is a stage a user is shown nothing useful for, and the
+/// whole reason this type exists is that such a gap is invisible.
+///
+/// Every variant is produced by [`stage`] and by nothing else. A
+/// `ShortOfScore { have, need }` variant was briefly built by `fidelity`'s
+/// refusal arm instead, from numbers only the scorer holds — and because it sat
+/// outside the ladder it did not know whether any quest was open, so it told a
+/// vault with an empty queue to "keep going with `ghostr quest list`", which
+/// printed "no open quests". A stage assembled at a call site is a stage that
+/// has not checked where the vault actually is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum Stage {
+    /// Nothing recorded yet.
+    Empty,
+    /// Recording, but short of what a persona needs.
+    BuildingCorpus {
+        /// Memories held.
+        have: u32,
+        /// Memories [`ghostr_persona::distill::MIN_CORPUS`] asks for.
+        need: u32,
+    },
+    /// Enough corpus, no persona adopted.
+    ReadyToDistill,
+    /// A persona exists and nothing is waiting to be answered.
+    ///
+    /// Covers both a vault that has never issued and one that has answered
+    /// everything: "issue today's" is the right move either way. A separate
+    /// `Running` variant was written once and the compiler pointed out that
+    /// nothing constructed it — a stage with no producer is a message no user
+    /// can ever be shown.
+    NoOpenQuests,
+    /// Quests are waiting.
+    Answering {
+        /// How many are open.
+        open: u32,
+    },
+}
+
+/// Reads the vault's stage.
+///
+/// Counts only — no memory is decrypted to work out where a vault is, which is
+/// the rule `QuestEngagement` follows and for the same reason (I8).
+///
+/// # Errors
+///
+/// Returns an error if the store cannot be read.
+pub fn stage(engine: &Engine) -> crate::Result<Stage> {
+    let memories = engine.store().memory_count()?;
+    if memories == 0 {
+        return Ok(Stage::Empty);
+    }
+    let need = ghostr_persona::distill::MIN_CORPUS;
+    let have = u32::try_from(memories).unwrap_or(u32::MAX);
+    if have < need {
+        return Ok(Stage::BuildingCorpus { have, need });
+    }
+    if persona_head(engine)?.is_none() {
+        return Ok(Stage::ReadyToDistill);
+    }
+    let open = u32::try_from(open_quests(engine, u32::MAX)?.len()).unwrap_or(u32::MAX);
+    if open == 0 {
+        return Ok(Stage::NoOpenQuests);
+    }
+    Ok(Stage::Answering { open })
+}
+
 #[cfg(test)]
 mod commitment_tests {
     use ghostr_core::footage::CommitmentVersion;

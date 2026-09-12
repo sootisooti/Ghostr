@@ -53,6 +53,35 @@ visually identical on flat UI), because a gallery that is meant to be
 regenerated adds its full weight to git history every time. It is skipped with a
 note if Pillow is not installed.
 
+## Checking the on-ramp
+
+The demo vault is a *finished* vault: thirty days sealed, a persona adopted, a
+month of quests answered. It shows the product working and says nothing about
+the walk from an empty vault to that state, which is the part a new user
+actually does.
+
+```sh
+cargo build -p ghostr-cli
+tools/ui-preview/onramp.sh
+```
+
+It builds an empty vault, walks it up one rung at a time — nothing recorded, a
+corpus short of the floor, a corpus at it, a persona with no quests, quests
+waiting — and at every rung asserts that the page offers "Issue today's" exactly
+when the step would succeed, and says what to do instead when it would not.
+
+That check cannot be a `cargo test`. `ops::Stage` is deliberately not
+`#[non_exhaustive]` so a new stage breaks the build in every Rust surface that
+renders advice, but the served page renders it in JavaScript, where the compiler
+has no opinion. Two Rust tests cover what they can — `status_says_which_stage_
+the_vault_is_in` proves the stage reaches the page, `the_page_recognises_every_
+stage` proves the page has words for each one — and neither can execute the
+line that decides whether the button is drawn. This runs it, in a browser,
+against a vault that is really in the stage being claimed.
+
+It exits non-zero at the first rung that lies, so it is usable as a check and
+not only as a demo.
+
 ## What is in the demo vault
 
 `tools/ui-preview/seed.py` writes thirty days of markdown notes — wins, drags,

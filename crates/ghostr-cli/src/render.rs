@@ -12,6 +12,7 @@ use ghostr_core::sensitivity::Sensitivity;
 use ghostr_engine::engine::{Engine, InitOutcome};
 use ghostr_engine::ops::CandidateVersion;
 use ghostr_engine::ops::{IngestReport, QuestIssue, Recap, VerifyReport};
+use ghostr_engine::ops::{Stage, stage};
 use ghostr_engine::serve::{Bind, Token};
 use ghostr_engine::sources::{SourcePlan, SyncReport};
 use ghostr_engine::types::{AnchorRecord, AnchorRecordState, Footage};
@@ -359,71 +360,6 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
     ))
 }
 
-/// Where this vault is in the loop.
-///
-/// Ordered the way a vault actually moves through it. Every variant carries the
-/// numbers its message needs, so [`next_step`] is a total function of the stage
-/// and can be tested without a vault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage {
-    /// Nothing recorded yet.
-    Empty,
-    /// Recording, but short of what a persona needs.
-    BuildingCorpus {
-        /// Memories held.
-        have: u32,
-        /// Memories [`ghostr_persona::distill::MIN_CORPUS`] asks for.
-        need: u32,
-    },
-    /// Enough corpus, no persona adopted.
-    ReadyToDistill,
-    /// A persona exists and nothing is waiting to be answered.
-    ///
-    /// Covers both a vault that has never issued and one that has answered
-    /// everything: "issue today's" is the right move either way. A separate
-    /// `Running` variant was written here and the compiler pointed out that
-    /// nothing constructed it — a stage with no producer is a message no user
-    /// can ever be shown.
-    NoOpenQuests,
-    /// Quests are waiting.
-    Answering {
-        /// How many are open.
-        open: u32,
-    },
-    /// Answering, but short of what a score needs.
-    ShortOfScore {
-        /// Scored quests held.
-        have: u32,
-        /// Scored quests the window asks for.
-        need: u32,
-    },
-}
-
-/// Reads the vault's stage.
-///
-/// Counts only — no memory is decrypted to work out what to suggest, which is
-/// the same rule `QuestEngagement` follows and for the same reason (I8).
-pub(crate) fn stage(engine: &Engine) -> anyhow::Result<Stage> {
-    let memories = engine.store().memory_count()?;
-    if memories == 0 {
-        return Ok(Stage::Empty);
-    }
-    let need = ghostr_persona::distill::MIN_CORPUS;
-    let have = u32::try_from(memories).unwrap_or(u32::MAX);
-    if have < need {
-        return Ok(Stage::BuildingCorpus { have, need });
-    }
-    if ghostr_engine::ops::persona_head(engine)?.is_none() {
-        return Ok(Stage::ReadyToDistill);
-    }
-    let open =
-        u32::try_from(ghostr_engine::ops::open_quests(engine, u32::MAX)?.len()).unwrap_or(u32::MAX);
-    if open == 0 {
-        return Ok(Stage::NoOpenQuests);
-    }
-    Ok(Stage::Answering { open })
-}
-
 /// The one thing to do next.
 ///
 /// One function, so `status` and `fidelity` cannot disagree about what is
@@ -461,11 +397,6 @@ pub(crate) fn next_step(stage: &Stage) -> String {
         .to_owned(),
         Stage::Answering { open } => format!(
             "`ghostr quest list` — {open} waiting. `ghostr serve --http` puts them on a phone"
-        ),
-        Stage::ShortOfScore { have, need } => format!(
-            "{} more answered quest(s) before a score ({have}/{need}).\n\
-             Keep going with `ghostr quest list`",
-            need.saturating_sub(have)
         ),
     }
 }
@@ -1306,13 +1237,12 @@ mod tests {
 
     /// Every stage this vault can be in, so a new one cannot be added without
     /// deciding what it tells the user.
-    const EVERY_STAGE: [Stage; 6] = [
+    const EVERY_STAGE: [Stage; 5] = [
         Stage::Empty,
         Stage::BuildingCorpus { have: 1, need: 20 },
         Stage::ReadyToDistill,
         Stage::NoOpenQuests,
         Stage::Answering { open: 3 },
-        Stage::ShortOfScore { have: 2, need: 10 },
     ];
 
     /// The bug this whole thing exists to fix, asserted directly.
@@ -1333,6 +1263,30 @@ mod tests {
             assert!(
                 !advice.contains("quest"),
                 "a vault that cannot have quests was told about them: {advice}"
+            );
+        }
+    }
+
+    /// `ghostr quest list` is only ever suggested when it will print a quest.
+    ///
+    /// The first version of this on-ramp shipped a `ShortOfScore { have, need }`
+    /// stage, built by `fidelity` from the scorer's refusal rather than by
+    /// [`stage`](ghostr_engine::ops::stage). Being nine quests short of a score
+    /// says nothing about whether one is open, so a vault that had answered
+    /// everything was told to "keep going with `ghostr quest list`" and got
+    /// "no open quests" — a dead end inside the fix for dead ends.
+    ///
+    /// Stated as a pairing rather than a ban so it cannot pass by nothing ever
+    /// mentioning the command: `Answering` must name it, and nothing else may.
+    #[test]
+    fn only_a_stage_with_open_quests_suggests_listing_them() {
+        for stage in EVERY_STAGE {
+            let advice = next_step(&stage);
+            let names_list = advice.contains("ghostr quest list");
+            let has_open = matches!(stage, Stage::Answering { open } if open > 0);
+            assert_eq!(
+                names_list, has_open,
+                "{stage:?} points at an empty queue, or hides a full one: {advice}"
             );
         }
     }

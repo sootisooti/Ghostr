@@ -257,28 +257,78 @@ function resultHtml(r) {
   return bits.join("");
 }
 
+/* ---------- where the vault is ---------- */
+
+/* The stage comes from the same `ops::stage` the terminal reads, so this page
+   can never offer a step the CLI knows is impossible. The words differ on
+   purpose: "run `ghostr source add markdown ./notes/`" is useful in a terminal
+   and useless here, and this page is the thing you open on a phone. Where a
+   step genuinely needs the machine, say so *before* the button rather than
+   after it fails. */
+function nextStep(s) {
+  switch (s.stage) {
+    case "empty":
+      return { can: "journal",
+        text: "Nothing recorded yet. Write today's entry on the first tab — "
+            + "a ghost needs something of yours to be built from." };
+    case "building_corpus":
+      return { can: "journal",
+        text: `${s.need - s.have} more ${s.need - s.have === 1 ? "entry" : "entries"} `
+            + `before a persona can be distilled (${s.have}/${s.need}). `
+            + "Keep writing on the first tab — or, on the machine running "
+            + "<code>ghostr serve</code>, point it at notes you have already "
+            + "written with <code>ghostr source add markdown ./notes/</code>." };
+    case "ready_to_distill":
+      return { can: "terminal",
+        text: "Enough to build a ghost. This step reads the whole corpus and "
+            + "wants a human to read the diff, so it lives on the machine "
+            + "running <code>ghostr serve</code>: "
+            + "<code>ghostr persona distill</code>, then "
+            + "<code>ghostr persona adopt</code>." };
+    case "no_open_quests":
+      return { can: "issue", text: "Nothing waiting. Issue today's claims — "
+            + "the ghost's answers are committed before you see them." };
+    case "answering":
+      return { can: "answer",
+        text: `${s.open} waiting.` };
+    default:
+      /* A stage this page has no words for. Says so rather than inventing
+         advice — the failure the whole `next` line exists to prevent. */
+      return { can: "unknown",
+        text: "This build does not recognise what state the vault is in. "
+            + "Run <code>ghostr status</code> on the machine running "
+            + "<code>ghostr serve</code>." };
+  }
+}
+
 async function loadQuests() {
   head.textContent = "quests";
-  let list;
-  try { list = await call("/api/quests"); } catch (e) { return fail(e); }
+  let list, status;
+  try {
+    [list, status] = await Promise.all([call("/api/quests"), call("/api/status")]);
+  } catch (e) { return fail(e); }
 
-  if (!list.length) {
-    show(`<div class="card"><div class="empty">No open quests.</div>
-      <button class="primary wide" id="issue">Issue today's</button></div>`);
-    document.getElementById("issue").onclick = async (ev) => {
-      ev.target.disabled = true;
-      try { await call("/api/quests/issue", "POST"); loadQuests(); }
-      catch (e) {
-        ev.target.disabled = false;
-        show(`<div class="card"><div class="empty">${
-          e.status === 422
-            ? "Nothing to ask yet — the ghost needs a persona and a day already has its quests.<br>Run <code>ghostr persona distill --adopt</code> first."
-            : "Could not issue."}</div></div>`);
-      }
-    };
-    return;
-  }
-  show(list.map(questCard).join(""));
+  if (list.length) return show(list.map(questCard).join(""));
+
+  /* Asked before drawing, not after a failed click. The old page offered
+     "Issue today's" to every empty vault and let a 422 explain why it could
+     not work — which meant learning by failing, and being told to run a
+     terminal command on a device that has no terminal. */
+  const next = nextStep(status);
+  const button = next.can === "issue"
+    ? `<button class="primary wide" id="issue">Issue today's</button>` : "";
+  show(`<div class="card"><div class="empty">${next.text}</div>${button}</div>`);
+
+  const issue = document.getElementById("issue");
+  if (!issue) return;
+  issue.onclick = async (ev) => {
+    ev.target.disabled = true;
+    try { await call("/api/quests/issue", "POST"); loadQuests(); }
+    catch (e) {
+      ev.target.disabled = false;
+      show(`<div class="card"><div class="empty">Could not issue: ${esc(String(e.status))}.</div></div>`);
+    }
+  };
 }
 
 view.addEventListener("click", async (ev) => {
@@ -383,8 +433,15 @@ async function loadScore() {
   try { s = await call("/api/fidelity"); }
   catch (e) {
     if (e.status === 422) {
+      /* "Not enough evidence" on its own reads as a dead end. Which step is
+         actually missing depends on where the vault is, and only the stage
+         knows — a vault with no persona is nowhere near a score, and saying
+         "answer some quests" to it is advice it cannot take. */
+      let next = { text: "" };
+      try { next = nextStep(await call("/api/status")); } catch (_) { /* the line below still stands alone */ }
       return show(`<div class="card"><div class="empty">
         Not enough evidence yet.<br>A score over a handful of quests is noise, so there isn't one.
+        ${next.text ? `<div class="note" style="margin-top:1rem">${next.text}</div>` : ""}
         </div></div>`);
     }
     return fail(e);
@@ -440,6 +497,7 @@ async function loadVault() {
         <tr><td>open quests</td><td>${s.open_quests}</td></tr>
         <tr><td>queued corrections</td><td>${s.queued_corrections}</td></tr>
       </table>
+      <div class="note" style="margin-top:.75rem">${nextStep(s).text}</div>
       <div class="note" style="overflow-wrap:anywhere">${esc(s.npub)}</div>
       <div class="note">Everything here stayed on the machine running <code>ghostr serve</code>.</div>
     </div>`);
