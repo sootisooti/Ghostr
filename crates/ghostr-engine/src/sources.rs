@@ -477,12 +477,46 @@ fn stored_cursor(cursor_json: &str) -> SyncCursor {
 }
 
 /// A source's stored configuration, as JSON.
-fn config_json(new: &NewSource) -> crate::Result<String> {
+/// The stored configuration for a markdown vault at `root`.
+///
+/// **The only place a markdown source's config string is built.** It used to be
+/// built in two: `sources::add` wrote `{"location":"/notes"}` and `ops::ingest`
+/// wrote the bare path `/notes`. The store dedups sources on `(kind, config)`
+/// and those two never match, so following the on-ramp — `source add`, then the
+/// `ingest` the help text invites — registered the same folder twice and
+/// ingested every note under both. Fourteen notes became twenty-eight
+/// memories, every recap listed each highlight twice, and a day sealed in that
+/// state commits twice the memory leaves. I2 makes that permanent: a sealed
+/// footage is never corrected, only amended.
+///
+/// The store was right and documented ("re-running `source add` on the same
+/// path is not" a second source). The defect was two spellings of one source,
+/// so there is now one spelling and one function that produces it.
+#[must_use]
+pub fn markdown_config(root: &std::path::Path) -> String {
+    serde_json::Value::Object(config_for_location(&root.display().to_string())).to_string()
+}
+
+/// The shared shape every source config starts from: its location.
+///
+/// Returns the map rather than a string so the richer kinds (a structured log's
+/// schema, a feed's relays) extend it instead of rebuilding it. A second place
+/// that inserts `"location"` is a second spelling, which is the whole defect.
+fn config_for_location(location: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut map = serde_json::Map::new();
     map.insert(
         "location".to_owned(),
-        serde_json::Value::String(new.location.clone()),
+        serde_json::Value::String(location.to_owned()),
     );
+    map
+}
+
+fn config_json(new: &NewSource) -> crate::Result<String> {
+    // Seeded from the shared builder so the plain-location case — which is
+    // every markdown vault — is byte-identical to what `markdown_config`
+    // produces. A second `map.insert("location", …)` here would be a second
+    // spelling again, which is the bug this function was split for.
+    let mut map = config_for_location(&new.location);
     if let Some(schema) = new.schema {
         map.insert(
             "schema".to_owned(),

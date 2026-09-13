@@ -53,11 +53,15 @@ pub fn ingest(engine: &Engine, path: &std::path::Path) -> crate::Result<IngestRe
 
     let mut source_random = [0u8; 10];
     engine.rng().fill(&mut source_random);
+    // Through `sources::markdown_config`, not `path.display()`. The store
+    // dedups on `(kind, config)`, so a bare path here and `{"location":…}` from
+    // `sources::add` were two sources for one folder — and `source sync` then
+    // pulled every note under both.
     let source_id = engine.store().upsert_source(
         dek,
         SourceId::new(now.utc_millis().unsigned_abs(), source_random),
         markdown::KIND_TAG,
-        &path.display().to_string(),
+        &crate::sources::markdown_config(path),
         engine.nonce(),
     )?;
 
@@ -2119,6 +2123,7 @@ fn verdict_source(engine: &Engine, holdout: bool) -> crate::Result<SourceId> {
 /// surface that renders advice, and makes someone decide what it says. A
 /// catch-all arm here is a stage a user is shown nothing useful for, and the
 /// whole reason this type exists is that such a gap is invisible.
+
 ///
 /// Every variant is produced by [`stage`] and by nothing else. A
 /// `ShortOfScore { have, need }` variant was briefly built by `fidelity`'s
