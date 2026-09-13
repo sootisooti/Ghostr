@@ -559,6 +559,115 @@ fn an_attestation_is_refused_until_the_scope_is_enabled() {
     assert!(relay.events().is_empty());
 }
 
+/// A note is refused when the manifest says the ghost may not post.
+///
+/// Two gates guard this, and the manifest is the one that is easy to forget.
+/// The scope is this device's consent; the policy is what the user told the
+/// world. A note that violates the published policy makes the manifest a lie,
+/// and a manifest nobody can rely on is worth less than none.
+#[tokio::test]
+async fn a_note_cannot_be_published_when_the_manifest_forbids_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = vault(tmp.path());
+
+    // The relay would take it — the refusal has to come from the vault, or this
+    // passes because the double said no rather than because the policy did.
+    let relay = ScopedRelay::with(&[PublishScope::GhostNotes]);
+
+    let err = ghost::publish_note(&engine, &relay, "hello")
+        .await
+        .expect_err("a fresh vault's ghost must not post");
+    assert!(
+        format!("{err}").contains("may not post"),
+        "refused for the wrong reason: {err}"
+    );
+    assert!(relay.events().is_empty());
+}
+
+/// And with the scope on, it posts — carrying its disclosure (I10).
+#[tokio::test]
+async fn every_ghost_note_carries_its_disclosure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = vault(tmp.path());
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "publish_scopes = [\"ghost_notes\"]\n",
+    )
+    .unwrap();
+
+    let relay = ScopedRelay::with(&[PublishScope::GhostNotes]);
+    let signed = ghost::publish_note(&engine, &relay, "walked to the river")
+        .await
+        .expect("publish");
+
+    assert_eq!(signed.event.kind, 1, "not a kind-1 note");
+    signed.verify().expect("a posted note must verify");
+
+    // Signed by the ghost key, never the identity key. A note signed by the
+    // person is the person writing; the whole point is that it is not.
+    let ghost_key = engine
+        .keystore()
+        .account_pubkey(ghostr_core::identity::Account::Ghost)
+        .unwrap();
+    let identity = engine
+        .keystore()
+        .account_pubkey(ghostr_core::identity::Account::Identity)
+        .unwrap();
+    assert_eq!(signed.event.pubkey, ghost_key);
+    assert_ne!(signed.event.pubkey, identity);
+
+    // The three tags §9.3 requires, checked as a set rather than by position.
+    let tags: Vec<Vec<String>> = signed.event.tags.clone();
+    assert!(
+        tags.iter()
+            .any(|t| t.as_slice() == ["ghostr", "v1", "ghost-authored"]),
+        "no ghost-authored marker: {tags:?}"
+    );
+    assert!(
+        tags.iter()
+            .any(|t| t.first().map(String::as_str) == Some("p")
+                && t.get(1) == Some(&identity.to_hex())),
+        "the note does not name its principal: {tags:?}"
+    );
+    assert!(
+        tags.iter()
+            .any(|t| t.first().map(String::as_str) == Some("client")),
+        "no client tag: {tags:?}"
+    );
+
+    // And the inbound check agrees, which is what a reader would run. Without
+    // this the tags could be well-formed for a writer and unreadable for anyone
+    // else.
+    assert!(
+        ghostr_nostr::codec::has_disclosure(&signed.event),
+        "a note this vault published does not read as disclosed"
+    );
+}
+
+/// A ghost note is never mirrored as NIP-78 application data.
+///
+/// The mirror exists so a reader who cannot resolve kind 3178x still gets the
+/// same bytes. A kind-1 note mirrored into kind 30078 would be a second copy
+/// whose disclosure tags a NIP-78 reader has no reason to look at — the one
+/// place I10 could be lost without anybody writing a line of code to lose it.
+#[test]
+fn a_ghost_note_has_no_nip78_mirror() {
+    use ghostr_core::identity::PublicKey;
+
+    let event = ghostr_nostr::codec::GhostNoteBuilder::new(
+        PublicKey::from_bytes([2; 32]),
+        PublicKey::from_bytes([3; 32]),
+    )
+    .content("anything")
+    .build(0)
+    .expect("build");
+
+    assert!(
+        ghostr_nostr::codec::mirror_as_nip78(&event).is_err(),
+        "a ghost note was mirrored, carrying its content without its disclosure"
+    );
+}
+
 /// Every published event is in the egress log (I5).
 ///
 /// The public kinds are where this matters most: what left is a plaintext claim

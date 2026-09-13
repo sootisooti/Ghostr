@@ -392,11 +392,19 @@ somebody else's notes is counted and reported, not silently ingested.
       without the number that discounts it (§4.4), and an unconverged score
       publishes flagged rather than being suppressed, since hiding them would
       make the published ones look like milestones rather than measurements.
-- [ ] A ghost-authored kind-1 note can be published under an explicit per-scope
-      opt-in, off by default. `GhostNoteBuilder` makes disclosure unforgeable at
-      construction — that part is done and its own criterion above is true — but
-      it has no caller outside its unit tests, there is no publishing scope, and
-      no CLI reaches it.
+- [x] A ghost-authored kind-1 note can be published under an explicit per-scope
+      opt-in, off by default. `ghostr ghost note --text`, signed by the ghost
+      key (`1'`) with `GhostNoteBuilder`'s disclosure tags, which it emits
+      itself — there is no setter and no other constructor, so an undisclosed
+      ghost note is not something a caller can get wrong (I10).
+
+      **Two gates, not one.** `PublishScope::GhostNotes` is this device's
+      consent; `GhostPolicy.may_publish_notes` in the published manifest is what
+      the user told the world their ghost may do. A note that violates the
+      published policy makes the manifest a lie, and a manifest nobody can rely
+      on is worth less than none. The policy is read from the manifest this
+      vault *would* publish rather than fetched, so a relay withholding it
+      cannot unblock a note the user forbade.
 
       **Split per SPEC §14 Q30**, because "ghost notes" was naming two products.
       This line is the one §9.3 specifies: user-written text published under the

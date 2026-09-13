@@ -459,6 +459,85 @@ pub async fn publish_attestation(
     Ok(payload)
 }
 
+/// Publishes a note under the ghost key, disclosed as ghost-authored.
+///
+/// # What this is, and what it is not (SPEC §14 Q30)
+///
+/// The user writes the text; the ghost key signs it. That is the feature §9.3
+/// specifies, it needs no model, and it is genuinely useful — a pen name whose
+/// disclosure tags are honest about which key held the pen.
+///
+/// It is **not** the ghost composing from the persona. That is what §1 promises
+/// and it routes through `LanguageModel` (I4), the egress gate (I5) and
+/// `Sensitivity` on every fact it would draw from the corpus, plus the refusal
+/// behaviour M4 lists. Shipping this under that name would pass a roadmap
+/// criterion while the feature stayed absent, which is how a third of this
+/// milestone went missing the first time.
+///
+/// # Two gates, not one
+///
+/// `PublishScope::GhostNotes` is *this device's* consent. `GhostPolicy
+/// .may_publish_notes` in the published manifest is what the user told the
+/// world their ghost may do. Both are required, and the second is the one that
+/// is easy to miss: a note that violates the published policy makes the
+/// manifest a lie, and a manifest nobody can rely on is worth less than none.
+///
+/// The policy is read from the manifest this vault *would* publish rather than
+/// fetched from a relay. Fetching would make posting depend on a network round
+/// trip to learn a fact the vault already holds, and a relay that withheld the
+/// manifest could then unblock a note the user had forbidden.
+///
+/// # Errors
+///
+/// Returns an error if the vault is locked, either gate refuses, the text is
+/// empty, or every relay refused.
+pub async fn publish_note(
+    engine: &Engine,
+    relays: &dyn RelayClient,
+    text: &str,
+) -> crate::Result<ghostr_crypto::event::SignedEvent> {
+    let policy = engine.config()?.ghost_policy();
+    if !policy.may_publish_notes {
+        return Err(crate::Error::Config {
+            detail: "this vault's manifest says its ghost may not post;                      enable the `ghost_notes` publish scope first"
+                .to_owned(),
+        });
+    }
+
+    let ghost_pubkey = engine.keystore().account_pubkey(Account::Ghost)?;
+    let principal = engine.keystore().account_pubkey(Account::Identity)?;
+
+    // `GhostNoteBuilder` is the only constructor and it emits the disclosure
+    // tags itself, so an undisclosed ghost note is not something this function
+    // could get wrong even by trying (I10).
+    let event = ghostr_nostr::codec::GhostNoteBuilder::new(ghost_pubkey, principal)
+        .content(text)
+        .build(engine.now().utc_millis().unsigned_abs() / 1000)?;
+
+    // Signed by the ghost key, which is the whole point: a reader checking the
+    // signature learns it was the ghost and not the person, and the `p` tag
+    // tells them whose ghost.
+    let key = engine.keystore().key_ref(Account::Ghost)?;
+    let sig = engine.keystore().sign_event(key, &event).await?;
+    let signed = ghostr_crypto::event::SignedEvent {
+        id: event.id(),
+        event,
+        sig,
+    };
+
+    crate::sync::publish_logged(
+        engine,
+        relays,
+        signed.clone(),
+        PublishScope::GhostNotes,
+        "ghost_note",
+        false,
+    )
+    .await?;
+
+    Ok(signed)
+}
+
 /// What a reader learns from an attestation they did not write.
 ///
 /// The half that makes the claim checkable rather than merely publishable. A

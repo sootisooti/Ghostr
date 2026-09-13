@@ -212,6 +212,22 @@ enum GhostCommand {
         #[arg(long)]
         reason: String,
     },
+
+    /// Post a note under the ghost key, marked as ghost-authored.
+    ///
+    /// **You write the text; the ghost key signs it.** The ghost does not
+    /// compose — that is a different feature and it is not built (SPEC §14
+    /// Q30). What this gives you is a pen name whose disclosure tags are honest
+    /// about which key held the pen.
+    ///
+    /// Needs the `ghost_notes` publish scope, and your published manifest must
+    /// say the ghost may post. Both, because a note contradicting your own
+    /// manifest makes the manifest worthless.
+    Note {
+        /// The text to publish.
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -408,6 +424,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Ghost(GhostCommand::Publish) => cmd_ghost_publish(&dir, GhostStatus::Active),
         Command::Ghost(GhostCommand::Suspend) => cmd_ghost_publish(&dir, GhostStatus::Suspended),
         Command::Ghost(GhostCommand::Revoke { reason }) => cmd_ghost_revoke(&dir, &reason),
+        Command::Ghost(GhostCommand::Note { text }) => cmd_ghost_note(&dir, &text),
         Command::Source(SourceCommand::List) => cmd_source_list(&dir),
         Command::Source(SourceCommand::Sync { id }) => cmd_source_sync(&dir, id.as_deref()),
         Command::Thread(ThreadCommand::List) => cmd_thread_list(&dir),
@@ -615,6 +632,28 @@ fn cmd_ghost_revoke(dir: &std::path::Path, reason: &str) -> Result<()> {
              try the notice again."
         );
     }
+    Ok(())
+}
+
+/// Posts a note under the ghost key.
+fn cmd_ghost_note(dir: &std::path::Path, text: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let signed = block_on(ghostr_engine::ghost::publish_note(&engine, &relays, text))
+        .context("publishing the ghost note")?;
+
+    // The tags are printed rather than summarised. They are the difference
+    // between a pen name and an impersonation, and a user posting under a
+    // second key should see exactly what the world is told about it (I10).
+    println!("posted {}", signed.id.short());
+    println!("\nevery reader sees these tags:");
+    for tag in &signed.event.tags {
+        println!("  {}", tag.join(" "));
+    }
+    println!(
+        "\nsigned by the ghost key, not yours. The `p` tag names you as the\n\
+         principal, so nobody can read this as something you wrote yourself."
+    );
     Ok(())
 }
 
