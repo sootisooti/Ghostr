@@ -79,6 +79,19 @@ pub enum Error {
     #[error(transparent)]
     Anchor(#[from] ghostr_anchor::Error),
     /// A relay or nostr codec error.
-    #[error("nostr error")]
+    ///
+    /// Transparent, like [`Error::Anchor`]. It said only "nostr error" for as
+    /// long as the only thing publishing was `sync`, where the outcome is a
+    /// count the user reads anyway. The public surface made that a dead end: a
+    /// user who has not enabled the `manifest` scope ran `ghostr ghost publish`
+    /// and was told "nostr error", when the crate underneath had said
+    /// *publishing is disabled for scope `Manifest`* — the one sentence that
+    /// names the fix.
+    ///
+    /// Safe to pass through: every message in that crate names a kind, a scope,
+    /// a relay URL or a count. None carries key material or memory content
+    /// (I8), and the relay URL is one the user configured and is about to be
+    /// told is unreachable.
+    #[error(transparent)]
     Nostr(#[from] ghostr_nostr::Error),
 }

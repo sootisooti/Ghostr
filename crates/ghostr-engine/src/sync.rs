@@ -106,7 +106,7 @@ const PUBLISH_JITTER_SECS: u32 = 6 * 60 * 60;
 /// Returns an error if the log cannot be written. A publish whose record fails
 /// is reported as a failure even if the relay accepted it: proceeding with an
 /// unrecorded egress is precisely what the user was told could not happen.
-async fn publish_logged(
+pub(crate) async fn publish_logged(
     engine: &Engine,
     relays: &dyn RelayClient,
     event: ghostr_crypto::event::SignedEvent,

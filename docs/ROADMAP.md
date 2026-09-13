@@ -347,11 +347,27 @@ somebody else's notes is counted and reported, not silently ingested.
       rebuilds a chain from a relay that holds no 3178x event at all. Until
       this, `mirror_as_nip78` was called by nothing outside its own unit tests
       — the fallback this criterion leans on was documented and absent.
-- [ ] A `GhostManifest` can be created, signed and revoked from the CLI.
-      `GhostManifest` exists as a type in `ghostr-nostr` and is exercised by its
-      codec tests. Nothing in `ghostr-engine` or `ghostr-cli` names it, and
-      there is no `ghost` subcommand, so account `1'` is derivable and has never
-      been used.
+- [x] A `GhostManifest` can be created, signed and revoked from the CLI.
+      `ghostr ghost show | publish | suspend | revoke`, signed by the identity
+      key (`0'`) and naming the ghost key (`1'`), which until now was derivable
+      and had never been used. Republishing replaces rather than accumulates —
+      the `d` tag is the chain id, so a status change supersedes; a per-publish
+      identifier would leave a revoked ghost's `Active` manifest on the relay
+      beside its revocation with no rule for which a reader should believe
+      (`a_second_manifest_replaces_the_first`).
+
+      **A revocation publishes from a vault that has enabled nothing.** Its
+      manifest update rides `PublishScope::Revocation`, the one always-permitted
+      scope, rather than `Manifest` — which is how it was first written, and
+      which inverted the exemption exactly: the person most likely to have
+      publishing switched off is the person who never wanted their ghost public,
+      and they are no less entitled to say it no longer speaks for them
+      (`a_revocation_publishes_with_every_scope_disabled`).
+
+      Proceeds under SPEC §14 Q27's reading of I9, held to account by
+      `no_public_field_is_derived_from_the_corpus` rather than assumed: every
+      field of the published JSON must be a key, a hash, a count, or a value the
+      user typed. If a human answers Q27 the other way, that test is what fails.
 - [ ] A `FidelityAttestation` can be published, and a reader can check its
       signature and its chain link. Same shape: the type and its codec are in
       `ghostr-nostr` with tests; no engine op and no `publish attestation`
@@ -363,6 +379,16 @@ somebody else's notes is counted and reported, not silently ingested.
       construction — that part is done and its own criterion above is true — but
       it has no caller outside its unit tests, there is no publishing scope, and
       no CLI reaches it.
+
+      **Split per SPEC §14 Q30**, because "ghost notes" was naming two products.
+      This line is the one §9.3 specifies: user-written text published under the
+      ghost key with unforgeable disclosure, no model involved. Ghost-*composed*
+      notes — the thing §1 actually promises — route through `LanguageModel`
+      (I4), the egress gate (I5) and `Sensitivity` on every fact drawn from the
+      corpus, and belong to M4's "ghost speaks" alongside its refusal behaviour.
+      Shipping the first under the second's name would pass this criterion while
+      the feature stays absent, which is how a third of this milestone went
+      missing the first time.
 - [ ] `has_disclosure` is called by something. It is the inbound half: a third
       party can publish a kind-1 note *claiming* to be a ghost without the tags,
       and the feed adapter ingests kind-1 notes today without asking. Whether
@@ -371,9 +397,15 @@ somebody else's notes is counted and reported, not silently ingested.
 **These four were in M3's scope list from the start and were never built.** The
 exit criteria above did not cover them, so "every exit criterion is met" was
 true and read as "M3 is done" — which is how a third of a milestone goes missing
-without any check failing. They are listed here, unchecked, rather than moved to
-M4: the milestone that claims to ship "an optional public attestation" has not
-shipped one.
+without any check failing. They were listed here, unchecked, rather than moved
+to M4: the milestone that claims to ship "an optional public attestation" had
+not shipped one.
+
+**The manifest is now built; three remain.** Building it turned up two things
+the docs had never had to settle, both now in SPEC §14 rather than decided in a
+function body: whether a plaintext public event can exist at all given I9 (Q27),
+and whether publishing counts as egress for I5's logging clause (Q28 — it does,
+and did not, so `ghostr egress` was silent about everything sent to a relay).
 
 **Not in M3:** GUI, third-party verifier tooling. RSS ingest was in the scope
 list and is not built either; it is the least load-bearing of these, since the

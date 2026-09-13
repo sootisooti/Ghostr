@@ -971,6 +971,31 @@ than a claim: a third party fetches the manifest, verifies the identity key's
 signature, and now knows which pubkey the user vouches for. Revocation is a
 manifest update with `status: Revoked` — no key burning, no social-graph loss.
 
+**Built**, as `ghostr ghost show | publish | suspend | revoke`. Four properties
+are worth stating because each was a decision rather than a consequence:
+
+- **The identity key signs it, never the ghost key.** The document is a person's
+  statement *about* a ghost; signed by the ghost it would be the ghost vouching
+  for itself, which is not evidence of anything.
+- **The `d` tag is the chain id**, so republishing supersedes. A per-publish
+  identifier would leave a revoked ghost's `Active` manifest on the relay beside
+  its revocation, and a reader picking either would be right.
+- **Revocation publishes two events and the manifest goes first.** §8.2's
+  manifest update is what a reader resolving the binding sees; the kind-31788
+  notice is the push half, since a reader who already cached the manifest has no
+  reason to re-fetch it. Ordered so that a reader who sees the notice and then
+  resolves the binding never finds an `Active` ghost contradicting it.
+- **Both ride `PublishScope::Revocation`**, which is always permitted. Publishing
+  the manifest update under `Manifest` — which is how it was first written —
+  inverts the exemption: the person most likely to have publishing switched off
+  is the person who never wanted their ghost public, and they are no less
+  entitled to say it no longer speaks for them.
+
+The `policy` field is derived from the vault's enabled publish scopes rather
+than configured separately, so a manifest cannot promise the ghost will not post
+while the `ghost_notes` scope is on. A public document contradicted by local
+config is worse than no document, because a reader cannot see the contradiction.
+
 ### 8.3 Signing
 
 All signing goes through a `Signer` trait (ARCHITECTURE §4). Implementations:

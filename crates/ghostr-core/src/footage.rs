@@ -270,6 +270,29 @@ impl CommitmentVersion {
     pub const fn current() -> Self {
         Self::WithQuests
     }
+
+    /// The number a [`GhostManifest`] publishes as `chain_version`.
+    ///
+    /// **Frozen.** It goes into a public document that tells a third party
+    /// which rules to verify a chain under, and those documents are permanent —
+    /// renumbering a variant would make every manifest already on a relay
+    /// describe the wrong scheme. `1` is the pre-quest scheme rather than `0`
+    /// so that a manifest missing the field is distinguishable from one
+    /// claiming the original.
+    ///
+    /// No wildcard arm. `#[non_exhaustive]` binds downstream crates, not this
+    /// one, so a new variant is a compile error here — which is the right
+    /// outcome: a scheme that reaches a public document without anyone
+    /// choosing its number is a reader told the wrong rules and given a
+    /// confident wrong answer. `0` is left unused so that "no number" stays
+    /// distinguishable from any real one.
+    #[must_use]
+    pub const fn as_u16(self) -> u16 {
+        match self {
+            Self::MemoriesOnly => 1,
+            Self::WithQuests => 2,
+        }
+    }
 }
 
 /// The head of the chain.

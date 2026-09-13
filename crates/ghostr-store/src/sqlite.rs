@@ -258,6 +258,24 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// When the chain was created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if it is missing or
+    /// malformed.
+    pub fn created_at(&self) -> crate::Result<Timestamp> {
+        let text = self
+            .meta(meta_key::CREATED_AT)?
+            .ok_or(crate::Error::Backend {
+                operation: "store has no creation time",
+            })?;
+        let millis: i64 = text.parse().map_err(|_| crate::Error::Backend {
+            operation: "parse creation time",
+        })?;
+        Ok(Timestamp::new(millis, 0))
+    }
+
     /// The chain identifier recorded at init.
     ///
     /// # Errors
@@ -265,9 +283,11 @@ impl SqliteStore {
     /// Returns [`Error::Backend`](crate::Error::Backend) if it is missing or
     /// malformed.
     pub fn chain_id(&self) -> crate::Result<ChainId> {
-        let text = self.meta(meta_key::CHAIN_ID)?.ok_or(crate::Error::Backend {
-            operation: "store has no chain id",
-        })?;
+        let text = self
+            .meta(meta_key::CHAIN_ID)?
+            .ok_or(crate::Error::Backend {
+                operation: "store has no chain id",
+            })?;
         ChainId::parse(&text).map_err(|_| crate::Error::Backend {
             operation: "parse chain id",
         })

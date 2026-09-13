@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
+use ghostr_core::identity::GhostStatus;
 use ghostr_crypto::secret::SecretString;
 use ghostr_engine::config::Config;
 use ghostr_engine::engine::Engine;
@@ -168,6 +169,41 @@ enum Command {
     /// Cheap: the journal is encrypted under a key the passphrase does not
     /// touch, so this rewraps the seed rather than re-encrypting the corpus.
     Passphrase,
+
+    /// The public claim: who your ghost is, and whether it still speaks for you.
+    #[command(subcommand)]
+    Ghost(GhostCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum GhostCommand {
+    /// Print the manifest this vault would publish, without publishing it.
+    Show,
+
+    /// Publish the manifest, so a stranger can check the ghost is yours.
+    ///
+    /// Public and plaintext, unlike everything else this vault sends: the
+    /// document's whole job is to be readable by someone who has only your
+    /// identity key (SPEC §8.2).
+    Publish,
+
+    /// Pause the ghost without revoking it.
+    ///
+    /// A manifest update with `status: Suspended`. Reversible by publishing
+    /// again — unlike `revoke`, which is a statement about a key rather than
+    /// about a mood.
+    Suspend,
+
+    /// Revoke the ghost key.
+    ///
+    /// Publishes the manifest as `Revoked` and a standalone notice beside it,
+    /// so a reader who already cached the manifest hears about it too. No key
+    /// is burned: derive a new ghost key and publish a new manifest.
+    Revoke {
+        /// Why, in your own words. Published verbatim.
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -360,6 +396,10 @@ fn run(cli: Cli) -> Result<()> {
             &relays,
             &kind_filters,
         ),
+        Command::Ghost(GhostCommand::Show) => cmd_ghost_show(&dir),
+        Command::Ghost(GhostCommand::Publish) => cmd_ghost_publish(&dir, GhostStatus::Active),
+        Command::Ghost(GhostCommand::Suspend) => cmd_ghost_publish(&dir, GhostStatus::Suspended),
+        Command::Ghost(GhostCommand::Revoke { reason }) => cmd_ghost_revoke(&dir, &reason),
         Command::Source(SourceCommand::List) => cmd_source_list(&dir),
         Command::Source(SourceCommand::Sync { id }) => cmd_source_sync(&dir, id.as_deref()),
         Command::Thread(ThreadCommand::List) => cmd_thread_list(&dir),
@@ -518,6 +558,56 @@ fn relay_client(engine: &Engine) -> Result<ghostr_nostr::client::websocket::Webs
         config.relays.clone(),
         config.enabled_scopes(),
     ))
+}
+
+/// Prints the manifest this vault would publish.
+///
+/// Reads nothing from the network and sends nothing. The point is that a user
+/// can see exactly what becomes public *before* it does — a public document is
+/// permanent, and "publish and see" is not an option a relay offers.
+fn cmd_ghost_show(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let manifest = ghostr_engine::ghost::manifest(&engine, GhostStatus::Active)?;
+    println!("{}", render::manifest(&manifest));
+    Ok(())
+}
+
+/// Publishes the manifest.
+fn cmd_ghost_publish(dir: &std::path::Path, status: GhostStatus) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let manifest = block_on(ghostr_engine::ghost::publish_manifest(
+        &engine, &relays, status,
+    ))
+    .context("publishing the ghost manifest")?;
+
+    println!("{}", render::manifest(&manifest));
+    println!("\npublished — this is now readable by anyone who has your npub");
+    Ok(())
+}
+
+/// Revokes the ghost key.
+fn cmd_ghost_revoke(dir: &std::path::Path, reason: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let outcome = block_on(ghostr_engine::ghost::revoke(&engine, &relays, reason))
+        .context("revoking the ghost")?;
+
+    println!("{}", render::manifest(&outcome.manifest));
+    if outcome.notice_published {
+        println!("\nrevoked — the manifest says so, and a notice was sent beside it");
+    } else {
+        // Said out loud rather than swallowed. The revocation *has* taken
+        // effect where it is defined, and a reader who already cached the
+        // manifest will not learn about it until they look again.
+        println!(
+            "\nrevoked — the manifest says so.\n\
+             The standalone notice did not reach a relay, so anyone holding a\n\
+             cached manifest will not be told until they re-fetch it. Re-run to\n\
+             try the notice again."
+        );
+    }
+    Ok(())
 }
 
 /// Publishes sealed footage to relays.

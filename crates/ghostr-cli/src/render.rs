@@ -1262,6 +1262,59 @@ fn local_addresses(port: u16) -> Vec<String> {
     out
 }
 
+/// Renders a ghost manifest as the public document it is.
+///
+/// Every field, spelled out. This is the one thing a vault publishes that
+/// anyone can read, and it is permanent — so the rendering is for deciding
+/// whether to publish, not for skimming afterwards. A summary would hide the
+/// field a user would have objected to.
+pub(crate) fn manifest(m: &ghostr_nostr::payload::GhostManifest) -> String {
+    use ghostr_core::identity::GhostStatus;
+
+    let status = match m.status {
+        GhostStatus::Active => "active",
+        GhostStatus::Suspended => "suspended — paused, not revoked",
+        GhostStatus::Revoked => "revoked — this key no longer speaks for you",
+        // `GhostStatus` is a domain type a third party may match on, so the
+        // wildcard is required. Saying so beats guessing: a status this build
+        // does not know, rendered as "active", is a revoked ghost reported as
+        // live.
+        _ => "unrecognised — this build is older than the manifest",
+    };
+
+    let permits = |on: bool| if on { "yes" } else { "no" };
+
+    format!(
+        "ghost   {}\n\
+         chain   {}\n\
+         genesis {}\n\
+         persona v{}\n\
+         scheme  v{}\n\
+         device  {}\n\
+         status  {status}\n\
+         \n\
+         may publish notes   {}\n\
+         may reply           {}\n\
+         publishes fidelity  {}\n\
+         \n\
+         Everything above becomes public when you publish it, and a relay keeps\n\
+         it. Nothing from your journal is in it.",
+        m.ghost_pubkey.to_hex(),
+        m.chain_id.as_uuid(),
+        m.genesis_link.short(),
+        m.persona_ordinal,
+        m.chain_version,
+        if m.sealing_device.is_empty() {
+            "none — this vault predates device ids"
+        } else {
+            &m.sealing_device
+        },
+        permits(m.policy.may_publish_notes),
+        permits(m.policy.may_reply),
+        permits(m.policy.publishes_fidelity),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

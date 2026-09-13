@@ -102,26 +102,6 @@ impl EgressLog for StoreEgressLog {
     }
 }
 
-/// Appends one entry to the vault's egress log.
-///
-/// The synchronous half of [`StoreEgressLog::record`], for callers that already
-/// hold the store and are not inside a model call. Both go through
-/// [`to_record`], so a row written by a relay publish and one written by the
-/// gate cannot describe themselves differently.
-///
-/// # Errors
-///
-/// Returns [`Error::Store`](crate::Error::Store) if the append fails. Callers
-/// must treat that as fatal to the request: an egress that could not be
-/// recorded is the thing the user was told cannot happen (I5).
-pub fn record_egress(
-    store: &ghostr_store::sqlite::SqliteStore,
-    entry: &EgressEntry,
-) -> crate::Result<()> {
-    store.append_egress(&to_record(entry))?;
-    Ok(())
-}
-
 /// Converts a gate entry into a stored row.
 fn to_record(entry: &EgressEntry) -> EgressRecord {
     EgressRecord {
