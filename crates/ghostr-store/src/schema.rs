@@ -455,6 +455,15 @@ pub mod meta_key {
     pub const DEVICE_ROLE: &str = "device_role";
     /// When the chain was created, as Unix milliseconds.
     pub const CREATED_AT: &str = "created_at";
+    /// This installation's identifier, hex.
+    ///
+    /// Per *install*, not per chain: `restore` mints a fresh one rather than
+    /// copying the sealer's, so two machines holding one seed hold different
+    /// ids. That is the whole of what it buys — a `GhostManifest` naming one of
+    /// them is a statement a verifier can check against the links a chain
+    /// actually produced (SPEC §8.2, §14 Q29). It does not detect a deliberately
+    /// cloned vault, and nothing here should be read as claiming it does.
+    pub const DEVICE_ID: &str = "device_id";
 }
 
 #[cfg(test)]

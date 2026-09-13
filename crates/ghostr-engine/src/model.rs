@@ -102,6 +102,26 @@ impl EgressLog for StoreEgressLog {
     }
 }
 
+/// Appends one entry to the vault's egress log.
+///
+/// The synchronous half of [`StoreEgressLog::record`], for callers that already
+/// hold the store and are not inside a model call. Both go through
+/// [`to_record`], so a row written by a relay publish and one written by the
+/// gate cannot describe themselves differently.
+///
+/// # Errors
+///
+/// Returns [`Error::Store`](crate::Error::Store) if the append fails. Callers
+/// must treat that as fatal to the request: an egress that could not be
+/// recorded is the thing the user was told cannot happen (I5).
+pub fn record_egress(
+    store: &ghostr_store::sqlite::SqliteStore,
+    entry: &EgressEntry,
+) -> crate::Result<()> {
+    store.append_egress(&to_record(entry))?;
+    Ok(())
+}
+
 /// Converts a gate entry into a stored row.
 fn to_record(entry: &EgressEntry) -> EgressRecord {
     EgressRecord {
@@ -181,19 +201,41 @@ const fn task_tag(task: TaskKind) -> &'static str {
         TaskKind::QuestGeneration => "quest_generation",
         TaskKind::Conversation => "conversation",
         TaskKind::Embedding => "embedding",
-        _ => "unknown",
+        TaskKind::RelayPublish => "relay_publish",
+        TaskKind::Unrecognised => UNRECOGNISED_TASK,
+        // `TaskKind` is `#[non_exhaustive]`, so this arm is required and cannot
+        // be removed. It stores the fact that the build did not recognise the
+        // task rather than guessing one — a variant added upstream and silently
+        // filed as something else is a log that misreports what left the
+        // device, which is the only thing the log is for.
+        _ => UNRECOGNISED_TASK,
     }
 }
 
+/// What an unrecognised task stores and reads back as.
+///
+/// One constant, named, so the write side and the read side cannot drift into
+/// disagreeing about which string means "this build did not know".
+const UNRECOGNISED_TASK: &str = "unrecognised";
+
 /// Reads a stored task tag.
+///
+/// Every tag [`task_tag`] can write reads back as the task that wrote it. That
+/// sounds obvious and was not true: the old fallback arm read *any* unknown tag
+/// as [`TaskKind::Conversation`], so a row written by a newer build came back
+/// claiming the user had talked to their ghost. An audit log that invents a
+/// plausible reason is worse than one that admits it does not know, because
+/// only one of the two is visibly wrong.
 fn parse_task(tag: &str) -> TaskKind {
     match tag {
         "extraction" => TaskKind::Extraction,
         "summarization" => TaskKind::Summarization,
         "distillation" => TaskKind::Distillation,
         "quest_generation" => TaskKind::QuestGeneration,
+        "conversation" => TaskKind::Conversation,
         "embedding" => TaskKind::Embedding,
-        _ => TaskKind::Conversation,
+        "relay_publish" => TaskKind::RelayPublish,
+        _ => TaskKind::Unrecognised,
     }
 }
 
@@ -289,6 +331,63 @@ mod tests {
 
     use super::*;
 
+    /// Every task survives a trip through the store.
+    ///
+    /// The log is append-only and permanent, so a row that reads back as a
+    /// different task than it was written as is a permanent lie about what left
+    /// the device. `parse_task` used to answer any unknown tag with
+    /// `Conversation`, which meant a `relay_publish` row written by a newer
+    /// build showed up in `ghostr egress` as the user talking to their ghost.
+    ///
+    /// Driven off an explicit list rather than a derive, so adding a variant
+    /// without teaching both halves about it fails here.
+    ///
+    /// Replaces `every_task_tag_round_trips`, which asserted the same thing
+    /// over the six variants that all had explicit arms — so it never reached
+    /// the fallback, which was the only arm that was wrong. It stayed green
+    /// through the entire life of the bug.
+    #[test]
+    fn every_task_reads_back_as_the_task_that_was_written() {
+        const EVERY: [TaskKind; 8] = [
+            TaskKind::Extraction,
+            TaskKind::Summarization,
+            TaskKind::Distillation,
+            TaskKind::QuestGeneration,
+            TaskKind::Conversation,
+            TaskKind::Embedding,
+            TaskKind::RelayPublish,
+            TaskKind::Unrecognised,
+        ];
+        for task in EVERY {
+            assert_eq!(
+                parse_task(task_tag(task)),
+                task,
+                "{task:?} does not survive the round trip"
+            );
+        }
+
+        // And the tags are distinct, or the round trip above passes while two
+        // tasks share a row shape.
+        let mut tags: Vec<&str> = EVERY.iter().map(|t| task_tag(*t)).collect();
+        tags.sort_unstable();
+        let before = tags.len();
+        tags.dedup();
+        assert_eq!(before, tags.len(), "two tasks store the same tag: {tags:?}");
+    }
+
+    /// A tag this build has never seen reads as unrecognised, not as a task.
+    ///
+    /// The forward-compatibility half: a vault written by a newer Ghostr and
+    /// read by an older one must not have its audit log silently reinterpreted.
+    #[test]
+    fn an_unknown_tag_is_not_given_a_plausible_reason() {
+        assert_eq!(
+            parse_task("something_from_the_future"),
+            TaskKind::Unrecognised
+        );
+        assert_eq!(parse_task(""), TaskKind::Unrecognised);
+    }
+
     fn entry(decision: EgressDecision) -> EgressEntry {
         EgressEntry {
             at: Timestamp::new(1_700_000_000_000, 0),
@@ -373,19 +472,5 @@ mod tests {
     #[test]
     fn an_unknown_task_name_is_dropped() {
         assert!(known_task("everything").is_none());
-    }
-
-    #[test]
-    fn every_task_tag_round_trips() {
-        for task in [
-            TaskKind::Extraction,
-            TaskKind::Summarization,
-            TaskKind::Distillation,
-            TaskKind::QuestGeneration,
-            TaskKind::Conversation,
-            TaskKind::Embedding,
-        ] {
-            assert_eq!(parse_task(task_tag(task)), task);
-        }
     }
 }

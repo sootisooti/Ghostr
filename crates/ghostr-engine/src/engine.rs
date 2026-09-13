@@ -158,6 +158,17 @@ impl Engine {
         let store = SqliteStore::open(dir)?;
         store.init_chain(chain_id, &identity, genesis_link, home_tz, now)?;
 
+        // Minted here rather than lazily on first read. A device id that
+        // appears when something first asks for one is a different id on every
+        // machine that opens the same restored vault, which is the opposite of
+        // what a manifest names it for (SPEC §14 Q29).
+        {
+            let mut bytes = [0u8; 16];
+            rng.fill(&mut bytes);
+            let id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+            store.set_meta(ghostr_store::schema::meta_key::DEVICE_ID, &id)?;
+        }
+
         Ok((
             Self {
                 dir: dir.to_path_buf(),
@@ -230,6 +241,49 @@ impl Engine {
             },
         )?;
         Ok(())
+    }
+
+    /// This installation's identifier.
+    ///
+    /// Minted at `init` and at `restore`, never copied between them, so two
+    /// machines restored from one seed hold different ids. A
+    /// [`GhostManifest`](ghostr_nostr::payload::GhostManifest) names one of
+    /// them, which is what lets a third party notice two devices sealing the
+    /// same chain (SPEC §8.2, §14 Q29).
+    ///
+    /// Not a secret and not a fingerprint of one: sixteen random bytes that
+    /// mean nothing on their own. It goes into a public document, so it must
+    /// not be derived from the seed — a value a verifier can recompute from an
+    /// identity key is a value that links every vault sharing that key.
+    ///
+    /// A vault predating this field reports `None` rather than minting one on
+    /// read: a device id that appears at first read is a different id on every
+    /// machine that reads the same restored vault, which is the opposite of
+    /// what the field is for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be read.
+    pub fn device_id(&self) -> crate::Result<Option<String>> {
+        Ok(self.store.meta(ghostr_store::schema::meta_key::DEVICE_ID)?)
+    }
+
+    /// Mints and records this installation's identifier.
+    ///
+    /// Overwrites, deliberately: `restore` calls this on a vault whose rows
+    /// came from the sealer, and keeping the sealer's id there would make a
+    /// manifest claim the replica is the sealing device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be written.
+    pub fn mint_device_id(&self) -> crate::Result<String> {
+        let mut bytes = [0u8; 16];
+        self.rng().fill(&mut bytes);
+        let id = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        self.store
+            .set_meta(ghostr_store::schema::meta_key::DEVICE_ID, &id)?;
+        Ok(id)
     }
 
     /// Changes the passphrase that unlocks this vault.

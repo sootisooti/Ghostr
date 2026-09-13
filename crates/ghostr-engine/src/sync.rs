@@ -72,6 +72,128 @@ pub struct RestoreReport {
 /// rather than about the footage.
 const PUBLISH_JITTER_SECS: u32 = 6 * 60 * 60;
 
+/// Publishes one event and records it in the egress log.
+///
+/// **Every publish goes through here.** I5 says nothing leaves the device
+/// without passing the egress policy *and being written to the egress log*, and
+/// the relay path used to do only the first half: `PublishScope` gated it, and
+/// nothing was written anywhere. `ghostr egress` showed model calls and was
+/// silent about everything sent to a relay (SPEC §14 Q28).
+///
+/// That was survivable while the only thing leaving was ciphertext a relay
+/// cannot read. It stopped being survivable with the M3 public surface, where
+/// what leaves is a plaintext claim signed by the identity key — a user
+/// auditing what their vault has said about them in public would have found
+/// nothing.
+///
+/// # What the entry may contain
+///
+/// The relay, the kind, the scope, and a byte count. No payload, and **no
+/// digest of one for an encrypted kind**: a digest of self-encrypted ciphertext
+/// identifies that exact event to anyone holding both, which makes the audit
+/// log a correlation handle rather than an audit aid. A public kind is already
+/// world-readable, so its digest costs nothing and is worth keeping — it is
+/// what lets a user prove later which manifest they published.
+///
+/// # Recorded even when the relay refuses
+///
+/// A refused publish still opened a connection and still sent bytes. A log that
+/// only recorded successes would understate what the network saw, which is the
+/// opposite of what it is for.
+///
+/// # Errors
+///
+/// Returns an error if the log cannot be written. A publish whose record fails
+/// is reported as a failure even if the relay accepted it: proceeding with an
+/// unrecorded egress is precisely what the user was told could not happen.
+async fn publish_logged(
+    engine: &Engine,
+    relays: &dyn RelayClient,
+    event: ghostr_crypto::event::SignedEvent,
+    scope: PublishScope,
+    kind_tag: &str,
+    encrypted: bool,
+) -> crate::Result<ghostr_nostr::client::PublishReport> {
+    let bytes = u32::try_from(event.event.content.len()).unwrap_or(u32::MAX);
+    let digest = if encrypted {
+        None
+    } else {
+        Some(
+            ghostr_core::hash::tagged_hash(
+                ghostr_core::hash::Tag::Egress,
+                event.event.content.as_bytes(),
+            )
+            .to_hex(),
+        )
+    };
+    let at = engine.now();
+
+    let outcome = relays.publish(event, scope).await;
+
+    // The store row is written directly rather than through
+    // `ghostr_llm::EgressEntry`. That crate — and `crate::model` with it — is
+    // behind the `llm` feature, and a vault compiled without a model still
+    // publishes to relays and still owes the user a record of it. Routing this
+    // through the model path would make I5 hold only for builds that can call a
+    // model, which is the one shape of build where the least leaves the device.
+    let record = ghostr_store::sqlite::EgressRecord {
+        at,
+        // Not a relay URL. A `RelayClient` may hold several and the report does
+        // not say which accepted, so naming one would be a guess; `relay:` plus
+        // the kind is what this log can say truthfully today.
+        provider: format!("relay:{kind_tag}"),
+        task: "relay_publish".to_owned(),
+        // A relay refusing is not the policy denying. The scope already said
+        // yes — that is why bytes went out — so recording a refusal as a deny
+        // would claim the vault withheld something it in fact sent.
+        decision: "allow".to_owned(),
+        deny_reason: None,
+        policy_id: format!("publish_scope:{}", scope_tag(scope)),
+        bytes_sent: bytes,
+        payload_digest: digest,
+        // Nothing here is pseudonymised: a payload is either ciphertext or a
+        // public document the user chose the words of.
+        entities: 0,
+    };
+    engine.store().append_egress(&record)?;
+
+    // An `Ok` whose `accepted` list is empty is not a publish. Every relay
+    // refused, or none was reachable, and the bytes are nowhere — so returning
+    // it as success let `sync` count the day as backed up. A vault that
+    // believes it has a backup and does not is worse than one that knows it has
+    // none, which is the same reasoning the author check in `sync` already
+    // carries; this path simply did not apply it to its own result.
+    match outcome {
+        Ok(report) if report.accepted.is_empty() => Err(crate::Error::Config {
+            detail: "every relay refused the event".to_owned(),
+        }),
+        Ok(report) => Ok(report),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The stored name of a publish scope.
+///
+/// Hand-written and exhaustive rather than `{scope:?}`: the string lands in an
+/// append-only audit row, so a variant rename would silently change what past
+/// rows appear to say.
+const fn scope_tag(scope: PublishScope) -> &'static str {
+    match scope {
+        PublishScope::Backup => "backup",
+        PublishScope::Manifest => "manifest",
+        PublishScope::AnchorReceipts => "anchor_receipts",
+        PublishScope::Fidelity => "fidelity",
+        PublishScope::GhostNotes => "ghost_notes",
+        PublishScope::Revocation => "revocation",
+        PublishScope::RemoteSigner => "remote_signer",
+        // `PublishScope` is `#[non_exhaustive]`. Required, and it records that
+        // the build did not recognise the scope rather than naming one it did
+        // — a row claiming `backup` for a scope this build has never heard of
+        // is an audit log that misreports why bytes left.
+        _ => "unrecognised",
+    }
+}
+
 /// The `d` tag identifying one day's footage backup.
 fn footage_identifier(seq: u64) -> String {
     format!("{seq}")
@@ -184,7 +306,16 @@ pub async fn sync(engine: &Engine, relays: &dyn RelayClient) -> crate::Result<Sy
                 sig,
             };
 
-            match relays.publish(signed, PublishScope::Backup).await {
+            match publish_logged(
+                engine,
+                relays,
+                signed,
+                PublishScope::Backup,
+                "footage",
+                true,
+            )
+            .await
+            {
                 Ok(_) => report.published += 1,
                 Err(_) => {
                     // The mirror of a day that is not there is not worth
@@ -207,7 +338,16 @@ pub async fn sync(engine: &Engine, relays: &dyn RelayClient) -> crate::Result<Sy
             event: mirror,
             sig: mirror_sig,
         };
-        match relays.publish(signed_mirror, PublishScope::Backup).await {
+        match publish_logged(
+            engine,
+            relays,
+            signed_mirror,
+            PublishScope::Backup,
+            "footage_mirror",
+            true,
+        )
+        .await
+        {
             Ok(_) => report.mirrored += 1,
             Err(_) => report.mirror_failed.push(footage.seq),
         }
@@ -342,6 +482,19 @@ pub async fn restore(engine: &Engine, relays: &dyn RelayClient) -> crate::Result
     // Last, and only on success: a vault that failed halfway through is not a
     // replica, it is an empty vault, and marking it would strand the user.
     engine.set_device_role(DeviceRole::Replica)?;
+
+    // A *fresh* id, overwriting whatever `init` put here when this vault was
+    // created. Not an aesthetic choice: the id exists so that a `GhostManifest`
+    // naming the sealing device is checkable, and a replica carrying the same
+    // id as its sealer makes that claim true of two machines at once — the
+    // exact fork the field is there to expose (SPEC §14 Q29).
+    //
+    // Restore does not read an id off the relay, so there is no sealer id to
+    // inherit today. Minting anyway is the guard: the day a restore learns to
+    // carry vault metadata across, this line is what stops the id coming with
+    // it, and `a_restored_replica_does_not_keep_the_id_it_was_created_with`
+    // fails if it is deleted.
+    engine.mint_device_id()?;
 
     Ok(RestoreReport {
         recovered: u64::try_from(recovered.len()).unwrap_or(u64::MAX),

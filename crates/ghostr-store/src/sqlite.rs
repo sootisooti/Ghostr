@@ -258,6 +258,21 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// The chain identifier recorded at init.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Backend`](crate::Error::Backend) if it is missing or
+    /// malformed.
+    pub fn chain_id(&self) -> crate::Result<ChainId> {
+        let text = self.meta(meta_key::CHAIN_ID)?.ok_or(crate::Error::Backend {
+            operation: "store has no chain id",
+        })?;
+        ChainId::parse(&text).map_err(|_| crate::Error::Backend {
+            operation: "parse chain id",
+        })
+    }
+
     /// The genesis link recorded at init.
     ///
     /// # Errors

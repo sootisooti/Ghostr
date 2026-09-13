@@ -346,7 +346,7 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
     let tip = engine.store().tip()?;
     let memories = engine.store().memory_count()?;
     Ok(format!(
-        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)\nnext    {}",
+        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\ndevice  {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)\nnext    {}",
         engine.dir().display(),
         engine.npub().as_str(),
         engine.home_tz()?.name(),
@@ -355,6 +355,7 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
             || "none sealed".to_owned(),
             |t| format!("seq {} · {}", t.seq, t.link.short())
         ),
+        device_line(engine)?,
         swap_protection(engine.keystore().pinned_secrets()),
         under_label(&next_step(&stage(engine)?)),
     ))
@@ -407,6 +408,36 @@ pub(crate) fn next_step(stage: &Stage) -> String {
 /// the two callers cannot drift into indenting differently.
 pub(crate) fn under_label(text: &str) -> String {
     text.replace('\n', "\n        ")
+}
+
+/// This installation's id and whether it may seal.
+///
+/// Printed together because neither means much alone. The role is what decides
+/// whether `memoria` runs; the id is what a `GhostManifest` names so a third
+/// party can tell two devices apart (SPEC §8.2, §14 Q29). A user looking at two
+/// machines needs both to answer "which one is the sealer, and is this it".
+///
+/// Shortened: the full 32 hex characters are a wall of noise in a status block,
+/// and the prefix is enough to tell two vaults apart by eye. The whole value
+/// goes in the manifest, where a verifier reads it rather than a human.
+fn device_line(engine: &Engine) -> anyhow::Result<String> {
+    let role = match engine.device_role()? {
+        ghostr_engine::engine::DeviceRole::Sealer => "sealer",
+        ghostr_engine::engine::DeviceRole::Replica => "replica — never advances the chain",
+        // The role enum is `#[non_exhaustive]`, unlike `Stage`: it is a domain
+        // type a third party may match on, so this arm is required rather than
+        // a silent fallback. Saying the role is unknown is the honest answer;
+        // guessing "sealer" would be a vault told it may seal because this
+        // build did not recognise what it was.
+        _ => "unrecognised role — this build is older than the vault",
+    };
+    Ok(match engine.device_id()? {
+        Some(id) => format!("{} · {role}", &id[..id.len().min(8)]),
+        // A vault created before device ids existed. Not minted on read: an id
+        // that appears when something first asks is a different id on every
+        // machine reading the same restored vault.
+        None => format!("no id · {role}"),
+    })
 }
 
 /// How much of the in-memory key material is pinned out of swap.
