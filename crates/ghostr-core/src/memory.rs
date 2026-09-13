@@ -196,6 +196,27 @@ pub struct Provenance {
     /// Lets a re-ingest detect that an upstream record changed under us, which
     /// is a fact worth recording rather than silently absorbing.
     pub raw_hash: crate::hash::Hash32,
+    /// Whether the source record **declared itself** ghost-authored.
+    ///
+    /// Named for what it records rather than for what is true, and the
+    /// difference is the whole point. §9.3 makes disclosure mandatory on the
+    /// way *out*, so a well-behaved ghost's notes carry
+    /// `["ghostr","v1","ghost-authored"]` and a `p` tag naming its principal.
+    /// Nothing makes an impersonator carry them. A field called
+    /// `ghost_authored` would read as "a person wrote this" for exactly the
+    /// case that matters most — a machine imitating one, with the tags left off
+    /// (SPEC §14 Q25).
+    ///
+    /// So: `false` means *not disclosed*, never *not a ghost*. Detection is not
+    /// available here; only honesty is, and this records whether the author was
+    /// honest.
+    ///
+    /// `#[serde(default)]` because this is a row payload, not a hashed
+    /// preimage — a memory leaf covers `{id, text, occurred_at}` and nothing
+    /// else — so adding it moves no chain and reads back `false` for every
+    /// memory ingested before it existed, which is the truth about them.
+    #[serde(default)]
+    pub disclosed_ghost_authored: bool,
 }
 
 #[cfg(test)]
@@ -226,6 +247,7 @@ mod tests {
                 external_id: None,
                 url: None,
                 raw_hash: tagged_hash(Tag::MemoryLeaf, b""),
+                disclosed_ghost_authored: false,
             },
             salt: [0u8; 32],
             supersedes: None,

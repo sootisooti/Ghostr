@@ -41,6 +41,7 @@ fn memory(n: u8, text: &str) -> Memory {
             external_id: None,
             url: None,
             raw_hash: tagged_hash(Tag::MemoryLeaf, &[n]),
+            disclosed_ghost_authored: false,
         },
         salt: [n; 32],
         supersedes: None,

@@ -146,6 +146,7 @@ pub fn injected_memory(kind: InjectionKind) -> Memory {
             external_id: Some(kind.label().to_owned()),
             url: Some("https://example.invalid/feed".to_owned()),
             raw_hash: tagged_hash(Tag::MemoryLeaf, text.as_bytes()),
+            disclosed_ghost_authored: false,
         },
         salt: first_thirty_two(tagged_hash(Tag::MemoryLeaf, text.as_bytes()).as_bytes()),
         supersedes: None,

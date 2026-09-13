@@ -1055,6 +1055,22 @@ Non-negotiable. A ghost that can pass as its principal without a machine-readabl
 marker is an impersonation tool, and that is a different product than this one.
 Publishing is **off by default** and requires explicit per-scope opt-in.
 
+**Inbound, the same tags are recorded and nothing more is claimed.** A kind-1
+note ingested from a relay is marked with `Provenance.disclosed_ghost_authored`
+when it carries the tags above, so a persona claim drawn from it can say what it
+came from rather than recording a machine's output as a person's words.
+
+The field records what the note **declared**, not what is true. `false` means
+*not disclosed*; it never means *not a ghost*. This clause binds a well-behaved
+ghost and binds an impersonator not at all — they simply omit the tags — so
+**detection is not available on the inbound side, only honesty is.** A marked
+note is one whose author was honest. An unmarked note is one about which nothing
+is known.
+
+Ingest neither drops nor ignores such a note. Dropping it would discard
+something the user chose to read while proving nothing about the notes that were
+not disclosed; ignoring it was the behaviour this replaced (§14 Q25).
+
 ### 9.4 The FidelityAttestation is the public claim
 
 ```json
@@ -1823,7 +1839,7 @@ than sidestepping it.
 
 ---
 
-**Q25 — Should ingest care that a note is ghost-authored?**
+~~**Q25 — Should ingest care that a note is ghost-authored?**~~ **Resolved: mark it, and say plainly what the mark cannot do.**
 
 §9.3 makes disclosure mandatory on the way *out*: any kind-1 event signed by a
 ghost key carries `["ghostr","v1","ghost-authored"]` and a `p` tag naming its
@@ -1853,14 +1869,35 @@ fact ghost-authored, which is the one `has_disclosure` cannot help with: an
 impersonator simply omits the tags. Detection is not available, only honesty
 is, and that asymmetry is worth stating rather than implying.
 
-> **Recommendation:** (2), and not yet. Marking is the only option that keeps
-> the information instead of discarding it, and it is the one that lets the
-> question be revisited without re-ingesting a corpus. But it needs a
-> `Provenance` field, which is a stored-row change, and there is no ghost
-> publishing anywhere in the wild yet to ingest — Ghostr itself cannot publish a
-> ghost note today. Decide this alongside the M3 public-surface work that
-> creates the thing being detected; until then (1) is what happens, and it is
-> safe rather than merely convenient.
+**Decided: (2), mark it**, now that the M3 public-surface work has built the
+thing being detected — `ghostr ghost note` publishes disclosed kind-1 notes, so
+there is something in the wild for this to be about.
+
+`Provenance.disclosed_ghost_authored` is the field, and its name is the
+decision. It records what the note *declared*, not what is true. `false` means
+**not disclosed**, never **not a ghost**: §9.3 binds a well-behaved ghost to
+carry `["ghostr","v1","ghost-authored"]` and a `p` tag naming its principal, and
+nothing whatsoever binds an impersonator, who simply leaves them off. A field
+called `ghost_authored` would have read as "a person wrote this" for exactly the
+case that matters most.
+
+**Detection is not on offer here. Only honesty is**, and this records whether
+the author was honest. That asymmetry is stated rather than implied because a
+reader of the corpus who mistakes the second for the first has been misled by
+the very field meant to inform them.
+
+(3) drop was rejected for the reason the question gave: a ghost note is still
+something the user read, and discarding it loses whatever they wanted from it
+while proving nothing about the notes that were not disclosed. (1) ignore was
+what happened until now, and it recorded a machine's output as a person's words.
+
+`has_disclosure` has a caller: `NostrFeedAdapter`, which is the only place
+third-party kind-1 notes become corpus. The mark is sealed in the row payload
+rather than given a column — a column would let anyone holding the database file
+count how much of a user's corpus came from machines without decrypting
+anything. Old rows decode as `false`, which is the truth about them: nothing had
+asked. No chain moves, because a memory leaf commits to `{id, text,
+occurred_at}` and provenance is not in it.
 
 ---
 

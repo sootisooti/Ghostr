@@ -143,6 +143,7 @@ pub fn to_memory(note: &ParsedNote, source: SourceId, clock: &dyn Clock, rng: &d
             external_id: Some(note.relative_path.clone()),
             url: None,
             raw_hash,
+            disclosed_ghost_authored: false,
         },
         salt,
         supersedes: None,

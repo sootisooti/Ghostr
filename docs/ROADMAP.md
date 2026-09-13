@@ -415,10 +415,17 @@ somebody else's notes is counted and reported, not silently ingested.
       Shipping the first under the second's name would pass this criterion while
       the feature stays absent, which is how a third of this milestone went
       missing the first time.
-- [ ] `has_disclosure` is called by something. It is the inbound half: a third
-      party can publish a kind-1 note *claiming* to be a ghost without the tags,
-      and the feed adapter ingests kind-1 notes today without asking. Whether
-      ingest should care is SPEC §14 Q25, open.
+- [x] `has_disclosure` is called by something — `NostrFeedAdapter`, the only
+      place third-party kind-1 notes become corpus. SPEC §14 Q25 is resolved as
+      *mark it*: `Provenance.disclosed_ghost_authored` records whether the note
+      declared itself, sealed in the row payload rather than given a column,
+      since a column would let anyone holding the database file count how much
+      of a user's corpus came from machines without decrypting anything.
+
+      The mark says what the note **declared**, not what is true. `false` means
+      *not disclosed*, never *not a ghost* — an impersonator omits the tags and
+      nothing here can tell. That asymmetry is now written into §9.3 rather than
+      implied: detection is not available inbound, only honesty is.
 
 **These four were in M3's scope list from the start and were never built.** The
 exit criteria above did not cover them, so "every exit criterion is met" was

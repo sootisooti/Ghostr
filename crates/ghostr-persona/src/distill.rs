@@ -589,6 +589,7 @@ pub(crate) mod fixtures {
                 external_id: None,
                 url: None,
                 raw_hash: tagged_hash(Tag::MemoryLeaf, &n.to_le_bytes()),
+                disclosed_ghost_authored: false,
             },
             salt: [byte; 32],
             supersedes: None,

@@ -81,6 +81,16 @@ struct SealedMemoryBody {
     external_id: Option<String>,
     url: Option<String>,
     entities: Vec<String>,
+    /// Whether the source record declared itself ghost-authored (SPEC §14 Q25).
+    ///
+    /// Sealed rather than indexed: it is a fact about one record, and a column
+    /// would let anyone with the database file count how much of a user's
+    /// corpus came from machines without decrypting anything.
+    ///
+    /// `#[serde(default)]` so rows written before the field existed decode as
+    /// `false`, which is the truth about them — nothing had asked.
+    #[serde(default)]
+    disclosed_ghost_authored: bool,
 }
 
 /// The sealed half of a [`Footage`].
@@ -539,6 +549,7 @@ impl SqliteStore {
                 .as_ref()
                 .map(|s| s.as_bytes().to_vec()),
             external_id: memory.provenance.external_id.clone(),
+            disclosed_ghost_authored: memory.provenance.disclosed_ghost_authored,
             url: memory.provenance.url.clone(),
             entities: memory.entities.iter().map(|e| e.id.to_string()).collect(),
         };
@@ -1323,6 +1334,7 @@ impl RawMemory {
                 raw_hash: Hash32::from_hex(&self.raw_hash).map_err(|_| crate::Error::Backend {
                     operation: "parse raw hash",
                 })?,
+                disclosed_ghost_authored: body.disclosed_ghost_authored,
             },
             salt,
             supersedes: self
@@ -1865,6 +1877,7 @@ mod tests_support {
                 external_id: Some(format!("note-{n}.md")),
                 url: None,
                 raw_hash: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::MemoryLeaf, &[n]),
+                disclosed_ghost_authored: false,
             },
             salt: [n; 32],
             supersedes: None,
