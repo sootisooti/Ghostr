@@ -482,11 +482,33 @@ mod tests {
     fn the_page_recognises_every_stage() {
         use crate::ops::Stage;
 
-        // Every variant, so a new one has to be added here too — and the value
-        // that reaches the page is the serialized tag, which is what `nextStep`
-        // switches on.
-        const EVERY: [Stage; 5] = [
+        // A `match`, not a list. The list this replaced said "a new one has to
+        // be added here too" and nothing made that true: it was a fixed-size
+        // array of five, and adding a sixth variant left it compiling
+        // untouched. `SourcesIdle` was added and walked straight past it.
+        //
+        // An exhaustive match puts the compiler back in the loop — a new
+        // variant fails to build *here*, one line above the array it also has
+        // to join. `Stage` is deliberately not `#[non_exhaustive]` for exactly
+        // this, and its doc comment claims adding a stage "stops the build in
+        // every surface that renders advice". The terminal got that for free
+        // from `render::next_step`. This page is JavaScript, where no compiler
+        // can look, so the claim was only ever half true — this is the half
+        // that makes it true.
+        fn tag_of(stage: &Stage) -> &'static str {
+            match stage {
+                Stage::Empty => "empty",
+                Stage::SourcesIdle { .. } => "sources_idle",
+                Stage::BuildingCorpus { .. } => "building_corpus",
+                Stage::ReadyToDistill => "ready_to_distill",
+                Stage::NoOpenQuests => "no_open_quests",
+                Stage::Answering { .. } => "answering",
+            }
+        }
+
+        const EVERY: [Stage; 6] = [
             Stage::Empty,
+            Stage::SourcesIdle { sources: 1 },
             Stage::BuildingCorpus { have: 1, need: 20 },
             Stage::ReadyToDistill,
             Stage::NoOpenQuests,
@@ -494,12 +516,21 @@ mod tests {
         ];
 
         for stage in EVERY {
+            // Serde is still the authority on what reaches the page; `tag_of`
+            // is checked against it rather than trusted, so a `#[serde(rename)]`
+            // that drifts from the match is caught here instead of silently
+            // sending the page a tag it has no case for.
             let json = serde_json::to_string(&stage).expect("serialize");
             let tag = json
                 .split("\"stage\":\"")
                 .nth(1)
                 .and_then(|rest| rest.split('"').next())
                 .expect("stage tag");
+            assert_eq!(
+                tag,
+                tag_of(&stage),
+                "the serialized tag and the match disagree about `{stage:?}`"
+            );
             assert!(
                 UI_HTML.contains(&format!("case \"{tag}\":")),
                 "the served page has no case for stage `{tag}`, so it would \

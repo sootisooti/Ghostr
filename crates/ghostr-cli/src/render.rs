@@ -380,6 +380,11 @@ pub(crate) fn next_step(stage: &Stage) -> String {
             "already written starts the loop today rather than in three weeks"
         )
         .to_owned(),
+        Stage::SourcesIdle { sources } => format!(
+            "`ghostr source sync` — {sources} source{} configured and nothing pulled from {} yet",
+            if sources == 1 { "" } else { "s" },
+            if sources == 1 { "it" } else { "them" },
+        ),
         Stage::BuildingCorpus { have, need } => {
             let short = need.saturating_sub(have);
             format!(

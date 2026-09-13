@@ -271,6 +271,13 @@ function nextStep(s) {
       return { can: "journal",
         text: "Nothing recorded yet. Write today's entry on the first tab — "
             + "a ghost needs something of yours to be built from." };
+    case "sources_idle":
+      return { can: "terminal",
+        text: `${s.sources} source${s.sources === 1 ? "" : "s"} configured and `
+            + `nothing pulled from ${s.sources === 1 ? "it" : "them"} yet. `
+            + "Pulling reads files on the machine running "
+            + "<code>ghostr serve</code>, so it lives there: "
+            + "<code>ghostr source sync</code>." };
     case "building_corpus":
       return { can: "journal",
         text: `${s.need - s.have} more ${s.need - s.have === 1 ? "entry" : "entries"} `

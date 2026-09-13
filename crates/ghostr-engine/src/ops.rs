@@ -2122,8 +2122,13 @@ fn verdict_source(engine: &Engine, holdout: bool) -> crate::Result<SourceId> {
 /// matches on; this one exists so that adding a stage stops the build in every
 /// surface that renders advice, and makes someone decide what it says. A
 /// catch-all arm here is a stage a user is shown nothing useful for, and the
-/// whole reason this type exists is that such a gap is invisible.
-
+/// whole reason this type exists is that such a gap is invisible.///
+/// That holds for the terminal, where `render::next_step` matches and the
+/// compiler enforces it. **The served page is JavaScript and no compiler looks
+/// at it**, so the guarantee there is a test — `every_stage_has_words_on_the_page`
+/// in `serve` — which is only as good as its own exhaustiveness. It was not:
+/// it listed the variants in a fixed-size array, `SourcesIdle` was added, and
+/// the array kept compiling. It matches now.
 ///
 /// Every variant is produced by [`stage`] and by nothing else. A
 /// `ShortOfScore { have, need }` variant was briefly built by `fidelity`'s
@@ -2135,8 +2140,19 @@ fn verdict_source(engine: &Engine, holdout: bool) -> crate::Result<SourceId> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "stage", rename_all = "snake_case")]
 pub enum Stage {
-    /// Nothing recorded yet.
+    /// Nothing recorded yet, and nowhere configured to record from.
     Empty,
+    /// Sources are configured and nothing has been pulled from them.
+    ///
+    /// Its own stage because the advice is different, and because without it a
+    /// user who did exactly what `Empty` told them to — `ghostr source add
+    /// markdown ./notes/` — was shown that same line again. The ladder was
+    /// keyed on the memory count alone, so adding a source moved nothing, and
+    /// the on-ramp's next step was to repeat the step just taken.
+    SourcesIdle {
+        /// How many enabled sources are waiting to be pulled.
+        sources: u32,
+    },
     /// Recording, but short of what a persona needs.
     BuildingCorpus {
         /// Memories held.
@@ -2172,7 +2188,15 @@ pub enum Stage {
 pub fn stage(engine: &Engine) -> crate::Result<Stage> {
     let memories = engine.store().memory_count()?;
     if memories == 0 {
-        return Ok(Stage::Empty);
+        // Counted, not decrypted — the rule the rest of this function follows
+        // (I8). An enabled source with nothing pulled is a different place to
+        // be than an empty vault, and the difference is the whole advice.
+        let sources = u32::try_from(crate::sources::list(engine)?.len()).unwrap_or(u32::MAX);
+        return Ok(if sources == 0 {
+            Stage::Empty
+        } else {
+            Stage::SourcesIdle { sources }
+        });
     }
     let need = ghostr_persona::distill::MIN_CORPUS;
     let have = u32::try_from(memories).unwrap_or(u32::MAX);
