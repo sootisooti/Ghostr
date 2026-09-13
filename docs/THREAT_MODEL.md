@@ -156,6 +156,26 @@ confidentiality on the way out and nothing on the way in.
   backup does not enable the ghost to post. `PublishScope::Revocation` is the
   sole exception and is always permitted: a revocation the user cannot publish
   because they disabled publishing is a revocation that does not happen.
+- **Every publish is written to the egress log**, naming the relay, the kind,
+  the scope that allowed it, and the byte count — including one a relay
+  refused, because a refusal still means the bytes went out. This was missing
+  until the M3 public surface: I5 is two clauses, the scope gate kept the
+  first, and `ghostr egress` listed model calls while saying nothing about what
+  had been sent to a relay (SPEC §14 Q28). It matters most for the public
+  kinds, where what leaves is a plaintext claim signed by the identity key
+  rather than ciphertext.
+
+  **No digest is recorded for an encrypted kind.** A digest of self-encrypted
+  ciphertext identifies that exact event to anyone holding both the log and the
+  relay's copy, which would make the audit record a correlation handle rather
+  than an audit aid. Public kinds are digested, since they are world-readable
+  anyway and the digest is what lets a user prove later which manifest they
+  published.
+- **A publish that every relay refused is a failure**, not a success with an
+  empty accept list. `sync` counted an all-rejected `PublishReport` as a
+  published day, so a relay refusing everything left the vault reporting a
+  backup it did not have — the same failure the author check below guards
+  against, on the way out instead of the way in.
 - **A relay cannot hold a thread.** Connect and read deadlines are set on the
   socket *before* the websocket handshake, because the handshake itself reads —
   a deadline applied afterwards never covers a relay that accepts the connection

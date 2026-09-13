@@ -218,6 +218,7 @@ fn logged_memory(source: ghostr_core::ids::SourceId) -> ghostr_core::memory::Mem
                 ghostr_core::hash::Tag::MemoryLeaf,
                 b"health.jsonl:1",
             ),
+            disclosed_ghost_authored: false,
         },
         salt: [5u8; 32],
         supersedes: None,

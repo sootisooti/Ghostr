@@ -30,13 +30,29 @@ M3 has its crypto, its event codec, its relay transport, `ghostr sync`/`restore`
 auto-seal, and the nostr feed adapter — so hostile text now enters the corpus and
 the `TrustLevel::ThirdParty` gate is load-bearing rather than declared.
 
-**M3's public surface is not built.** Backup, sync, restore and the feed are in
-and tested; the ghost manifest, attestation publishing and ghost notes are types
-in `ghostr-nostr` with no caller. That was invisible because the exit criteria
+**M3's public surface is now built**, after being absent for most of the
+milestone. The ghost manifest, fidelity attestations and ghost notes were types
+in `ghostr-nostr` with no caller, and it was invisible because the exit criteria
 never covered them — "every exit criterion is met" was true and read as "M3 is
-done". They are now listed unchecked in
-[docs/ROADMAP.md](docs/ROADMAP.md), along with the NIP submission, which is a
-human's to make.
+done". `ghostr ghost show | publish | suspend | revoke | note` and
+`ghostr fidelity --publish` are the surface; `check_attestation` is the reader
+half, which is what makes "a third party can check it" a claim rather than an
+assertion. Only the NIP submission remains, and that is a human's to make.
+
+**Building it found two things worth knowing about.** `config.toml` could not
+set `publish_scopes`, so an empty scope set refused every publish and the whole
+networked half of the product — `sync` included — was unreachable for anyone not
+writing a test. And I5's second clause was unmet on the relay path: publishing
+passed the scope gate and was written to no log at all, so `ghostr egress`
+listed model calls while saying nothing about what had been sent to a relay.
+Both were live for months behind a green suite.
+
+**Four questions came out of it** — SPEC §14 Q27–Q30 — of which two are
+contradictions in the docs rather than gaps in the code. Q27 is the one that
+matters: I9 forbids plaintext to a relay and §9.1 requires the manifest be
+plaintext, and until something published a manifest it cost nothing. It
+proceeds under the narrow reading with a test that fails if that reading is
+wrong, rather than a comment asserting it.
 
 Run `cargo xtask scaffold-status` to see what is still unimplemented,
 `cargo xtask lint-deps` to check the dependency rules in §2, and `cargo xtask

@@ -325,3 +325,92 @@ fn init_refuses_to_destroy_an_existing_identity() {
         .expect_err("must refuse");
     assert!(format!("{err}").contains("already exists"), "got: {err}");
 }
+
+/// The on-ramp's own two commands do not fight each other.
+///
+/// `ghostr status` on a fresh vault says to run `source add markdown ./notes/`.
+/// `ghostr ingest` is the command the help text offers for the same folder. A
+/// user who does both — which is what following the on-ramp looks like — used to
+/// get **two sources for one folder** and every note ingested under each.
+///
+/// Each path was internally consistent, which is why this survived: `ingest`
+/// twice was already tested and already a no-op, and `source add` twice was too.
+/// Nothing crossed them. The store dedups on `(kind, config)` and the two paths
+/// wrote different config for the same folder — `{"location":"/notes"}` against
+/// a bare `/notes`.
+///
+/// The cost is not untidiness. A duplicated corpus doubles every note's weight
+/// in distillation (SPEC §3.3 salience), shows every highlight twice in a recap,
+/// and — once that day is sealed — commits twice the memory leaves into a
+/// Merkle root that I2 forbids ever correcting.
+#[test]
+fn adding_a_source_then_ingesting_it_is_one_source() {
+    let home = tempfile::tempdir().unwrap();
+    let notes = home.path().join("notes");
+    write_vault(&notes);
+    let engine = init(&home.path().join("vault"));
+
+    let (added, _) = ghostr_engine::sources::add(
+        &engine,
+        &ghostr_engine::sources::NewSource {
+            kind: ghostr_core::source::SourceKindTag::MarkdownVault,
+            location: notes.display().to_string(),
+            schema: None,
+            feed: None,
+        },
+    )
+    .expect("add the folder as a source");
+
+    let report = ops::ingest(&engine, &notes).expect("ingest the same folder");
+
+    let sources = ghostr_engine::sources::list(&engine).expect("list");
+    assert_eq!(
+        sources.len(),
+        1,
+        "one folder became {} sources: {:?}",
+        sources.len(),
+        sources.iter().map(|s| s.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        sources[0].id, added,
+        "ingest minted a new source instead of reusing the registered one"
+    );
+
+    // And the corpus holds each note once. This is the assertion that would
+    // have caught it: the source count could be fixed while the notes still
+    // landed twice, and it is the memory count that reaches the sealed record.
+    assert_eq!(report.ingested, 2);
+    let dek = engine.dek().expect("dek");
+    assert_eq!(
+        engine.store().all_memories(dek).expect("memories").len(),
+        2,
+        "two notes produced more than two memories"
+    );
+}
+
+/// And the other order, because a user does not always add the source first.
+#[test]
+fn ingesting_then_adding_the_same_folder_is_one_source() {
+    let home = tempfile::tempdir().unwrap();
+    let notes = home.path().join("notes");
+    write_vault(&notes);
+    let engine = init(&home.path().join("vault"));
+
+    ops::ingest(&engine, &notes).expect("ingest first");
+    ghostr_engine::sources::add(
+        &engine,
+        &ghostr_engine::sources::NewSource {
+            kind: ghostr_core::source::SourceKindTag::MarkdownVault,
+            location: notes.display().to_string(),
+            schema: None,
+            feed: None,
+        },
+    )
+    .expect("then register it");
+
+    assert_eq!(
+        ghostr_engine::sources::list(&engine).expect("list").len(),
+        1,
+        "the order the two commands are run in should not change the result"
+    );
+}

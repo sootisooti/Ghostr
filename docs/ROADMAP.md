@@ -347,33 +347,98 @@ somebody else's notes is counted and reported, not silently ingested.
       rebuilds a chain from a relay that holds no 3178x event at all. Until
       this, `mirror_as_nip78` was called by nothing outside its own unit tests
       — the fallback this criterion leans on was documented and absent.
-- [ ] A `GhostManifest` can be created, signed and revoked from the CLI.
-      `GhostManifest` exists as a type in `ghostr-nostr` and is exercised by its
-      codec tests. Nothing in `ghostr-engine` or `ghostr-cli` names it, and
-      there is no `ghost` subcommand, so account `1'` is derivable and has never
-      been used.
-- [ ] A `FidelityAttestation` can be published, and a reader can check its
-      signature and its chain link. Same shape: the type and its codec are in
-      `ghostr-nostr` with tests; no engine op and no `publish attestation`
-      command exist. §9.4's "here is my ghost's score, and here is the
-      Bitcoin-anchored commitment it was computed from" is a claim nothing can
-      currently make.
-- [ ] A ghost-authored kind-1 note can be published under an explicit per-scope
-      opt-in, off by default. `GhostNoteBuilder` makes disclosure unforgeable at
-      construction — that part is done and its own criterion above is true — but
-      it has no caller outside its unit tests, there is no publishing scope, and
-      no CLI reaches it.
-- [ ] `has_disclosure` is called by something. It is the inbound half: a third
-      party can publish a kind-1 note *claiming* to be a ghost without the tags,
-      and the feed adapter ingests kind-1 notes today without asking. Whether
-      ingest should care is SPEC §14 Q25, open.
+- [x] A `GhostManifest` can be created, signed and revoked from the CLI.
+      `ghostr ghost show | publish | suspend | revoke`, signed by the identity
+      key (`0'`) and naming the ghost key (`1'`), which until now was derivable
+      and had never been used. Republishing replaces rather than accumulates —
+      the `d` tag is the chain id, so a status change supersedes; a per-publish
+      identifier would leave a revoked ghost's `Active` manifest on the relay
+      beside its revocation with no rule for which a reader should believe
+      (`a_second_manifest_replaces_the_first`).
+
+      **A revocation publishes from a vault that has enabled nothing.** Its
+      manifest update rides `PublishScope::Revocation`, the one always-permitted
+      scope, rather than `Manifest` — which is how it was first written, and
+      which inverted the exemption exactly: the person most likely to have
+      publishing switched off is the person who never wanted their ghost public,
+      and they are no less entitled to say it no longer speaks for them
+      (`a_revocation_publishes_with_every_scope_disabled`).
+
+      Proceeds under SPEC §14 Q27's reading of I9, held to account by
+      `no_public_field_is_derived_from_the_corpus` rather than assumed: every
+      field of the published JSON must be a key, a hash, a count, or a value the
+      user typed. If a human answers Q27 the other way, that test is what fails.
+- [x] A `FidelityAttestation` can be published, and a reader can check its
+      signature and its chain link. `ghostr fidelity --publish`, plus the reader
+      half — `ghost::check_attestation` takes the raw event and the pubkey a
+      reader believes they are asking about, which is what a stranger has.
+
+      It returns a report rather than a bool, because the failures call for
+      different responses: a bad signature means the relay is lying, a mismatched
+      author means the reader asked about the wrong key, and an unbound score is
+      a signed number anchored to nothing. `proof_present` is deliberately not
+      `proof_valid` — checking an OTS proof needs a Bitcoin node or a calendar,
+      and a field that implied otherwise would be worse than an absent one.
+
+      `an_altered_score_fails_the_signature_check` raises a published score in a
+      well-formed copy: it deserialises perfectly and only the signature says
+      otherwise, which is exactly the hostile relay of THREAT_MODEL §T2. The
+      base64 for the `.ots` proof is checked against RFC 4648 §10 vectors rather
+      than against its own output — an encoder tested against itself proves it
+      is deterministic, not that it is base64.
+
+      `decoy_confirm_rate` and `converged` travel inside the payload, asserted
+      over the serialised form: a reader must not be able to receive the score
+      without the number that discounts it (§4.4), and an unconverged score
+      publishes flagged rather than being suppressed, since hiding them would
+      make the published ones look like milestones rather than measurements.
+- [x] A ghost-authored kind-1 note can be published under an explicit per-scope
+      opt-in, off by default. `ghostr ghost note --text`, signed by the ghost
+      key (`1'`) with `GhostNoteBuilder`'s disclosure tags, which it emits
+      itself — there is no setter and no other constructor, so an undisclosed
+      ghost note is not something a caller can get wrong (I10).
+
+      **Two gates, not one.** `PublishScope::GhostNotes` is this device's
+      consent; `GhostPolicy.may_publish_notes` in the published manifest is what
+      the user told the world their ghost may do. A note that violates the
+      published policy makes the manifest a lie, and a manifest nobody can rely
+      on is worth less than none. The policy is read from the manifest this
+      vault *would* publish rather than fetched, so a relay withholding it
+      cannot unblock a note the user forbade.
+
+      **Split per SPEC §14 Q30**, because "ghost notes" was naming two products.
+      This line is the one §9.3 specifies: user-written text published under the
+      ghost key with unforgeable disclosure, no model involved. Ghost-*composed*
+      notes — the thing §1 actually promises — route through `LanguageModel`
+      (I4), the egress gate (I5) and `Sensitivity` on every fact drawn from the
+      corpus, and belong to M4's "ghost speaks" alongside its refusal behaviour.
+      Shipping the first under the second's name would pass this criterion while
+      the feature stays absent, which is how a third of this milestone went
+      missing the first time.
+- [x] `has_disclosure` is called by something — `NostrFeedAdapter`, the only
+      place third-party kind-1 notes become corpus. SPEC §14 Q25 is resolved as
+      *mark it*: `Provenance.disclosed_ghost_authored` records whether the note
+      declared itself, sealed in the row payload rather than given a column,
+      since a column would let anyone holding the database file count how much
+      of a user's corpus came from machines without decrypting anything.
+
+      The mark says what the note **declared**, not what is true. `false` means
+      *not disclosed*, never *not a ghost* — an impersonator omits the tags and
+      nothing here can tell. That asymmetry is now written into §9.3 rather than
+      implied: detection is not available inbound, only honesty is.
 
 **These four were in M3's scope list from the start and were never built.** The
 exit criteria above did not cover them, so "every exit criterion is met" was
 true and read as "M3 is done" — which is how a third of a milestone goes missing
-without any check failing. They are listed here, unchecked, rather than moved to
-M4: the milestone that claims to ship "an optional public attestation" has not
-shipped one.
+without any check failing. They were listed here, unchecked, rather than moved
+to M4: the milestone that claims to ship "an optional public attestation" had
+not shipped one.
+
+**The manifest is now built; three remain.** Building it turned up two things
+the docs had never had to settle, both now in SPEC §14 rather than decided in a
+function body: whether a plaintext public event can exist at all given I9 (Q27),
+and whether publishing counts as egress for I5's logging clause (Q28 — it does,
+and did not, so `ghostr egress` was silent about everything sent to a relay).
 
 **Not in M3:** GUI, third-party verifier tooling. RSS ingest was in the scope
 list and is not built either; it is the least load-bearing of these, since the

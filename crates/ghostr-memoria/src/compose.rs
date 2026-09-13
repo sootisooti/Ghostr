@@ -240,6 +240,7 @@ mod tests {
                 external_id: None,
                 url: None,
                 raw_hash: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::MemoryLeaf, &[n]),
+                disclosed_ghost_authored: false,
             },
             salt: [n; 32],
             supersedes: None,

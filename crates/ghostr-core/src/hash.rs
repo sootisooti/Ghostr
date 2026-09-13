@@ -188,6 +188,14 @@ pub enum Tag {
     /// issued under v12 is scored against v12's claim rather than v13's
     /// (SPEC §6.4).
     Persona,
+    /// An egress log entry's payload digest.
+    ///
+    /// Additive like [`Tag::Persona`], and for the same reason it is safe: this
+    /// hash never enters a preimage the chain covers, so no existing link
+    /// moves. It is its own tag rather than a reused one so that a digest
+    /// recorded in the audit log can never be mistaken for a leaf — which is
+    /// the entire point of tagging (SPEC I5).
+    Egress,
 }
 
 impl Tag {
@@ -208,6 +216,7 @@ impl Tag {
             Self::Genesis => "ghostr/v1/genesis",
             Self::QuestAnswer => "ghostr/v1/quest-answer",
             Self::Persona => "ghostr/v1/persona",
+            Self::Egress => "ghostr/v1/egress",
         }
     }
 }
@@ -338,19 +347,79 @@ mod frozen_tags {
         assert_eq!(Tag::Genesis.as_str(), "ghostr/v1/genesis");
         assert_eq!(Tag::QuestAnswer.as_str(), "ghostr/v1/quest-answer");
         assert_eq!(Tag::Persona.as_str(), "ghostr/v1/persona");
+        assert_eq!(Tag::Egress.as_str(), "ghostr/v1/egress");
     }
 
-    /// Adding `Persona` must not have moved anything else. This digest was
-    /// computed before the variant existed.
+    /// Adding a variant must not move an existing digest.
+    ///
+    /// Golden vectors, computed independently of this code — `SHA256(SHA256(t)
+    /// || SHA256(t) || msg)` over the frozen strings above. That matters more
+    /// than it sounds: this test used to compare `tagged_hash(Tag::Link, b"")`
+    /// to itself and call the result a fixed vector, so it passed for the only
+    /// reason a tautology passes. Every tag string in the enum could have been
+    /// rewritten and it would still have been green.
+    ///
+    /// These are the hashes already in users' chains. If one of them changes,
+    /// the chain does not migrate — the old roots are in Bitcoin and cannot be
+    /// re-sealed.
     #[test]
     fn adding_a_tag_did_not_move_an_existing_one() {
         assert_eq!(
-            tagged_hash(Tag::Link, b"").to_hex(),
-            tagged_hash(Tag::Link, b"").to_hex(),
+            tagged_hash(Tag::MemoryLeaf, b"ghostr").to_hex(),
+            "14062c0c794e746674d0f590a38ca6bcf2736d7f0032a0ae9971cd1fe3680738",
         );
-        // A fixed vector for the tag most load-bearing to the chain.
-        let link = tagged_hash(Tag::Link, b"ghostr");
-        assert_eq!(link, tagged_hash(Tag::Link, b"ghostr"));
-        assert_ne!(link, tagged_hash(Tag::Persona, b"ghostr"));
+        assert_eq!(
+            tagged_hash(Tag::Link, b"ghostr").to_hex(),
+            "8f7a903768308ef73c39d06cb87a6f6026bba8b5b814aaa5454299d4de23dd5d",
+        );
+        assert_eq!(
+            tagged_hash(Tag::FootageRoot, b"ghostr").to_hex(),
+            "65a3af51163bebe8b3c74e04445698a171b0faf1b9588ba162966dc47631fa28",
+        );
+        assert_eq!(
+            tagged_hash(Tag::Persona, b"ghostr").to_hex(),
+            "f60a440bb11b519ff2b7eb09deb966e2ff3d35053d185011902456957bc674d3",
+        );
+        assert_eq!(
+            tagged_hash(Tag::Egress, b"ghostr").to_hex(),
+            "f1d9876746cfe18dee9451e2337c439c843ce52b56ece81a26e5851de016341c",
+        );
+    }
+
+    /// No two tags hash the same message to the same digest.
+    ///
+    /// Domain separation is what stops a quest leaf being verified as a memory
+    /// leaf, and it is a property of the *set* rather than of any one tag — so
+    /// it has to be checked over the whole set. Adding a variant without adding
+    /// it here is the way a duplicate string gets in.
+    #[test]
+    fn every_tag_separates_from_every_other() {
+        const EVERY: [Tag; 11] = [
+            Tag::MemoryLeaf,
+            Tag::QuestLeaf,
+            Tag::VerdictLeaf,
+            Tag::MetaLeaf,
+            Tag::Node,
+            Tag::FootageRoot,
+            Tag::Link,
+            Tag::Genesis,
+            Tag::QuestAnswer,
+            Tag::Persona,
+            Tag::Egress,
+        ];
+        for (i, a) in EVERY.iter().enumerate() {
+            for b in EVERY.iter().skip(i + 1) {
+                assert_ne!(
+                    a.as_str(),
+                    b.as_str(),
+                    "two tags share a wire string: {a:?} and {b:?}"
+                );
+                assert_ne!(
+                    tagged_hash(*a, b"ghostr"),
+                    tagged_hash(*b, b"ghostr"),
+                    "{a:?} and {b:?} hash the same message alike"
+                );
+            }
+        }
     }
 }

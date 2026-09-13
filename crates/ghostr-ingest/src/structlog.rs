@@ -357,6 +357,7 @@ pub fn to_memory(
             external_id: Some(format!("{}:{}", row.relative_path, row.line)),
             url: None,
             raw_hash,
+            disclosed_ghost_authored: false,
         },
         salt,
         supersedes: None,

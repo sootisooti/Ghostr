@@ -75,6 +75,37 @@ impl RelayClient for MemoryRelay {
     }
 }
 
+/// A relay that takes the bytes and then says no.
+///
+/// The interesting failure, and not the same as one that is unreachable: the
+/// connection opened and the payload went out. Whether the relay then stored it
+/// is the relay's business; what the user's log has to record is that the bytes
+/// left (I5).
+struct RefusingRelay;
+
+#[async_trait]
+impl RelayClient for RefusingRelay {
+    async fn publish(
+        &self,
+        event: SignedEvent,
+        _scope: PublishScope,
+    ) -> ghostr_nostr::Result<PublishReport> {
+        Ok(PublishReport {
+            accepted: Vec::new(),
+            rejected: vec![(event.id.to_hex(), "blocked: pow required".to_owned())],
+            unreachable: Vec::new(),
+        })
+    }
+
+    async fn fetch(&self, _filter: &Filter) -> ghostr_nostr::Result<Vec<SignedEvent>> {
+        Ok(Vec::new())
+    }
+
+    async fn subscribe(&self, _filter: Filter) -> ghostr_nostr::Result<Box<dyn Subscription>> {
+        unreachable!("sync fetches rather than subscribes")
+    }
+}
+
 /// Whether a filter asked for this kind. An empty filter asks for everything,
 /// as NIP-01 says.
 fn requested(filter: &Filter, kind: u16) -> bool {
@@ -213,6 +244,168 @@ async fn a_restored_machine_cannot_advance_the_chain() {
     std::fs::write(&later, "---\ndate: 2026-08-03\n---\nStill the sealer.\n").unwrap();
     ops::ingest(&first, &notes).expect("ingest");
     ops::memoria(&first, next).expect("the sealer must still seal");
+}
+
+/// Everything sent to a relay appears in the egress log (I5).
+///
+/// I5 is two clauses and the relay path only kept one: `PublishScope` gated
+/// publishing, and nothing was written anywhere. `ghostr egress` listed model
+/// calls and said nothing about the days this vault had shipped to a relay
+/// (SPEC §14 Q28).
+#[tokio::test]
+async fn a_published_day_appears_in_the_egress_log() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 2);
+
+    let vault_dir = tmp.path().join("one");
+    let engine = vault(&vault_dir);
+    ops::ingest(&engine, &notes).expect("ingest");
+    seal_days(&engine, 2);
+
+    let before = engine
+        .store()
+        .egress_since(ghostr_core::time::Timestamp::new(0, 0))
+        .expect("egress");
+    assert!(
+        before.is_empty(),
+        "a vault that has published nothing has an empty log: {before:?}"
+    );
+
+    let relay = MemoryRelay::default();
+    let report = sync(&engine, &relay).await.expect("sync");
+    assert!(report.published > 0, "nothing was published to log");
+
+    let after = engine
+        .store()
+        .egress_since(ghostr_core::time::Timestamp::new(0, 0))
+        .expect("egress");
+
+    // One per event actually sent — the 3178x form and its NIP-78 mirror are
+    // two events and two rows. A log that counted days rather than events would
+    // understate what the relay received.
+    let sent = usize::try_from(report.published + report.mirrored).unwrap();
+    assert_eq!(
+        after.len(),
+        sent,
+        "the log has {} rows for {sent} events sent",
+        after.len()
+    );
+
+    for row in &after {
+        assert_eq!(row.task, "relay_publish", "wrong reason recorded: {row:?}");
+        assert!(row.provider.starts_with("relay:"), "{row:?}");
+        assert!(
+            row.policy_id.contains("backup"),
+            "the row does not name the scope that allowed it: {row:?}"
+        );
+        assert!(row.bytes_sent > 0, "a publish sent no bytes: {row:?}");
+        // Footage is self-encrypted. A digest of that ciphertext identifies
+        // this exact event to anyone holding both, which turns the audit log
+        // into a correlation handle rather than an audit aid.
+        assert!(
+            row.payload_digest.is_none(),
+            "an encrypted payload was digested into the log: {row:?}"
+        );
+    }
+}
+
+/// And the log records what a relay refused, not only what it took.
+///
+/// A refused publish still opened a connection and still sent the bytes. A log
+/// that recorded successes only would understate what the network saw, which is
+/// the opposite of what it is for.
+#[tokio::test]
+async fn a_refused_publish_is_logged_too() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 2);
+
+    let engine = vault(&tmp.path().join("one"));
+    ops::ingest(&engine, &notes).expect("ingest");
+    seal_days(&engine, 2);
+
+    let relay = RefusingRelay;
+    let report = sync(&engine, &relay).await.expect("sync");
+    assert!(!report.failed.is_empty(), "the double accepted a publish");
+
+    let after = engine
+        .store()
+        .egress_since(ghostr_core::time::Timestamp::new(0, 0))
+        .expect("egress");
+    assert!(
+        !after.is_empty(),
+        "a refused publish left no trace in the log"
+    );
+}
+
+/// Two machines under one seed hold two device ids.
+///
+/// `GhostManifest.sealing_device` names one device so that a third party can
+/// notice two of them sealing the same chain (SPEC §8.2). That only works if
+/// the id is per *install*: a replica carrying the sealer's id makes the
+/// manifest's claim true of both machines at once, which is precisely the fork
+/// it exists to expose (SPEC §14 Q29).
+#[tokio::test]
+async fn a_restored_replica_does_not_keep_the_id_it_was_created_with() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    write_days(&notes, 2);
+
+    let first = vault(&tmp.path().join("one"));
+    ops::ingest(&first, &notes).expect("ingest");
+    seal_days(&first, 2);
+
+    let relay = MemoryRelay::default();
+    sync(&first, &relay).await.expect("sync");
+
+    let second = vault(&tmp.path().join("two"));
+    let before = second.device_id().unwrap().expect("init mints an id");
+    restore(&second, &relay).await.expect("restore");
+    let after = second.device_id().unwrap().expect("restore mints an id");
+
+    // Restore replaces it rather than leaving what `init` minted. Asserted
+    // because the two are indistinguishable from outside: a vault that never
+    // re-minted would still have *an* id, and would still differ from the
+    // sealer's, so only the change proves the line runs.
+    assert_ne!(before, after, "restore did not re-mint the device id");
+
+    let sealer = first.device_id().unwrap().expect("sealer has an id");
+    assert_ne!(
+        sealer, after,
+        "the replica and its sealer claim to be the same device"
+    );
+
+    // Sixteen bytes, hex. Checked because the value goes into a public document
+    // and a short or empty one would publish silently.
+    assert_eq!(after.len(), 32, "device id is not 16 bytes of hex: {after}");
+    assert!(after.chars().all(|c| c.is_ascii_hexdigit()), "{after}");
+}
+
+/// The id is not derived from the seed.
+///
+/// Two vaults from the *same* mnemonic must still differ. A value a verifier
+/// could recompute from an identity key would link every vault sharing that
+/// key — the opposite of what publishing it is meant to cost.
+#[tokio::test]
+async fn one_seed_on_two_machines_gives_two_device_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let one = vault(&tmp.path().join("one"));
+    let two = vault(&tmp.path().join("two"));
+
+    // `vault` builds both from the same mnemonic, which is what makes this a
+    // test rather than a coincidence — same seed, same identity key, and the
+    // ids must still disagree.
+    assert_eq!(
+        one.keystore().npub().as_str().to_owned(),
+        two.keystore().npub().as_str().to_owned(),
+        "the fixture stopped using one seed, so this proves nothing"
+    );
+    assert_ne!(
+        one.device_id().unwrap(),
+        two.device_id().unwrap(),
+        "the device id is derived from the seed"
+    );
 }
 
 /// Nothing readable reaches a relay, asserted over what sync actually sent.

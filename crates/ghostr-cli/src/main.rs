@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
+use ghostr_core::identity::GhostStatus;
 use ghostr_crypto::secret::SecretString;
 use ghostr_engine::config::Config;
 use ghostr_engine::engine::Engine;
@@ -121,6 +122,14 @@ enum Command {
         /// The window: `30`, `90`, or `all`.
         #[arg(long, default_value = "30")]
         window: String,
+
+        /// Publish the score as a signed, chain-bound public claim.
+        ///
+        /// Says: here is my ghost's score, and here is the Bitcoin-anchored
+        /// commitment to the quest record it was computed from. Needs the
+        /// `fidelity` publish scope (SPEC §9.4).
+        #[arg(long)]
+        publish: bool,
     },
 
     /// Submit the chain tip to OpenTimestamps. The only networked command.
@@ -168,6 +177,57 @@ enum Command {
     /// Cheap: the journal is encrypted under a key the passphrase does not
     /// touch, so this rewraps the seed rather than re-encrypting the corpus.
     Passphrase,
+
+    /// The public claim: who your ghost is, and whether it still speaks for you.
+    #[command(subcommand)]
+    Ghost(GhostCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum GhostCommand {
+    /// Print the manifest this vault would publish, without publishing it.
+    Show,
+
+    /// Publish the manifest, so a stranger can check the ghost is yours.
+    ///
+    /// Public and plaintext, unlike everything else this vault sends: the
+    /// document's whole job is to be readable by someone who has only your
+    /// identity key (SPEC §8.2).
+    Publish,
+
+    /// Pause the ghost without revoking it.
+    ///
+    /// A manifest update with `status: Suspended`. Reversible by publishing
+    /// again — unlike `revoke`, which is a statement about a key rather than
+    /// about a mood.
+    Suspend,
+
+    /// Revoke the ghost key.
+    ///
+    /// Publishes the manifest as `Revoked` and a standalone notice beside it,
+    /// so a reader who already cached the manifest hears about it too. No key
+    /// is burned: derive a new ghost key and publish a new manifest.
+    Revoke {
+        /// Why, in your own words. Published verbatim.
+        #[arg(long)]
+        reason: String,
+    },
+
+    /// Post a note under the ghost key, marked as ghost-authored.
+    ///
+    /// **You write the text; the ghost key signs it.** The ghost does not
+    /// compose — that is a different feature and it is not built (SPEC §14
+    /// Q30). What this gives you is a pen name whose disclosure tags are honest
+    /// about which key held the pen.
+    ///
+    /// Needs the `ghost_notes` publish scope, and your published manifest must
+    /// say the ghost may post. Both, because a note contradicting your own
+    /// manifest makes the manifest worthless.
+    Note {
+        /// The text to publish.
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -360,6 +420,11 @@ fn run(cli: Cli) -> Result<()> {
             &relays,
             &kind_filters,
         ),
+        Command::Ghost(GhostCommand::Show) => cmd_ghost_show(&dir),
+        Command::Ghost(GhostCommand::Publish) => cmd_ghost_publish(&dir, GhostStatus::Active),
+        Command::Ghost(GhostCommand::Suspend) => cmd_ghost_publish(&dir, GhostStatus::Suspended),
+        Command::Ghost(GhostCommand::Revoke { reason }) => cmd_ghost_revoke(&dir, &reason),
+        Command::Ghost(GhostCommand::Note { text }) => cmd_ghost_note(&dir, &text),
         Command::Source(SourceCommand::List) => cmd_source_list(&dir),
         Command::Source(SourceCommand::Sync { id }) => cmd_source_sync(&dir, id.as_deref()),
         Command::Thread(ThreadCommand::List) => cmd_thread_list(&dir),
@@ -380,7 +445,7 @@ fn run(cli: Cli) -> Result<()> {
             text,
             severity,
         }) => cmd_quest_answer(&dir, &id, &verdict, text.as_deref(), &severity),
-        Command::Fidelity { window } => cmd_fidelity(&dir, &window),
+        Command::Fidelity { window, publish } => cmd_fidelity(&dir, &window, publish),
         Command::Footage(FootageCommand::List) => cmd_footage_list(&dir),
         Command::Footage(FootageCommand::Show { id }) => cmd_footage_show(&dir, id),
         Command::Anchor => cmd_anchor(&dir),
@@ -518,6 +583,78 @@ fn relay_client(engine: &Engine) -> Result<ghostr_nostr::client::websocket::Webs
         config.relays.clone(),
         config.enabled_scopes(),
     ))
+}
+
+/// Prints the manifest this vault would publish.
+///
+/// Reads nothing from the network and sends nothing. The point is that a user
+/// can see exactly what becomes public *before* it does — a public document is
+/// permanent, and "publish and see" is not an option a relay offers.
+fn cmd_ghost_show(dir: &std::path::Path) -> Result<()> {
+    let engine = open(dir)?;
+    let manifest = ghostr_engine::ghost::manifest(&engine, GhostStatus::Active)?;
+    println!("{}", render::manifest(&manifest));
+    Ok(())
+}
+
+/// Publishes the manifest.
+fn cmd_ghost_publish(dir: &std::path::Path, status: GhostStatus) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let manifest = block_on(ghostr_engine::ghost::publish_manifest(
+        &engine, &relays, status,
+    ))
+    .context("publishing the ghost manifest")?;
+
+    println!("{}", render::manifest(&manifest));
+    println!("\npublished — this is now readable by anyone who has your npub");
+    Ok(())
+}
+
+/// Revokes the ghost key.
+fn cmd_ghost_revoke(dir: &std::path::Path, reason: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let outcome = block_on(ghostr_engine::ghost::revoke(&engine, &relays, reason))
+        .context("revoking the ghost")?;
+
+    println!("{}", render::manifest(&outcome.manifest));
+    if outcome.notice_published {
+        println!("\nrevoked — the manifest says so, and a notice was sent beside it");
+    } else {
+        // Said out loud rather than swallowed. The revocation *has* taken
+        // effect where it is defined, and a reader who already cached the
+        // manifest will not learn about it until they look again.
+        println!(
+            "\nrevoked — the manifest says so.\n\
+             The standalone notice did not reach a relay, so anyone holding a\n\
+             cached manifest will not be told until they re-fetch it. Re-run to\n\
+             try the notice again."
+        );
+    }
+    Ok(())
+}
+
+/// Posts a note under the ghost key.
+fn cmd_ghost_note(dir: &std::path::Path, text: &str) -> Result<()> {
+    let engine = open(dir)?;
+    let relays = relay_client(&engine)?;
+    let signed = block_on(ghostr_engine::ghost::publish_note(&engine, &relays, text))
+        .context("publishing the ghost note")?;
+
+    // The tags are printed rather than summarised. They are the difference
+    // between a pen name and an impersonation, and a user posting under a
+    // second key should see exactly what the world is told about it (I10).
+    println!("posted {}", signed.id.short());
+    println!("\nevery reader sees these tags:");
+    for tag in &signed.event.tags {
+        println!("  {}", tag.join(" "));
+    }
+    println!(
+        "\nsigned by the ghost key, not yours. The `p` tag names you as the\n\
+         principal, so nobody can read this as something you wrote yourself."
+    );
+    Ok(())
 }
 
 /// Publishes sealed footage to relays.
@@ -739,7 +876,7 @@ fn parse_verdict(
     })
 }
 
-fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
+fn cmd_fidelity(dir: &std::path::Path, window: &str, publish: bool) -> Result<()> {
     use ghostr_core::fidelity::ScoreWindow;
 
     let engine = open(dir)?;
@@ -749,6 +886,16 @@ fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
         "all" | "alltime" => ScoreWindow::AllTime,
         other => bail!("`{other}` is not a window; try `30`, `90`, or `all`"),
     };
+
+    if publish {
+        let relays = relay_client(&engine)?;
+        let attestation = block_on(ghostr_engine::ghost::publish_attestation(
+            &engine, &relays, window,
+        ))
+        .context("publishing the fidelity attestation")?;
+        println!("{}", render::attestation(&attestation));
+        return Ok(());
+    }
 
     match ops::fidelity(&engine, window) {
         Ok(score) => println!("{}", render::fidelity(&score)),
@@ -764,11 +911,14 @@ fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
             // quest needs an adopted persona and a persona needs twenty
             // memories. Telling someone to do an impossible thing is worse
             // than telling them nothing.
-            let stage = if have == 0 {
-                render::stage(&engine)?
-            } else {
-                render::Stage::ShortOfScore { have, need }
-            };
+            //
+            // The shortfall is stated once, on the line above, and the step
+            // comes from the vault rather than from these two numbers. An
+            // earlier version built a `ShortOfScore { have, need }` stage here
+            // for `have > 0` and hit the same bug one rung up: knowing you are
+            // nine short says nothing about whether a quest is open to answer,
+            // so it sent a vault with an empty queue to `ghostr quest list`.
+            let stage = ghostr_engine::ops::stage(&engine)?;
             println!(
                 "not enough evidence yet: {have} scored quest(s), need {need}\nnext    {}",
                 render::under_label(&render::next_step(&stage))

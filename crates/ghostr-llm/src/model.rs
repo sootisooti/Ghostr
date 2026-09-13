@@ -223,6 +223,28 @@ pub enum TaskKind {
     Conversation,
     /// Embedding. Always local (SPEC Q13).
     Embedding,
+    /// An event sent to a relay.
+    ///
+    /// Not a model task, and in the log for exactly that reason. I5 covers
+    /// everything that leaves the device, not everything a model was asked —
+    /// and a relay publish left this log entirely until the M3 public surface
+    /// made what leaves plaintext, public, permanent, and signed by the
+    /// identity key (SPEC §14 Q28). A user auditing what their vault has said
+    /// about them in public was reading a log that did not mention it.
+    ///
+    /// Keyed on a model-shaped enum because that is where the log's "why"
+    /// lives today. Q28 records that the better fix is for the log to stop
+    /// being keyed on one.
+    RelayPublish,
+    /// A logged egress whose reason this build does not recognise.
+    ///
+    /// **Never written by a caller** — it exists so that reading a row from a
+    /// newer build has an honest answer. Before it, an unknown tag read back as
+    /// [`TaskKind::Conversation`], so a relay publish written by a newer version
+    /// showed up in `ghostr egress` as the user talking to their ghost. A log
+    /// that invents a plausible reason is worse than one that says it does not
+    /// know: only one of the two is visibly wrong.
+    Unrecognised,
 }
 
 /// What a model returned.

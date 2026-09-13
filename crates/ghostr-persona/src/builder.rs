@@ -3,7 +3,8 @@
 use ghostr_core::footage::Footage;
 use ghostr_core::ids::PersonaVersion;
 use ghostr_core::memory::Memory;
-use ghostr_core::persona::{PersonaDelta, PersonaDiff, PersonaModel};
+use ghostr_core::persona::{ChangeKind, FacetChange, PersonaDelta, PersonaDiff, PersonaModel};
+use ghostr_core::quest::Facet;
 use ghostr_core::time::Timestamp;
 
 /// Builds persona versions from footage and queued corrections.
@@ -141,21 +142,212 @@ pub fn propose(
     let mut model = builder.distill(head, input)?;
     let diff = match head {
         Some(current) => builder.diff(current, &model),
-        // Nothing to diff against: the first version is entirely new, and
-        // saying so beats an empty change list that reads like "nothing
-        // happened".
+        // The first version is entirely new, so it is described rather than
+        // compared. This arm used to build an empty change list under a comment
+        // saying an empty change list "reads like nothing happened" — and the
+        // renderer duly printed `v0 → v1: nothing changed` for the single most
+        // consequential adoption in a vault's life. The on-ramp says "read the
+        // diff and adopt"; there was nothing to read.
         None => PersonaDiff {
             from: PersonaVersion::genesis(),
             to: model.version,
-            changes: Vec::new(),
+            changes: first_version_changes(&model),
         },
     };
     model.diff = Some(diff.clone());
 
     Ok(CandidateVersion {
-        warrants_review: head.is_some() && crate::diff::warrants_review(&diff),
+        // A first version always warrants reading. It was `head.is_some() &&`,
+        // which made the one adoption that establishes every facet from scratch
+        // the only one that could never ask to be read.
+        warrants_review: head.is_none_or(|_| crate::diff::warrants_review(&diff)),
         replaces: head.map(|h| h.version),
         model,
         diff,
     })
+}
+
+/// What a first persona version established, as changes a reader can read.
+///
+/// Not a diff — there is nothing to diff against — but the same shape, because
+/// the alternative is a blank review step exactly where the most was decided.
+/// Counts and measured values only: naming the memories behind a voice register
+/// would be inventing evidence, since voice is measured over the whole corpus
+/// rather than traced to particular notes.
+fn first_version_changes(model: &PersonaModel) -> Vec<FacetChange> {
+    let mut changes = Vec::new();
+    let voice = &model.facets.voice;
+
+    changes.push(FacetChange {
+        facet: Facet::Voice,
+        kind: ChangeKind::Added,
+        description: format!(
+            "voice established from {} exemplar(s) \
+             (formality {:.2}, warmth {:.2}, hedging {:.2}, profanity {:.2})",
+            voice.exemplars.len(),
+            voice.register.formality,
+            voice.register.warmth,
+            voice.register.hedging,
+            voice.register.profanity,
+        ),
+        caused_by: Vec::new(),
+    });
+
+    // `Facets` has six fields and `Facet` has five variants: boundaries — "what
+    // they would never say or do" — have no facet to be reported under, so
+    // neither this nor `diff` can name a change to them. Left visible rather
+    // than silently skipped, since a boundary appearing or vanishing is exactly
+    // the kind of movement a reader would want flagged.
+    for (facet, count, noun) in [
+        (Facet::Opinion, model.facets.opinions.len(), "opinion"),
+        (
+            Facet::Relationship,
+            model.facets.relationships.len(),
+            "relationship",
+        ),
+        (Facet::Routine, model.facets.routines.len(), "routine"),
+        (Facet::Lore, model.facets.lore.len(), "biographical fact"),
+    ] {
+        // A facet with nothing in it is not a change. Listing "0 opinions"
+        // would pad the review with lines that carry no decision.
+        if count == 0 {
+            continue;
+        }
+        changes.push(FacetChange {
+            facet,
+            kind: ChangeKind::Added,
+            description: format!(
+                "{count} {noun}{} recorded",
+                if count == 1 { "" } else { "s" }
+            ),
+            caused_by: Vec::new(),
+        });
+    }
+
+    changes
+}
+
+#[cfg(test)]
+mod first_version_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use ghostr_core::time::Timestamp;
+
+    use crate::distill::fixtures::corpus_memories;
+
+    use super::*;
+
+    /// A first proposal, through `propose` itself.
+    ///
+    /// Written this way after the first attempt asserted on
+    /// `first_version_changes` directly and passed both mutations — restoring
+    /// the empty change list and restoring `head.is_some() &&` left it green,
+    /// because it proved the helper formats and never that `propose` calls it.
+    /// The path under test is the one the CLI runs.
+    fn first_proposal() -> CandidateVersion {
+        let memories = corpus_memories(30);
+        let refs: Vec<&ghostr_core::memory::Memory> = memories.iter().collect();
+        propose(
+            &crate::DeterministicBuilder,
+            None,
+            DistillInput {
+                footage: &[],
+                first_party: &refs,
+                claimable: &refs,
+                deltas: &[],
+                now: Timestamp::new(0, 0),
+                next_ordinal: 1,
+            },
+        )
+        .expect("propose a first version")
+    }
+
+    /// The first persona says what it established.
+    ///
+    /// It used to say `v0 → v1: nothing changed`, under a comment in `propose`
+    /// noting that an empty change list "reads like nothing happened". The
+    /// on-ramp tells a user to read the diff before adopting, and for the one
+    /// adoption that establishes every facet from scratch there was nothing to
+    /// read.
+    #[test]
+    fn a_first_version_describes_itself_rather_than_claiming_nothing_changed() {
+        let candidate = first_proposal();
+        assert!(
+            !candidate.diff.changes.is_empty(),
+            "the first version reported no changes at all"
+        );
+        let voice = candidate
+            .diff
+            .changes
+            .iter()
+            .find(|c| c.facet == Facet::Voice)
+            .expect("a first version always establishes a voice");
+        assert_eq!(voice.kind, ChangeKind::Added);
+        assert!(
+            voice.description.contains("formality"),
+            "the voice line does not say what was measured: {}",
+            voice.description
+        );
+    }
+
+    /// And it asks to be read.
+    ///
+    /// `warrants_review` was `head.is_some() && …`, so the largest change a
+    /// vault ever sees was the only one that could never request a look.
+    #[test]
+    fn a_first_version_warrants_review() {
+        assert!(
+            first_proposal().warrants_review,
+            "the first persona did not ask to be read"
+        );
+    }
+
+    /// An empty facet is not reported as a change.
+    ///
+    /// Without this the review is padded with "0 opinions recorded" lines that
+    /// carry no decision, which is its own way of making the step unreadable.
+    #[test]
+    fn a_facet_with_nothing_in_it_is_not_a_change() {
+        let candidate = first_proposal();
+        assert!(
+            candidate
+                .diff
+                .changes
+                .iter()
+                .all(|c| !c.description.starts_with('0')),
+            "an empty facet was reported: {:?}",
+            candidate.diff.changes
+        );
+    }
+
+    /// A second version still diffs against its parent.
+    ///
+    /// The first-version arm must not swallow the normal path: a vault with a
+    /// head compares, and an unchanged corpus genuinely has nothing to say.
+    #[test]
+    fn a_later_version_still_compares_against_its_parent() {
+        let first = first_proposal().model;
+        let memories = corpus_memories(30);
+        let refs: Vec<&ghostr_core::memory::Memory> = memories.iter().collect();
+        let second = propose(
+            &crate::DeterministicBuilder,
+            Some(&first),
+            DistillInput {
+                footage: &[],
+                first_party: &refs,
+                claimable: &refs,
+                deltas: &[],
+                now: Timestamp::new(0, 0),
+                next_ordinal: 2,
+            },
+        )
+        .expect("propose a second version");
+
+        assert_eq!(second.replaces, Some(first.version));
+        assert!(
+            second.diff.changes.is_empty(),
+            "the same corpus produced changes against itself: {:?}",
+            second.diff.changes
+        );
+    }
 }

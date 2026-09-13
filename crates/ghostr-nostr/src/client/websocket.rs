@@ -411,3 +411,94 @@ impl Subscription for WebsocketSubscription {
         let _ = self.socket.close(None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every scope, against a vault that enabled nothing and one that enabled
+    /// only that scope.
+    ///
+    /// This gate is what makes "a fresh vault publishes nothing" true, and it
+    /// had no test of any kind — the claim rested on one line nobody had ever
+    /// asserted. A table because the interesting failures are asymmetric:
+    /// enabling one scope must not enable a second, and `Revocation` must pass
+    /// while everything else is off.
+    ///
+    /// Driven with an **empty relay list**, so nothing opens a socket
+    /// (CLAUDE.md §4.8). That is enough to tell the two outcomes apart: a
+    /// refused scope fails before any relay is consulted, and a permitted one
+    /// gets as far as having no relay to consult.
+    #[tokio::test]
+    async fn a_scope_is_refused_unless_the_vault_enabled_it() {
+        use ghostr_core::identity::PublicKey;
+        use ghostr_crypto::event::{SignedEvent, UnsignedEvent};
+
+        const EVERY: [PublishScope; 7] = [
+            PublishScope::Backup,
+            PublishScope::Manifest,
+            PublishScope::AnchorReceipts,
+            PublishScope::Fidelity,
+            PublishScope::GhostNotes,
+            PublishScope::Revocation,
+            PublishScope::RemoteSigner,
+        ];
+
+        // Never signed and never sent: every path under test refuses or runs
+        // out of relays before the signature would matter.
+        let event = || SignedEvent {
+            id: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::Node, b"unsent"),
+            event: UnsignedEvent {
+                pubkey: PublicKey::from_bytes([1; 32]),
+                created_at: 0,
+                kind: 1,
+                tags: Vec::new(),
+                content: String::new(),
+            },
+            sig: ghostr_crypto::event::Signature::from_bytes([0; 64]),
+        };
+
+        for scope in EVERY {
+            // A vault that enabled nothing.
+            let empty = WebsocketRelayClient::new(Vec::new(), std::collections::HashSet::new());
+            let refused = matches!(
+                empty.publish(event(), scope).await,
+                Err(crate::Error::PublishingDisabled { .. })
+            );
+            // Revocation is the one exception, and it is deliberate: a
+            // revocation a user cannot publish because they turned publishing
+            // off is a revocation that does not happen.
+            assert_eq!(
+                refused,
+                scope != PublishScope::Revocation,
+                "{scope:?} was not gated as the default set says it should be"
+            );
+
+            // A vault that enabled exactly this one.
+            let one = WebsocketRelayClient::new(Vec::new(), std::iter::once(scope).collect());
+            assert!(
+                !matches!(
+                    one.publish(event(), scope).await,
+                    Err(crate::Error::PublishingDisabled { .. })
+                ),
+                "{scope:?} was refused by a vault that enabled it"
+            );
+
+            // And enabling it did not enable anything else. Without this the
+            // check above passes for a gate that permits everything once any
+            // scope is on.
+            for other in EVERY {
+                if other == scope || other == PublishScope::Revocation {
+                    continue;
+                }
+                assert!(
+                    matches!(
+                        one.publish(event(), other).await,
+                        Err(crate::Error::PublishingDisabled { .. })
+                    ),
+                    "enabling {scope:?} also enabled {other:?}"
+                );
+            }
+        }
+    }
+}

@@ -36,6 +36,7 @@
 pub mod config;
 pub mod engine;
 pub mod error;
+pub mod ghost;
 #[cfg(feature = "llm")]
 pub mod model;
 pub mod ops;

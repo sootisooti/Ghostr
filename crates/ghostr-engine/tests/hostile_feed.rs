@@ -416,6 +416,117 @@ fn the_hostile_note_is_kept_verbatim_and_traceable() {
     }
 }
 
+/// A note that declares itself ghost-authored is marked, not mistaken for a
+/// person's words (SPEC §14 Q25).
+///
+/// The resolution is *mark it*, and the honest half is what the mark means:
+/// `false` records "not disclosed", never "not a ghost". An impersonator omits
+/// the tags and there is nothing here that can tell — detection is not on
+/// offer, only honesty is, and the field records whether the author was honest.
+///
+/// Both directions in one test, because either alone passes for a field that is
+/// a constant.
+#[test]
+fn a_disclosed_ghost_note_is_recorded_as_one() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = vault(&home.path().join("vault"));
+
+    let secp = secp256k1::Secp256k1::new();
+    let keypair = secp256k1::Keypair::from_seckey_byte_array(&secp, ATTACKER).expect("keypair");
+    let principal = attacker_pubkey();
+
+    let sign = |event: UnsignedEvent| {
+        let id = event.id();
+        let sig = secp.sign_schnorr_no_aux_rand(id.as_bytes(), &keypair);
+        SignedEvent {
+            id,
+            event,
+            sig: Signature::from_bytes(*sig.as_ref()),
+        }
+    };
+
+    let day = chrono::NaiveDate::from_ymd_opt(ATTACK_DAY.0, ATTACK_DAY.1, ATTACK_DAY.2)
+        .unwrap()
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    let at = u64::try_from(day).unwrap();
+
+    // Built through `GhostNoteBuilder`, so the tags are exactly what a
+    // well-behaved ghost publishes rather than what this test imagines one
+    // publishes. Then re-signed by the attacker key: what is under test is the
+    // *disclosure*, not who signed, and a reader has no reason to believe a
+    // stranger's ghost key is a ghost key.
+    let disclosed = ghostr_nostr::codec::GhostNoteBuilder::new(attacker_pubkey(), principal)
+        .content("posted on their behalf while they were away")
+        .build(at)
+        .expect("build");
+
+    // The same words with the tags stripped. This is the impersonation, and the
+    // point is that nothing distinguishes it — it must come back unmarked, and
+    // unmarked must not read as a promise that a person wrote it.
+    let undisclosed = UnsignedEvent {
+        tags: Vec::new(),
+        ..disclosed.clone()
+    };
+
+    let notes = vec![sign(disclosed), sign(undisclosed)];
+
+    let (source, _) = sources::add(
+        &engine,
+        &NewSource {
+            kind: SourceKindTag::NostrFeed,
+            location: String::new(),
+            schema: None,
+            feed: Some(FeedConfig {
+                pubkey: attacker_pubkey().to_hex(),
+                relays: vec!["wss://relay.invalid".to_owned()],
+                kinds: vec![1],
+            }),
+        },
+    )
+    .expect("add the feed");
+
+    let relay: Arc<dyn RelayClient> = Arc::new(Attacking(notes));
+    let report = block_on(sources::sync(&engine, Some(source), Some(&relay))).expect("sync");
+    assert_eq!(
+        report.ingested, 2,
+        "both notes must land, or this proves nothing"
+    );
+
+    let dek = engine.dek().expect("dek");
+    let stored: Vec<_> = engine
+        .store()
+        .all_memories(dek)
+        .expect("memories")
+        .into_iter()
+        .filter(|m| m.source_id == source)
+        .collect();
+    assert_eq!(stored.len(), 2, "both notes should be kept, not dropped");
+
+    let marked = stored
+        .iter()
+        .filter(|m| m.provenance.disclosed_ghost_authored)
+        .count();
+    assert_eq!(
+        marked, 1,
+        "expected exactly the disclosed note to be marked, got {marked}"
+    );
+
+    // The mark survives the round trip through the encrypted row, which is the
+    // half a struct-level assertion would miss: the field is sealed, and a
+    // payload that dropped it would read back `false` for every note.
+    let reloaded: Vec<_> = engine
+        .store()
+        .all_memories(dek)
+        .expect("memories")
+        .into_iter()
+        .filter(|m| m.source_id == source && m.provenance.disclosed_ghost_authored)
+        .collect();
+    assert_eq!(reloaded.len(), 1, "the mark did not survive storage");
+}
+
 /// A second sync of the same feed adds nothing.
 ///
 /// Without this, every sync would re-file the attack under new memory ids, and

@@ -176,6 +176,18 @@ pub fn to_memory(
             external_id: Some(event.id.to_hex()),
             url: None,
             raw_hash,
+            // SPEC §14 Q25, resolved: mark it, do not drop it. A note that
+            // declares itself ghost-authored is still something the user read
+            // and may still be worth remembering — dropping it would lose
+            // whatever they wanted from it, and ignoring it would record a
+            // machine's output as a person's words.
+            //
+            // `false` here means *not disclosed*, never *not a ghost*. §9.3
+            // binds a well-behaved ghost to carry the tags; nothing binds an
+            // impersonator, who simply leaves them off. Detection is not on
+            // offer — only honesty is, and this records whether the author was
+            // honest.
+            disclosed_ghost_authored: ghostr_nostr::codec::has_disclosure(&event.event),
         },
         salt,
         supersedes: None,

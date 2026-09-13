@@ -12,6 +12,7 @@ use ghostr_core::sensitivity::Sensitivity;
 use ghostr_engine::engine::{Engine, InitOutcome};
 use ghostr_engine::ops::CandidateVersion;
 use ghostr_engine::ops::{IngestReport, QuestIssue, Recap, VerifyReport};
+use ghostr_engine::ops::{Stage, stage};
 use ghostr_engine::serve::{Bind, Token};
 use ghostr_engine::sources::{SourcePlan, SyncReport};
 use ghostr_engine::types::{AnchorRecord, AnchorRecordState, Footage};
@@ -345,7 +346,7 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
     let tip = engine.store().tip()?;
     let memories = engine.store().memory_count()?;
     Ok(format!(
-        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)\nnext    {}",
+        "vault   {}\nnpub    {}\ntz      {}\nmemories {}\ntip     {}\ndevice  {}\nswap    {}\nmodel   none (M0 is offline; no LLM is compiled in)\nnext    {}",
         engine.dir().display(),
         engine.npub().as_str(),
         engine.home_tz()?.name(),
@@ -354,74 +355,10 @@ pub(crate) fn status(engine: &Engine) -> anyhow::Result<String> {
             || "none sealed".to_owned(),
             |t| format!("seq {} · {}", t.seq, t.link.short())
         ),
+        device_line(engine)?,
         swap_protection(engine.keystore().pinned_secrets()),
         under_label(&next_step(&stage(engine)?)),
     ))
-}
-
-/// Where this vault is in the loop.
-///
-/// Ordered the way a vault actually moves through it. Every variant carries the
-/// numbers its message needs, so [`next_step`] is a total function of the stage
-/// and can be tested without a vault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stage {
-    /// Nothing recorded yet.
-    Empty,
-    /// Recording, but short of what a persona needs.
-    BuildingCorpus {
-        /// Memories held.
-        have: u32,
-        /// Memories [`ghostr_persona::distill::MIN_CORPUS`] asks for.
-        need: u32,
-    },
-    /// Enough corpus, no persona adopted.
-    ReadyToDistill,
-    /// A persona exists and nothing is waiting to be answered.
-    ///
-    /// Covers both a vault that has never issued and one that has answered
-    /// everything: "issue today's" is the right move either way. A separate
-    /// `Running` variant was written here and the compiler pointed out that
-    /// nothing constructed it — a stage with no producer is a message no user
-    /// can ever be shown.
-    NoOpenQuests,
-    /// Quests are waiting.
-    Answering {
-        /// How many are open.
-        open: u32,
-    },
-    /// Answering, but short of what a score needs.
-    ShortOfScore {
-        /// Scored quests held.
-        have: u32,
-        /// Scored quests the window asks for.
-        need: u32,
-    },
-}
-
-/// Reads the vault's stage.
-///
-/// Counts only — no memory is decrypted to work out what to suggest, which is
-/// the same rule `QuestEngagement` follows and for the same reason (I8).
-pub(crate) fn stage(engine: &Engine) -> anyhow::Result<Stage> {
-    let memories = engine.store().memory_count()?;
-    if memories == 0 {
-        return Ok(Stage::Empty);
-    }
-    let need = ghostr_persona::distill::MIN_CORPUS;
-    let have = u32::try_from(memories).unwrap_or(u32::MAX);
-    if have < need {
-        return Ok(Stage::BuildingCorpus { have, need });
-    }
-    if ghostr_engine::ops::persona_head(engine)?.is_none() {
-        return Ok(Stage::ReadyToDistill);
-    }
-    let open =
-        u32::try_from(ghostr_engine::ops::open_quests(engine, u32::MAX)?.len()).unwrap_or(u32::MAX);
-    if open == 0 {
-        return Ok(Stage::NoOpenQuests);
-    }
-    Ok(Stage::Answering { open })
 }
 
 /// The one thing to do next.
@@ -443,6 +380,11 @@ pub(crate) fn next_step(stage: &Stage) -> String {
             "already written starts the loop today rather than in three weeks"
         )
         .to_owned(),
+        Stage::SourcesIdle { sources } => format!(
+            "`ghostr source sync` — {sources} source{} configured and nothing pulled from {} yet",
+            if sources == 1 { "" } else { "s" },
+            if sources == 1 { "it" } else { "them" },
+        ),
         Stage::BuildingCorpus { have, need } => {
             let short = need.saturating_sub(have);
             format!(
@@ -462,11 +404,6 @@ pub(crate) fn next_step(stage: &Stage) -> String {
         Stage::Answering { open } => format!(
             "`ghostr quest list` — {open} waiting. `ghostr serve --http` puts them on a phone"
         ),
-        Stage::ShortOfScore { have, need } => format!(
-            "{} more answered quest(s) before a score ({have}/{need}).\n\
-             Keep going with `ghostr quest list`",
-            need.saturating_sub(have)
-        ),
     }
 }
 
@@ -476,6 +413,36 @@ pub(crate) fn next_step(stage: &Stage) -> String {
 /// the two callers cannot drift into indenting differently.
 pub(crate) fn under_label(text: &str) -> String {
     text.replace('\n', "\n        ")
+}
+
+/// This installation's id and whether it may seal.
+///
+/// Printed together because neither means much alone. The role is what decides
+/// whether `memoria` runs; the id is what a `GhostManifest` names so a third
+/// party can tell two devices apart (SPEC §8.2, §14 Q29). A user looking at two
+/// machines needs both to answer "which one is the sealer, and is this it".
+///
+/// Shortened: the full 32 hex characters are a wall of noise in a status block,
+/// and the prefix is enough to tell two vaults apart by eye. The whole value
+/// goes in the manifest, where a verifier reads it rather than a human.
+fn device_line(engine: &Engine) -> anyhow::Result<String> {
+    let role = match engine.device_role()? {
+        ghostr_engine::engine::DeviceRole::Sealer => "sealer",
+        ghostr_engine::engine::DeviceRole::Replica => "replica — never advances the chain",
+        // The role enum is `#[non_exhaustive]`, unlike `Stage`: it is a domain
+        // type a third party may match on, so this arm is required rather than
+        // a silent fallback. Saying the role is unknown is the honest answer;
+        // guessing "sealer" would be a vault told it may seal because this
+        // build did not recognise what it was.
+        _ => "unrecognised role — this build is older than the vault",
+    };
+    Ok(match engine.device_id()? {
+        Some(id) => format!("{} · {role}", &id[..id.len().min(8)]),
+        // A vault created before device ids existed. Not minted on read: an id
+        // that appears when something first asks is a different id on every
+        // machine reading the same restored vault.
+        None => format!("no id · {role}"),
+    })
 }
 
 /// How much of the in-memory key material is pinned out of swap.
@@ -1300,19 +1267,116 @@ fn local_addresses(port: u16) -> Vec<String> {
     out
 }
 
+/// Renders a ghost manifest as the public document it is.
+///
+/// Every field, spelled out. This is the one thing a vault publishes that
+/// anyone can read, and it is permanent — so the rendering is for deciding
+/// whether to publish, not for skimming afterwards. A summary would hide the
+/// field a user would have objected to.
+pub(crate) fn manifest(m: &ghostr_nostr::payload::GhostManifest) -> String {
+    use ghostr_core::identity::GhostStatus;
+
+    let status = match m.status {
+        GhostStatus::Active => "active",
+        GhostStatus::Suspended => "suspended — paused, not revoked",
+        GhostStatus::Revoked => "revoked — this key no longer speaks for you",
+        // `GhostStatus` is a domain type a third party may match on, so the
+        // wildcard is required. Saying so beats guessing: a status this build
+        // does not know, rendered as "active", is a revoked ghost reported as
+        // live.
+        _ => "unrecognised — this build is older than the manifest",
+    };
+
+    let permits = |on: bool| if on { "yes" } else { "no" };
+
+    format!(
+        "ghost   {}\n\
+         chain   {}\n\
+         genesis {}\n\
+         persona v{}\n\
+         scheme  v{}\n\
+         device  {}\n\
+         status  {status}\n\
+         \n\
+         may publish notes   {}\n\
+         may reply           {}\n\
+         publishes fidelity  {}\n\
+         \n\
+         Everything above becomes public when you publish it, and a relay keeps\n\
+         it. Nothing from your journal is in it.",
+        m.ghost_pubkey.to_hex(),
+        m.chain_id.as_uuid(),
+        m.genesis_link.short(),
+        m.persona_ordinal,
+        m.chain_version,
+        if m.sealing_device.is_empty() {
+            "none — this vault predates device ids"
+        } else {
+            &m.sealing_device
+        },
+        permits(m.policy.may_publish_notes),
+        permits(m.policy.may_reply),
+        permits(m.policy.publishes_fidelity),
+    )
+}
+
+/// Renders a published attestation, and what it does and does not establish.
+///
+/// The qualifications are not a footnote. A score published without its decoy
+/// rate is a number a reader cannot weigh (SPEC §4.4), and a score whose OTS
+/// proof has not confirmed is signed but not yet anchored — both are the
+/// difference between a measurement and a boast.
+pub(crate) fn attestation(a: &ghostr_nostr::payload::FidelityAttestation) -> String {
+    let anchored = if a.ots_base64.is_empty() {
+        "no proof yet — the day this was computed at is not anchored.\n\
+         Run `ghostr anchor`; a proof confirms in a Bitcoin block, not instantly."
+    } else {
+        "proof attached — a reader can check it against Bitcoin themselves."
+    };
+
+    format!(
+        "published {} over {}\n\
+         \n\
+         score   {:.0}% ({:.0}%–{:.0}% at 95%, n={})\n\
+         decoys  {:.0}% confirmed — the ghost agreeing with claims that were wrong\n\
+         calib   {:.3} expected error\n\
+         bound   seq {} · {}\n\
+         \n\
+         {}\n\
+         {}",
+        a.as_of,
+        a.window,
+        a.overall * 100.0,
+        a.ci.0 * 100.0,
+        a.ci.1 * 100.0,
+        a.sample_size,
+        a.decoy_confirm_rate * 100.0,
+        a.ece,
+        a.committed_at_seq,
+        a.link.short(),
+        if a.converged {
+            "converged — every criterion in SPEC §5.3 is met."
+        } else {
+            "not converged — published anyway, flagged. Suppressing these would\n\
+             make the published ones look like a milestone rather than a\n\
+             measurement."
+        },
+        anchored,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Every stage this vault can be in, so a new one cannot be added without
     /// deciding what it tells the user.
-    const EVERY_STAGE: [Stage; 6] = [
+    const EVERY_STAGE: [Stage; 5] = [
         Stage::Empty,
         Stage::BuildingCorpus { have: 1, need: 20 },
         Stage::ReadyToDistill,
         Stage::NoOpenQuests,
         Stage::Answering { open: 3 },
-        Stage::ShortOfScore { have: 2, need: 10 },
     ];
 
     /// The bug this whole thing exists to fix, asserted directly.
@@ -1333,6 +1397,30 @@ mod tests {
             assert!(
                 !advice.contains("quest"),
                 "a vault that cannot have quests was told about them: {advice}"
+            );
+        }
+    }
+
+    /// `ghostr quest list` is only ever suggested when it will print a quest.
+    ///
+    /// The first version of this on-ramp shipped a `ShortOfScore { have, need }`
+    /// stage, built by `fidelity` from the scorer's refusal rather than by
+    /// [`stage`](ghostr_engine::ops::stage). Being nine quests short of a score
+    /// says nothing about whether one is open, so a vault that had answered
+    /// everything was told to "keep going with `ghostr quest list`" and got
+    /// "no open quests" — a dead end inside the fix for dead ends.
+    ///
+    /// Stated as a pairing rather than a ban so it cannot pass by nothing ever
+    /// mentioning the command: `Answering` must name it, and nothing else may.
+    #[test]
+    fn only_a_stage_with_open_quests_suggests_listing_them() {
+        for stage in EVERY_STAGE {
+            let advice = next_step(&stage);
+            let names_list = advice.contains("ghostr quest list");
+            let has_open = matches!(stage, Stage::Answering { open } if open > 0);
+            assert_eq!(
+                names_list, has_open,
+                "{stage:?} points at an empty queue, or hides a full one: {advice}"
             );
         }
     }

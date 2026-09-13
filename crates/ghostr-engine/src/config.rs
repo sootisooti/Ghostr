@@ -133,6 +133,22 @@ impl Config {
         let text = std::fs::read_to_string(&path).map_err(|_| crate::Error::Config {
             detail: "config is unreadable".to_owned(),
         })?;
+        Self::parse(&text)
+    }
+
+    /// Reads a config from its text.
+    ///
+    /// Split out from [`load`](Self::load) so the parser can be tested without
+    /// a filesystem — and, more to the point, so that
+    /// `settable_keys_cover_every_config_field` tests the real one rather than
+    /// a copy of it. Four fields had been unsettable at once behind this,
+    /// including the one that gates every publish.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`](crate::Error::Config) on a malformed line, an
+    /// unknown key, or a value that does not parse.
+    pub fn parse(text: &str) -> crate::Result<Self> {
         // M0 config is a handful of scalars, so it is parsed with a two-line
         // key=value reader rather than pulling a TOML dependency for it.
         let mut config = Self::default();
@@ -143,7 +159,7 @@ impl Config {
             }
             let Some((key, value)) = line.split_once('=') else {
                 return Err(crate::Error::Config {
-                    detail: format!("malformed line in {}", path.display()),
+                    detail: "malformed line in config".to_owned(),
                 });
             };
             let value = value.trim().trim_matches('"');
@@ -164,6 +180,31 @@ impl Config {
                 // the list was always empty and both commands always refused.
                 "relays" => config.relays = string_list(value),
                 "calendars" => config.calendars = string_list(value),
+                // The same bug as `relays` above, found the same way and three
+                // more times over. Every one of these fields existed, was read
+                // by the code that depends on it, and could not be set: the
+                // parser rejected the key as unknown, so the value was forever
+                // its default. `publish_scopes` empty means *every* publish
+                // refuses, which made `sync`, `ghost publish`,
+                // `fidelity --publish` and `ghost note` unreachable for anyone
+                // who was not writing a test — the whole networked half of the
+                // product, switched off by a missing match arm.
+                //
+                // `settable_keys_cover_every_config_field` is the guard, and it
+                // is written against the struct rather than this list.
+                "publish_scopes" => config.publish_scopes = string_list(value),
+                "auto_seal" => config.auto_seal = value == "true",
+                "seal_grace_hours" => {
+                    config.seal_grace_hours = value.parse().map_err(|_| crate::Error::Config {
+                        detail: "seal_grace_hours is not a number".to_owned(),
+                    })?;
+                }
+                "seal_backfill_days" => {
+                    config.seal_backfill_days =
+                        value.parse().map_err(|_| crate::Error::Config {
+                            detail: "seal_backfill_days is not a number".to_owned(),
+                        })?;
+                }
                 other => {
                     return Err(crate::Error::Config {
                         detail: format!("unknown config key `{other}`"),
@@ -240,6 +281,79 @@ fn string_list(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every field of `Config` can be set from `config.toml`.
+    ///
+    /// A field the parser rejects as an unknown key is a field permanently
+    /// stuck at its default, and nothing says so — the struct has it, the code
+    /// reads it, and the user's edit is refused with a message about a typo
+    /// they did not make.
+    ///
+    /// This has now happened four times. `relays` was found and fixed alone;
+    /// `publish_scopes`, `auto_seal`, `seal_grace_hours` and
+    /// `seal_backfill_days` were all still unsettable afterwards, and the
+    /// `publish_scopes` one meant **every publish refused**: `sync`,
+    /// `ghost publish`, `fidelity --publish` and `ghost note` were unreachable
+    /// for anyone not writing a test, because the scope set could never be
+    /// non-empty.
+    ///
+    /// Driven off `Config`'s own serialisation rather than a hand-written list
+    /// of names, so a field added later is covered without anyone remembering
+    /// this test exists — which is the only version of this check worth having.
+    #[test]
+    fn settable_keys_cover_every_config_field() {
+        let value = serde_json::to_value(Config::default()).expect("serialise");
+        let fields = value.as_object().expect("a config is an object");
+
+        for name in fields.keys() {
+            // A line this parser accepts for the key, whatever its type. The
+            // value is deliberately junk for the numeric fields: what is under
+            // test is whether the *key* is recognised, and a rejected key and a
+            // rejected value are different errors with different messages.
+            let toml = format!("{name} = \"0\"\n");
+            let parsed = Config::parse(&toml);
+            let unknown = matches!(
+                &parsed,
+                Err(crate::Error::Config { detail }) if detail.contains("unknown config key")
+            );
+            assert!(
+                !unknown,
+                "`{name}` is a field of Config that config.toml cannot set"
+            );
+        }
+    }
+
+    /// And an actually-unknown key is still refused.
+    ///
+    /// Without this the test above passes for a parser that accepts anything,
+    /// which would be worse: a typo silently ignored is a setting the user
+    /// believes they changed.
+    #[test]
+    fn a_key_that_is_not_a_field_is_still_rejected() {
+        let err = Config::parse("nonsense_key = \"x\"\n").expect_err("must refuse");
+        assert!(
+            format!("{err}").contains("unknown config key"),
+            "wrong refusal: {err}"
+        );
+    }
+
+    /// The scopes a user writes are the scopes the vault publishes under.
+    ///
+    /// The end-to-end version: text in the file, through the parser, to the set
+    /// the relay client is built with.
+    #[test]
+    fn a_configured_scope_reaches_the_relay_client() {
+        use ghostr_nostr::client::PublishScope;
+
+        let config = Config::parse("publish_scopes = [\"backup\", \"manifest\"]\n").expect("parse");
+        let scopes = config.enabled_scopes();
+        assert!(scopes.contains(&PublishScope::Backup));
+        assert!(scopes.contains(&PublishScope::Manifest));
+        assert!(
+            !scopes.contains(&PublishScope::GhostNotes),
+            "a scope nobody asked for was enabled"
+        );
+    }
 
     #[test]
     fn defaults_are_offline_and_restrictive() {

@@ -303,6 +303,7 @@ fn build(
                 Tag::MemoryLeaf,
                 format!("{date}\u{0}{index}\u{0}{text}").as_bytes(),
             ),
+            disclosed_ghost_authored: false,
         },
         salt,
         supersedes: None,

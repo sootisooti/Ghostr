@@ -232,6 +232,7 @@ impl StandardIntake {
                     Tag::MemoryLeaf,
                     format!("{}\u{0}{text}", quest.id).as_bytes(),
                 ),
+                disclosed_ghost_authored: false,
             },
             salt,
             supersedes: None,
