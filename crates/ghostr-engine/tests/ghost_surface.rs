@@ -98,6 +98,115 @@ fn vault(dir: &Path) -> Engine {
     engine
 }
 
+/// Runs an async body on a runtime built here rather than by `#[tokio::test]`.
+///
+/// The three attestation tests build their fixture with `scored_vault`, and
+/// under the `llm` feature `ops::issue_quests` drives its model call with its
+/// own `block_on`. Nesting one runtime inside another panics — with a message
+/// about runtimes, not about quests — so the fixture has to be built before any
+/// runtime exists and the async half started afterwards.
+///
+/// Not a production hazard: `serve` is a blocking thread-per-connection server
+/// and the CLI is synchronous, so nothing there is ever inside a runtime. It is
+/// a property of `#[tokio::test]` alone, which is why it is solved here rather
+/// than by making `issue_quests` async.
+fn on_runtime<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("runtime")
+        .block_on(future)
+}
+
+/// A vault with enough answered quests for a score to exist.
+///
+/// Thirty synthetic days, a persona, and quests issued and answered across
+/// several dates until the scorer's floor of ten held-out quests is cleared.
+/// Answered `Confirm`, which is not the interesting case for scoring but is for
+/// *publishing*: what is under test is whether the number reaches a relay bound
+/// to the right chain link, not what the number is.
+fn scored_vault(dir: &Path) -> Engine {
+    use ghostr_core::quest::Verdict;
+    use ghostr_core::sensitivity::{Sensitivity, TrustLevel};
+    use ghostr_core::time::Timestamp;
+    use ghostr_engine::ops;
+    use ghostr_testkit::{CorpusGenerator, FixedClock, SeededRng};
+
+    let pass = || SecretString::new("correct horse battery staple".to_owned());
+    let cheap = Argon2Params {
+        memory_kib: 8,
+        iterations: 1,
+        lanes: 1,
+    };
+    Engine::init(dir, &pass(), Tz::UTC, None, None, cheap).expect("init");
+
+    let clock = FixedClock::at(Timestamp::new(1_767_571_200_000, 0), Tz::UTC);
+    let engine = Engine::open_with(
+        dir,
+        &pass(),
+        Some(Box::new(clock.clone())),
+        Some(Box::new(SeededRng::from_seed(7))),
+    )
+    .expect("open");
+
+    let fixed = FixedClock::at(Timestamp::new(1_767_000_000_000, 0), Tz::UTC);
+    let corpus = CorpusGenerator::new(30).generate(&fixed, &SeededRng::from_seed(42));
+    let dek = engine.dek().expect("dek");
+    let sources: std::collections::BTreeSet<_> =
+        corpus.memories.iter().map(|m| m.source_id).collect();
+    for (index, source) in sources.iter().enumerate() {
+        engine
+            .store()
+            .upsert_source_with(
+                dek,
+                &ghostr_store::sqlite::NewSourceRow {
+                    id: *source,
+                    kind_tag: "markdown_vault",
+                    config: "{\"location\":\"/synthetic\"}",
+                    trust: TrustLevel::FirstParty,
+                    sensitivity: Sensitivity::Private,
+                },
+                [u8::try_from(index).unwrap_or(0); 24],
+            )
+            .expect("source");
+    }
+    for memory in &corpus.memories {
+        engine
+            .store()
+            .put_memory(dek, memory, engine.nonce())
+            .expect("put");
+    }
+
+    let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 5).expect("date");
+    for day in 0..30 {
+        ops::memoria(&engine, start + chrono::Duration::days(day)).expect("seal");
+    }
+    let candidate = ops::propose_persona(&engine).expect("propose");
+    ops::adopt_persona(&engine, &candidate).expect("adopt");
+
+    // Issued per day rather than all at once, and driven off the scorer rather
+    // than off a count of answers. Those are not the same number: the floor is
+    // ten *held-out, non-decoy* quests (I7), and an answered decoy counts
+    // toward neither. Counting answers got to fifteen and the scorer still said
+    // seven, which is the kind of fixture that makes a test fail for a reason
+    // that has nothing to do with what it is testing.
+    for day in 0..30 {
+        if ops::fidelity(&engine, ghostr_core::fidelity::ScoreWindow::AllTime).is_ok() {
+            return engine;
+        }
+        let date = start + chrono::Duration::days(day);
+        let Ok(issue) = ops::issue_quests(&engine, date) else {
+            continue;
+        };
+        for id in issue.issued {
+            let _ = ops::answer_quest(&engine, id, Verdict::Confirm);
+        }
+    }
+
+    ops::fidelity(&engine, ghostr_core::fidelity::ScoreWindow::AllTime)
+        .expect("thirty days of answered quests did not clear the scorer's floor");
+    engine
+}
+
 /// A fresh vault says nothing about itself in public.
 ///
 /// The default scope set is empty, so this is the state every user starts in,
@@ -327,6 +436,127 @@ async fn publishing_a_manifest_does_not_grant_sealing() {
     let err = ghostr_engine::ops::memoria(&engine, date)
         .expect_err("a replica must still refuse to seal");
     assert!(format!("{err}").contains("replica"), "{err}");
+}
+
+/// A stranger checks a published attestation end to end.
+///
+/// The criterion is "a reader can check its signature and its chain link", and
+/// the reader here has what a stranger has: the event off a relay and the
+/// author's pubkey. No vault, no corpus, no quests.
+#[test]
+fn a_reader_checks_a_published_attestation() {
+    use ghostr_core::fidelity::ScoreWindow;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = scored_vault(tmp.path());
+    let relay = ScopedRelay::with(&[PublishScope::Fidelity]);
+
+    let published = on_runtime(ghost::publish_attestation(
+        &engine,
+        &relay,
+        ScoreWindow::AllTime,
+    ))
+    .expect("publish");
+
+    let events = relay.events();
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+    assert_eq!(event.event.kind, 31786);
+
+    let author = engine
+        .keystore()
+        .account_pubkey(ghostr_core::identity::Account::Identity)
+        .unwrap();
+    let (decoded, check) = ghost::check_attestation(event, &author).expect("readable");
+
+    assert_eq!(decoded, published);
+    assert!(check.signature_valid, "a real publish did not verify");
+    assert!(check.author_matches, "signed by an unexpected key");
+    assert!(
+        check.chain_bound,
+        "the score is not bound to a chain link: seq {} link {}",
+        decoded.committed_at_seq,
+        decoded.link.short()
+    );
+
+    // The link the attestation names really is the link of that day. This is
+    // the check that makes the binding mean something rather than being a
+    // well-formed hash: a score pointing at the wrong day is a score anchored
+    // to a record it was not computed from.
+    let footage = engine
+        .store()
+        .get_footage(engine.dek().unwrap(), decoded.committed_at_seq)
+        .unwrap()
+        .expect("the day the score names");
+    assert_eq!(
+        decoded.link, footage.commitment.link,
+        "the attestation names a link that is not that day's"
+    );
+}
+
+/// A tampered attestation is rejected even though it parses.
+///
+/// A relay chooses what to return. An attacker who raises the score in a
+/// well-formed copy produces something that deserialises perfectly, and only
+/// the signature says otherwise (THREAT_MODEL §T2).
+#[test]
+fn an_altered_score_fails_the_signature_check() {
+    use ghostr_core::fidelity::ScoreWindow;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = scored_vault(tmp.path());
+    let relay = ScopedRelay::with(&[PublishScope::Fidelity]);
+
+    on_runtime(ghost::publish_attestation(
+        &engine,
+        &relay,
+        ScoreWindow::AllTime,
+    ))
+    .expect("publish");
+
+    let mut event = relay.events().into_iter().next().expect("an event");
+    let author = engine
+        .keystore()
+        .account_pubkey(ghostr_core::identity::Account::Identity)
+        .unwrap();
+
+    // Sanity: it passes before the edit, or the assertion below proves nothing.
+    let (before, check) = ghost::check_attestation(&event, &author).expect("readable");
+    assert!(check.signature_valid);
+
+    let mut payload = before.clone();
+    payload.overall = 0.99;
+    payload.sample_size = 9999;
+    event.event.content = serde_json::to_string(&payload).unwrap();
+
+    let (after, check) = ghost::check_attestation(&event, &author).expect("still parses");
+    assert_eq!(after.overall, 0.99, "the edit did not take");
+    assert!(
+        !check.signature_valid,
+        "a raised score passed the signature check"
+    );
+}
+
+/// An attestation is refused until the fidelity scope is enabled.
+#[test]
+fn an_attestation_is_refused_until_the_scope_is_enabled() {
+    use ghostr_core::fidelity::ScoreWindow;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let engine = scored_vault(tmp.path());
+    let relay = ScopedRelay::with(&[]);
+
+    let err = on_runtime(ghost::publish_attestation(
+        &engine,
+        &relay,
+        ScoreWindow::AllTime,
+    ))
+    .expect_err("a fresh vault must not publish its score");
+    assert!(
+        format!("{err}").to_lowercase().contains("disabl"),
+        "refused for the wrong reason: {err}"
+    );
+    assert!(relay.events().is_empty());
 }
 
 /// Every published event is in the egress log (I5).

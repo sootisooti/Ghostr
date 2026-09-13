@@ -1315,6 +1315,51 @@ pub(crate) fn manifest(m: &ghostr_nostr::payload::GhostManifest) -> String {
     )
 }
 
+/// Renders a published attestation, and what it does and does not establish.
+///
+/// The qualifications are not a footnote. A score published without its decoy
+/// rate is a number a reader cannot weigh (SPEC §4.4), and a score whose OTS
+/// proof has not confirmed is signed but not yet anchored — both are the
+/// difference between a measurement and a boast.
+pub(crate) fn attestation(a: &ghostr_nostr::payload::FidelityAttestation) -> String {
+    let anchored = if a.ots_base64.is_empty() {
+        "no proof yet — the day this was computed at is not anchored.\n\
+         Run `ghostr anchor`; a proof confirms in a Bitcoin block, not instantly."
+    } else {
+        "proof attached — a reader can check it against Bitcoin themselves."
+    };
+
+    format!(
+        "published {} over {}\n\
+         \n\
+         score   {:.0}% ({:.0}%–{:.0}% at 95%, n={})\n\
+         decoys  {:.0}% confirmed — the ghost agreeing with claims that were wrong\n\
+         calib   {:.3} expected error\n\
+         bound   seq {} · {}\n\
+         \n\
+         {}\n\
+         {}",
+        a.as_of,
+        a.window,
+        a.overall * 100.0,
+        a.ci.0 * 100.0,
+        a.ci.1 * 100.0,
+        a.sample_size,
+        a.decoy_confirm_rate * 100.0,
+        a.ece,
+        a.committed_at_seq,
+        a.link.short(),
+        if a.converged {
+            "converged — every criterion in SPEC §5.3 is met."
+        } else {
+            "not converged — published anyway, flagged. Suppressing these would\n\
+             make the published ones look like a milestone rather than a\n\
+             measurement."
+        },
+        anchored,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,7 +29,9 @@ use ghostr_crypto::{Keystore, Signer};
 use ghostr_nostr::client::{PublishScope, RelayClient};
 use ghostr_nostr::codec;
 use ghostr_nostr::kinds::Kind;
-use ghostr_nostr::payload::{GhostManifest, GhostPolicy, RevocationNotice, RevocationTarget};
+use ghostr_nostr::payload::{
+    FidelityAttestation, GhostManifest, GhostPolicy, RevocationNotice, RevocationTarget,
+};
 
 use crate::engine::Engine;
 
@@ -277,6 +279,248 @@ impl crate::config::Config {
     }
 }
 
+/// Builds the attestation this vault would publish for a window.
+///
+/// Reads the vault and returns the document. Separated from publishing for the
+/// same reason as [`manifest`]: a public claim is permanent, and "publish and
+/// see" is not something a relay offers.
+///
+/// # What is refused
+///
+/// A score the scorer will not compute — fewer than the window's floor of
+/// held-out quests — is not published as a low number. There is no honest
+/// attestation to make from a sample too small to have a meaning, and
+/// `ops::fidelity` already refuses it, so this simply does not catch that
+/// error (SPEC §4.4, I7).
+///
+/// A score that is computed but **unconverged** does publish, flagged. That is
+/// the opposite choice and deliberate: suppressing unconverged scores would
+/// make every published one look like a milestone rather than a measurement.
+///
+/// # Errors
+///
+/// Returns an error if the vault is locked, the sample is too small, or the
+/// chain has no link at the sequence the score was computed against.
+pub fn attestation(
+    engine: &Engine,
+    window: ghostr_core::fidelity::ScoreWindow,
+) -> crate::Result<FidelityAttestation> {
+    let score = crate::ops::fidelity(engine, window)?;
+    let seq = score.committed_at_seq;
+
+    // The link the score is bound to. Without it the attestation is a number
+    // with a signature — true of the person, and unanchored to any record they
+    // cannot later rewrite. §9.4's whole sentence is "here is my score, and
+    // here is the Bitcoin-anchored commitment it was computed from".
+    let footage = engine
+        .store()
+        .get_footage(engine.dek()?, seq)?
+        .ok_or_else(|| crate::Error::Config {
+            detail: format!("no sealed day at seq {seq} to bind the score to"),
+        })?;
+
+    // The proof, when there is one. `None` rather than an error: a day sealed
+    // today has no confirmed OTS proof for hours, and refusing to publish until
+    // Bitcoin catches up would make the feature unusable on the day a user
+    // wants it. A reader can see the proof is absent and weigh it.
+    let ots_base64 = engine
+        .store()
+        .get_anchor(seq)?
+        .and_then(|record| record.ots)
+        .map(|bytes| base64_encode(&bytes))
+        .unwrap_or_default();
+
+    Ok(FidelityAttestation {
+        chain_id: engine.store().chain_id()?,
+        as_of: score.as_of,
+        window: window_tag(window)?.to_owned(),
+        overall: score.overall,
+        sample_size: score.sample_size,
+        ci: score.confidence_interval,
+        ece: score.calibration.ece,
+        // Inside the payload, never alongside it. A reader must not be able to
+        // receive the score without the number that discounts it: a ghost that
+        // confirms decoys is agreeing with claims that were deliberately wrong,
+        // and its agreement rate means nothing without that (SPEC §4.4).
+        decoy_confirm_rate: score.integrity.decoy_confirm_rate,
+        converged: score.converged,
+        committed_at_seq: seq,
+        link: footage.commitment.link,
+        ots_base64,
+    })
+}
+
+/// The wire name of a score window.
+///
+/// Hand-written. It lands in a permanent public document, so a variant rename
+/// would change what an attestation already on a relay appears to claim —
+/// `rolling_30` and `rolling_90` are different statements about how much
+/// evidence is behind a number.
+///
+/// `ScoreWindow` is `#[non_exhaustive]` and this is a downstream crate, so the
+/// wildcard arm is required. It **refuses** rather than guessing: a window this
+/// build cannot name would otherwise be published under some other window's
+/// label, and a reader weighing "90 days" against a number computed over 30 has
+/// no way to notice. Not publishing is the failure a user can see.
+fn window_tag(window: ghostr_core::fidelity::ScoreWindow) -> crate::Result<&'static str> {
+    use ghostr_core::fidelity::ScoreWindow;
+
+    match window {
+        ScoreWindow::Rolling30 => Ok("rolling_30"),
+        ScoreWindow::Rolling90 => Ok("rolling_90"),
+        ScoreWindow::AllTime => Ok("all_time"),
+        _ => Err(crate::Error::Config {
+            detail: "this build cannot name that score window, so it will not publish one"
+                .to_owned(),
+        }),
+    }
+}
+
+/// Base64, standard alphabet with padding.
+///
+/// Hand-rolled rather than a dependency: this is the only base64 in the crate,
+/// and CLAUDE.md §4.9 asks for a justification per dependency that a
+/// forty-line encoder does not earn.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let indices = [(n >> 18) & 63, (n >> 12) & 63, (n >> 6) & 63, n & 63];
+        for (i, index) in indices.iter().enumerate() {
+            // Padding covers the bytes the chunk did not have. Each output
+            // character carries 6 bits, so a 1-byte chunk fills two of them and
+            // a 2-byte chunk three.
+            if i > chunk.len() {
+                out.push('=');
+            } else {
+                out.push(char::from(ALPHABET[*index as usize]));
+            }
+        }
+    }
+    out
+}
+
+/// Publishes the attestation.
+///
+/// # Errors
+///
+/// Returns an error if the vault is locked, the `fidelity` scope is not
+/// enabled, the sample is too small, or every relay refused.
+pub async fn publish_attestation(
+    engine: &Engine,
+    relays: &dyn RelayClient,
+    window: ghostr_core::fidelity::ScoreWindow,
+) -> crate::Result<FidelityAttestation> {
+    let payload = attestation(engine, window)?;
+    let key = engine.keystore().key_ref(Account::Identity)?;
+
+    // The `d` tag is the window, so today's rolling-90 replaces yesterday's
+    // rather than accumulating a public history of every daily score. That is
+    // a privacy decision as much as a storage one: a relay holding one
+    // attestation per day per window is a graph of the user's fidelity over
+    // time, which nobody asked to publish (§9.1).
+    let identifier = payload.window.clone();
+
+    let event = codec::encode(
+        engine.keystore(),
+        key,
+        Kind::FidelityAttestation,
+        &identifier,
+        engine.now().utc_millis().unsigned_abs() / 1000,
+        &payload,
+        engine.rng().salt(),
+    )
+    .await?;
+
+    let sig = engine.keystore().sign_event(key, &event).await?;
+    let signed = ghostr_crypto::event::SignedEvent {
+        id: event.id(),
+        event,
+        sig,
+    };
+
+    crate::sync::publish_logged(
+        engine,
+        relays,
+        signed,
+        PublishScope::Fidelity,
+        "fidelity_attestation",
+        false,
+    )
+    .await?;
+
+    Ok(payload)
+}
+
+/// What a reader learns from an attestation they did not write.
+///
+/// The half that makes the claim checkable rather than merely publishable. A
+/// third party has the event and the author's npub, and nothing else — no
+/// vault, no corpus, no quests. This says what they can establish.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestationCheck {
+    /// The signature verifies and the id matches the body.
+    ///
+    /// False means the relay served something forged or altered. Nothing below
+    /// means anything when this is false.
+    pub signature_valid: bool,
+    /// The event was signed by the key the reader asked about.
+    ///
+    /// Separate from `signature_valid`, and the distinction matters: an event
+    /// can be perfectly signed by somebody else. A reader who checks only the
+    /// signature has verified that *a* person made this claim.
+    pub author_matches: bool,
+    /// The payload names a chain link.
+    ///
+    /// An attestation whose `link` is all zeroes, or whose `committed_at_seq`
+    /// is zero, is a score bound to nothing.
+    pub chain_bound: bool,
+    /// An OTS proof is present.
+    ///
+    /// Not that it is *valid* — verifying one needs a Bitcoin node or a
+    /// calendar, which a reader may not have and this function does not do.
+    /// Reported as its own field so a caller cannot mistake "present" for
+    /// "confirmed".
+    pub proof_present: bool,
+}
+
+/// Checks an attestation as a stranger would.
+///
+/// Takes the raw event and the pubkey the reader believes they are asking
+/// about. Deliberately returns a report rather than a bool: "this failed" tells
+/// a reader nothing about whether to distrust the person or the relay, and
+/// those call for different responses.
+///
+/// # Errors
+///
+/// Returns an error if the event's content is not a readable attestation. That
+/// is not a failed check — it means this was never an attestation at all.
+pub fn check_attestation(
+    event: &ghostr_crypto::event::SignedEvent,
+    expected_author: &ghostr_core::identity::PublicKey,
+) -> crate::Result<(FidelityAttestation, AttestationCheck)> {
+    let payload: FidelityAttestation =
+        serde_json::from_str(&event.event.content).map_err(|_| crate::Error::Config {
+            detail: "event content is not a fidelity attestation".to_owned(),
+        })?;
+
+    let check = AttestationCheck {
+        signature_valid: event.verify().is_ok(),
+        author_matches: event.event.pubkey == *expected_author,
+        chain_bound: payload.committed_at_seq > 0
+            && payload.link != ghostr_core::hash::Hash32::from_bytes([0; 32]),
+        proof_present: !payload.ots_base64.is_empty(),
+    };
+    Ok((payload, check))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +626,183 @@ mod tests {
         let fidelity = with("fidelity").ghost_policy();
         assert!(fidelity.publishes_fidelity);
         assert!(!fidelity.may_publish_notes);
+    }
+
+    /// The hand-rolled base64 matches the standard alphabet and padding.
+    ///
+    /// Vectors from RFC 4648 §10, which is the point of not writing my own
+    /// expected values: an encoder tested against its own output is a test that
+    /// the function is deterministic, not that it is base64. The `.ots` proof
+    /// travels in a public document and a reader decodes it with a library, so
+    /// "close enough" is a proof nobody can check.
+    #[test]
+    fn base64_matches_rfc_4648() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+
+        // The high end of the alphabet, which a table typo would miss: `+` and
+        // `/` are the two characters an implementation most often gets wrong by
+        // reaching for the URL-safe variant.
+        assert_eq!(base64_encode(&[0xfb, 0xff, 0xbf]), "+/+/");
+        assert_eq!(base64_encode(&[0x00, 0x00, 0x00]), "AAAA");
+        assert_eq!(base64_encode(&[0xff, 0xff, 0xff]), "////");
+    }
+
+    /// Every window has a name and no two share one.
+    ///
+    /// The names are part of the claim: a reader weighing "90 days" against a
+    /// number computed over 30 needs the label to be true.
+    #[test]
+    fn every_window_has_its_own_frozen_name() {
+        use ghostr_core::fidelity::ScoreWindow;
+
+        assert_eq!(window_tag(ScoreWindow::Rolling30).unwrap(), "rolling_30");
+        assert_eq!(window_tag(ScoreWindow::Rolling90).unwrap(), "rolling_90");
+        assert_eq!(window_tag(ScoreWindow::AllTime).unwrap(), "all_time");
+    }
+
+    /// A stranger's check separates "forged" from "somebody else's".
+    ///
+    /// Both are failures and they call for different responses: one means the
+    /// relay is lying, the other means the reader asked about the wrong key.
+    /// A single bool would collapse them.
+    #[test]
+    fn a_reader_can_tell_a_forgery_from_the_wrong_author() {
+        use ghostr_core::identity::PublicKey;
+        use ghostr_crypto::event::{SignedEvent, UnsignedEvent};
+
+        let payload = FidelityAttestation {
+            chain_id: ghostr_core::ids::ChainId::new(1_700_000_000_000, [1; 10]),
+            as_of: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).expect("date"),
+            window: "rolling_90".to_owned(),
+            overall: 0.87,
+            sample_size: 241,
+            ci: (0.82, 0.91),
+            ece: 0.037,
+            decoy_confirm_rate: 0.04,
+            converged: true,
+            committed_at_seq: 412,
+            link: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::Link, b"412"),
+            ots_base64: "AAEC".to_owned(),
+        };
+
+        // Never signed, so the signature check must fail. That is the point:
+        // this is what a relay serving a fabricated attestation looks like.
+        let author = PublicKey::from_bytes([9; 32]);
+        let event = SignedEvent {
+            id: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::Node, b"forged"),
+            event: UnsignedEvent {
+                pubkey: author,
+                created_at: 0,
+                kind: 31786,
+                tags: Vec::new(),
+                content: serde_json::to_string(&payload).expect("serialise"),
+            },
+            sig: ghostr_crypto::event::Signature::from_bytes([0; 64]),
+        };
+
+        let (decoded, check) = check_attestation(&event, &author).expect("readable");
+        assert_eq!(decoded, payload);
+        assert!(!check.signature_valid, "an unsigned event verified");
+        assert!(
+            check.author_matches,
+            "the author is who the reader asked for"
+        );
+        assert!(check.chain_bound, "the payload names seq 412 and a link");
+        assert!(check.proof_present);
+
+        // Asked about a different key: the signature is no more valid, and the
+        // author now mismatches too. Separately reported.
+        let (_, other) = check_attestation(&event, &PublicKey::from_bytes([8; 32])).expect("ok");
+        assert!(!other.author_matches);
+    }
+
+    /// A score bound to nothing is visible as such.
+    ///
+    /// §9.4's claim is "here is my score *and* the commitment it was computed
+    /// from". An attestation with a zero link is the first half alone, and a
+    /// reader must be able to see that rather than reading a signed number as
+    /// an anchored one.
+    #[test]
+    fn an_unbound_score_does_not_read_as_anchored() {
+        use ghostr_core::identity::PublicKey;
+        use ghostr_crypto::event::{SignedEvent, UnsignedEvent};
+
+        let payload = FidelityAttestation {
+            chain_id: ghostr_core::ids::ChainId::new(1_700_000_000_000, [1; 10]),
+            as_of: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).expect("date"),
+            window: "rolling_30".to_owned(),
+            overall: 0.99,
+            sample_size: 10,
+            ci: (0.9, 1.0),
+            ece: 0.0,
+            decoy_confirm_rate: 0.0,
+            converged: false,
+            committed_at_seq: 0,
+            link: ghostr_core::hash::Hash32::from_bytes([0; 32]),
+            ots_base64: String::new(),
+        };
+
+        let author = PublicKey::from_bytes([4; 32]);
+        let event = SignedEvent {
+            id: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::Node, b"unbound"),
+            event: UnsignedEvent {
+                pubkey: author,
+                created_at: 0,
+                kind: 31786,
+                tags: Vec::new(),
+                content: serde_json::to_string(&payload).expect("serialise"),
+            },
+            sig: ghostr_crypto::event::Signature::from_bytes([0; 64]),
+        };
+
+        let (_, check) = check_attestation(&event, &author).expect("readable");
+        assert!(!check.chain_bound, "a zero link read as a chain binding");
+        assert!(!check.proof_present, "an absent proof read as present");
+    }
+
+    /// The decoy rate cannot be dropped from a published attestation.
+    ///
+    /// §4.4: a reader must not be able to receive the score without the number
+    /// that discounts it. Asserted over the serialised form, because that is
+    /// what a reader parses — a field skipped on serialisation would leave the
+    /// struct looking complete.
+    #[test]
+    fn a_published_score_always_carries_its_decoy_rate() {
+        let payload = FidelityAttestation {
+            chain_id: ghostr_core::ids::ChainId::new(1_700_000_000_000, [1; 10]),
+            as_of: chrono::NaiveDate::from_ymd_opt(2026, 8, 25).expect("date"),
+            window: "rolling_90".to_owned(),
+            overall: 0.87,
+            sample_size: 241,
+            ci: (0.82, 0.91),
+            ece: 0.037,
+            decoy_confirm_rate: 0.04,
+            converged: false,
+            committed_at_seq: 412,
+            link: ghostr_core::hash::tagged_hash(ghostr_core::hash::Tag::Link, b"412"),
+            ots_base64: String::new(),
+        };
+
+        let json = serde_json::to_value(&payload).expect("serialise");
+        let object = json.as_object().expect("object");
+        assert!(
+            object.contains_key("decoy_confirm_rate"),
+            "the score published without the number that discounts it"
+        );
+        assert!(
+            object.contains_key("converged"),
+            "an unconverged score published without saying so"
+        );
+        assert!(
+            object.contains_key("sample_size") && object.contains_key("ci"),
+            "a point estimate published with no sense of its width"
+        );
     }
 
     /// The chain version numbers are frozen.

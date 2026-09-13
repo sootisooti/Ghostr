@@ -122,6 +122,14 @@ enum Command {
         /// The window: `30`, `90`, or `all`.
         #[arg(long, default_value = "30")]
         window: String,
+
+        /// Publish the score as a signed, chain-bound public claim.
+        ///
+        /// Says: here is my ghost's score, and here is the Bitcoin-anchored
+        /// commitment to the quest record it was computed from. Needs the
+        /// `fidelity` publish scope (SPEC §9.4).
+        #[arg(long)]
+        publish: bool,
     },
 
     /// Submit the chain tip to OpenTimestamps. The only networked command.
@@ -420,7 +428,7 @@ fn run(cli: Cli) -> Result<()> {
             text,
             severity,
         }) => cmd_quest_answer(&dir, &id, &verdict, text.as_deref(), &severity),
-        Command::Fidelity { window } => cmd_fidelity(&dir, &window),
+        Command::Fidelity { window, publish } => cmd_fidelity(&dir, &window, publish),
         Command::Footage(FootageCommand::List) => cmd_footage_list(&dir),
         Command::Footage(FootageCommand::Show { id }) => cmd_footage_show(&dir, id),
         Command::Anchor => cmd_anchor(&dir),
@@ -829,7 +837,7 @@ fn parse_verdict(
     })
 }
 
-fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
+fn cmd_fidelity(dir: &std::path::Path, window: &str, publish: bool) -> Result<()> {
     use ghostr_core::fidelity::ScoreWindow;
 
     let engine = open(dir)?;
@@ -839,6 +847,16 @@ fn cmd_fidelity(dir: &std::path::Path, window: &str) -> Result<()> {
         "all" | "alltime" => ScoreWindow::AllTime,
         other => bail!("`{other}` is not a window; try `30`, `90`, or `all`"),
     };
+
+    if publish {
+        let relays = relay_client(&engine)?;
+        let attestation = block_on(ghostr_engine::ghost::publish_attestation(
+            &engine, &relays, window,
+        ))
+        .context("publishing the fidelity attestation")?;
+        println!("{}", render::attestation(&attestation));
+        return Ok(());
+    }
 
     match ops::fidelity(&engine, window) {
         Ok(score) => println!("{}", render::fidelity(&score)),

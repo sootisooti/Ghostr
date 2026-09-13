@@ -368,12 +368,30 @@ somebody else's notes is counted and reported, not silently ingested.
       `no_public_field_is_derived_from_the_corpus` rather than assumed: every
       field of the published JSON must be a key, a hash, a count, or a value the
       user typed. If a human answers Q27 the other way, that test is what fails.
-- [ ] A `FidelityAttestation` can be published, and a reader can check its
-      signature and its chain link. Same shape: the type and its codec are in
-      `ghostr-nostr` with tests; no engine op and no `publish attestation`
-      command exist. §9.4's "here is my ghost's score, and here is the
-      Bitcoin-anchored commitment it was computed from" is a claim nothing can
-      currently make.
+- [x] A `FidelityAttestation` can be published, and a reader can check its
+      signature and its chain link. `ghostr fidelity --publish`, plus the reader
+      half — `ghost::check_attestation` takes the raw event and the pubkey a
+      reader believes they are asking about, which is what a stranger has.
+
+      It returns a report rather than a bool, because the failures call for
+      different responses: a bad signature means the relay is lying, a mismatched
+      author means the reader asked about the wrong key, and an unbound score is
+      a signed number anchored to nothing. `proof_present` is deliberately not
+      `proof_valid` — checking an OTS proof needs a Bitcoin node or a calendar,
+      and a field that implied otherwise would be worse than an absent one.
+
+      `an_altered_score_fails_the_signature_check` raises a published score in a
+      well-formed copy: it deserialises perfectly and only the signature says
+      otherwise, which is exactly the hostile relay of THREAT_MODEL §T2. The
+      base64 for the `.ots` proof is checked against RFC 4648 §10 vectors rather
+      than against its own output — an encoder tested against itself proves it
+      is deterministic, not that it is base64.
+
+      `decoy_confirm_rate` and `converged` travel inside the payload, asserted
+      over the serialised form: a reader must not be able to receive the score
+      without the number that discounts it (§4.4), and an unconverged score
+      publishes flagged rather than being suppressed, since hiding them would
+      make the published ones look like milestones rather than measurements.
 - [ ] A ghost-authored kind-1 note can be published under an explicit per-scope
       opt-in, off by default. `GhostNoteBuilder` makes disclosure unforgeable at
       construction — that part is done and its own criterion above is true — but
