@@ -400,7 +400,7 @@ mod tests {
         .await
         .expect("encode");
 
-        // I9: what a relay stores must carry no readable identity data. The
+        // I9: a private kind carries no corpus plaintext at all. The
         // date is in the `d` tag by design — it is what makes the record
         // addressable — but nothing from the body may appear.
         assert!(!event.content.contains("river"));
