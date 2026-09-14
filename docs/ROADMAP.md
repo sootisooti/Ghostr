@@ -309,10 +309,17 @@ somebody else's notes is counted and reported, not silently ingested.
       before any state is touched, and the store's own duplicate-`seq` check
       remains behind it — the replica rule is what makes the refusal legible
       rather than a constraint violation surfacing much later.
-- [x] No plaintext identity data on any relay — asserted over what `sync`
-      actually sent, for footage compiled from real notes rather than a
-      hand-built event, and including that the identity pubkey never appears
+- [x] No corpus plaintext on any relay — asserted over what `sync` actually
+      sent, for footage compiled from real notes rather than a hand-built
+      event, and including that the identity pubkey never appears
       (`no_plaintext_and_no_identity_reaches_a_relay`).
+
+      Scoped to `sync` because `sync` publishes only encrypted kinds. The
+      public kinds are plaintext by design and are held to the other half of
+      I9 — every field a key, a hash, a count, a score, or a string the user
+      wrote — by `no_public_field_is_derived_from_the_corpus`. I9's wording was
+      narrowed to name that split rather than leave it to inference (SPEC §14
+      Q27, resolved).
 - [x] Every ghost-authored event carries disclosure tags; a test proves an event
       without them cannot be constructed — `GhostNoteBuilder` is the only
       constructor and emits them unconditionally

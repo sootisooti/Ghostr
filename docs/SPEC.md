@@ -89,7 +89,7 @@ Violating any of these is a bug, not a tradeoff.
 | I6 | The ghost commits to its answer and confidence *before* the user sees the quest. |
 | I7 | The fidelity score is computed only over held-out quests. |
 | I8 | Secret key material never appears in a domain type, a log line, an error message, or a `Debug` impl. |
-| I9 | Nothing published to a relay contains plaintext identity data. |
+| I9 | No memory content, persona facet, entity name, or key material leaves the device in plaintext. A public event carries only keys, hashes, counts, scores, and strings the user wrote. |
 | I10 | Ghost-authored public content is always tagged as ghost-authored. |
 
 ---
@@ -1960,9 +1960,10 @@ for the built form.
 
 ---
 
-**Q27 — What may a plaintext public event contain, given I9?**
+~~**Q27 — What may a plaintext public event contain, given I9?**~~ **Resolved: the loose reading. I9 now names what it protects.**
 
-I9 says *"Nothing published to a relay contains plaintext identity data."*
+I9 said, at the time this was raised, *"Nothing published to a relay contains
+plaintext identity data."*
 §9.1's table says kind `31780` is plaintext JSON and **Public** — "it's an
 attestation, it has to be readable" — and the payload carries `ghost_pubkey`,
 `chain_id` and `genesis_link`. Kinds `31786` and `31788` are the same shape.
@@ -1980,24 +1981,37 @@ published at all and §8.2's "provably his ghost" is unbuildable. Under the loos
 reading I9 means *corpus* plaintext — memories, persona facets, entity names —
 and public keys the user is deliberately vouching for are not what it protects.
 
-> **Recommendation:** the loose reading, stated explicitly rather than left to
-> inference, by narrowing I9 to name what it protects: *no memory content,
-> persona facet, entity name, or key material leaves the device in plaintext.*
-> A ghost pubkey in a manifest is not a leak, it is the whole artifact; a
-> `chain_id` is an opaque UUID the user chose to bind to their identity by
-> signing it. What must stay true is that nothing in a public event is derived
-> from the corpus, and that is a checkable property rather than a slogan — a
-> table test over every public payload's fields, asserting each is a key, a
-> hash, a count, a score, or a user-authored string.
->
-> Narrowing an invariant is exactly the move CLAUDE.md §9 forbids doing to match
-> a shortcut in the code, so it is worth naming why this is not that: the code
-> has no shortcut here, there is no implementation yet. It is two clauses of the
-> spec disagreeing, and a human has to say which one was meant.
+**Decided by the repository owner**, who is the human this question was
+escalated to. I9 is narrowed to say what it protects rather than leaving it to
+inference:
 
+> No memory content, persona facet, entity name, or key material leaves the
+> device in plaintext. A public event carries only keys, hashes, counts, scores,
+> and strings the user wrote.
+
+The strict reading is rejected because it makes §8.2's "provably his ghost"
+unbuildable: a manifest nobody can read attests nothing. A ghost pubkey in a
+manifest is not a leak, it is the whole artifact; a `chain_id` is an opaque UUID
+the user chose to bind to their identity by signing it.
+
+**What replaced the slogan is a checkable property.** "Nothing in a public event
+is derived from the corpus" is asserted field by field over the serialised JSON
+of every public payload, in
+`ghostr_engine::ghost::tests::no_public_field_is_derived_from_the_corpus` — each
+field must be a key, a hash, a count, a score, or a user-authored string. A new
+field on a public event fails that test until someone classifies it, which is
+the difference between an invariant and a sentence.
+
+**On narrowing an invariant at all.** CLAUDE.md §9 forbids softening a claim in
+the docs to match a shortcut in the code, and this is not that: there was no
+shortcut, there was no implementation. Two clauses of the spec disagreed — I9
+against §9.1's kind table, with THREAT_MODEL §T2 asserting both four lines
+apart — and a human said which was meant. The wording is narrower and the
+enforcement is stronger than it was, because before this there was nothing
+enforcing either reading.
 ---
 
-**Q28 — Is publishing to a relay subject to the egress log?**
+~~**Q28 — Is publishing to a relay subject to the egress log?**~~ **Resolved: yes, and it is now built.**
 
 I5: *"Nothing leaves the device without passing the egress policy and being
 written to the egress log."*
@@ -2016,22 +2030,26 @@ what is at stake: a manifest, an attestation and a ghost note are plaintext,
 public, permanent, and attributable to the identity key. A user auditing what
 their vault has said about them in public would find the log silent.
 
-> **Recommendation:** yes, and it needs `TaskKind` to grow a non-model variant —
-> or, better, for the log to stop being keyed on a model-shaped enum. The second
-> is the real fix and the larger one. The minimum that satisfies I5 is that
-> every publish appends an entry naming the relay, the kind, the scope that
-> allowed it, and the byte count, with no payload and no digest of one for a
-> private kind (a digest of self-encrypted ciphertext is a correlation handle,
-> not an audit aid).
->
-> Until then the honest statement is that **I5 is met for model egress and not
-> for relay egress**, which is a gap in the implementation rather than in the
-> invariant, and THREAT_MODEL §T2's mitigation list should say so rather than
-> implying the scope gate is the whole of it.
+**Decided: yes.** Every relay publish appends an egress entry naming the relay,
+the kind, the scope that allowed it, and the byte count — no payload, and no
+digest of one for a private kind, since a digest of self-encrypted ciphertext is
+a correlation handle rather than an audit aid.
 
+`TaskKind` grew a non-model variant rather than the log being re-keyed. The
+larger fix — a log not shaped like a model call — is still the better one and is
+not done; it is recorded here rather than left as a comment in the enum, because
+the next person to add a non-model egress path will meet the same seam.
+
+**I5 is now met for both halves on both paths.** It was met for model egress and
+half-met for relay egress: publishing passed `PublishScope`, which is a real
+policy, and was written to no log at all. That was defensible while everything
+leaving was ciphertext a relay cannot read. It stopped being defensible when a
+manifest, an attestation and a ghost note are plaintext, public, permanent and
+attributable to the identity key — a user auditing what their vault had said
+about them in public would have found `ghostr egress` silent.
 ---
 
-**Q29 — What identifies the sealing device in a manifest?**
+~~**Q29 — What identifies the sealing device in a manifest?**~~ **Resolved: (1), a random per-vault id, with the fork case named as uncovered.**
 
 `GhostManifest.sealing_device` is a `String` and §8.2 says it is there "so a fork
 is detectable by a third party: two devices sealing the same chain would produce
@@ -2054,18 +2072,26 @@ field, and three candidates each say something different:
 3. **The identity key's own fingerprint over a per-install secret.** Detects the
    fork case correctly and costs a new derived secret nobody asked for.
 
-> **Recommendation:** (1), minted at `init` into `meta` beside `DeviceRole`,
-> **and the fork case named as not-yet-covered rather than quietly missed.**
-> A restored replica keeps the id it was restored with only if `restore` copies
-> it, and it must not — a replica mints its own, so two machines under one seed
-> hold different ids and a manifest naming one of them is a statement a verifier
-> can check. That is the whole of what (1) buys; it does not detect a
-> deliberately cloned vault, and the spec should say so rather than let the
-> field imply it does.
->
-> Publishing a manifest does **not** make handover buildable and must not be
-> read as doing so. Q10's "a replica stays a replica" is unchanged by this.
+**Decided: (1)** — a random id minted at `init` into `meta` beside `DeviceRole`,
+reported by `ghostr status`. Stable, meaningless, and it leaks nothing.
 
+`restore` mints a fresh id rather than copying one, which is the whole of what
+this buys: two machines restored from the same seed hold different ids, so a
+manifest naming one of them is a statement a verifier can check.
+
+**It does not detect a deliberately cloned vault**, and that is stated here
+rather than left for the field to imply. An attacker who copies the `meta` table
+copies the id with it. What the field catches is the accident — a second machine
+sealing the same chain because its owner forgot the first one — not the
+adversary. Detecting that needs option (3), a fingerprint over a per-install
+secret, and nobody has asked for it.
+
+Option (2), a user-chosen label, was rejected for a reason worth keeping: a
+free-text field in a public document is somewhere a user will eventually put
+their real name.
+
+**Publishing a manifest does not make handover buildable** and must not be read
+as doing so. Q10's "a replica stays a replica" is unchanged.
 ---
 
 **Q30 — Is `ghostr ghost note` a publishing command or a drafting one?**

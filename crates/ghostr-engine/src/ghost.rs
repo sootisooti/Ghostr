@@ -10,15 +10,18 @@
 //!
 //! # Why publishing this does not violate I9
 //!
-//! I9 says nothing published to a relay contains plaintext identity data, and
-//! §9.1 says kind 31780 is plaintext JSON and must be readable. Both are in the
-//! spec; SPEC §14 Q27 is where that contradiction is written down rather than
-//! resolved in a function body. This module proceeds under Q27's recommended
-//! reading — I9 protects *corpus* plaintext, and a key the user is deliberately
-//! vouching for is the artifact rather than a leak — and makes it checkable
-//! instead of assumed: [`tests::no_public_field_is_derived_from_the_corpus`]
-//! asserts every field of every public payload is a key, a hash, a count, or a
-//! value the user typed.
+//! I9 used to say nothing published to a relay contains plaintext identity
+//! data, while §9.1 said kind 31780 is plaintext JSON and must be readable.
+//! Both were in the spec, and SPEC §14 Q27 is where that contradiction was
+//! written down rather than settled in a function body.
+//!
+//! **Q27 is resolved.** I9 now names what it protects — no memory content,
+//! persona facet, entity name, or key material leaves the device in plaintext —
+//! so a key the user is deliberately vouching for is the artifact rather than a
+//! leak. The half that constrains this module is checkable rather than assumed:
+//! [`tests::no_public_field_is_derived_from_the_corpus`] asserts every field of
+//! every public payload is a key, a hash, a count, a score, or a string the
+//! user wrote, so a new public field fails until someone classifies it.
 //!
 //! If a human answers Q27 the other way, that test is what fails, and the
 //! feature is what has to change. That is the point of writing it as a test

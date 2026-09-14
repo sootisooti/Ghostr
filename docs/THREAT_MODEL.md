@@ -131,7 +131,17 @@ body, not beside the commitment digest.
   anchor receipts (31784) / fidelity attestations (31786) *if* published.
 - Correlation across users: who publishes near whom, in what pattern.
 
-**Does not get:** any plaintext. Ever. (SPEC I9)
+**Does not get:** any memory content, persona facet, entity name, or key
+material — ever, in any event, public or private (SPEC I9).
+
+That is narrower than "any plaintext. Ever.", which is what this line used to
+say four lines below the list of public events above it. Both sentences were
+here at once and the contradiction cost nothing while nothing published a
+manifest; the moment one did, the code had to pick a reading (SPEC §14 Q27,
+resolved). What a relay *does* get in plaintext is the public events named
+above, and what those may contain is fixed by a test rather than a promise:
+every field of every public payload must be a key, a hash, a count, a score, or
+a string the user wrote.
 
 **Also does:** a relay is not only an observer. It chooses what to return, so it
 can serve an event nobody signed, an event signed by a key that is not the one

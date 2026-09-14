@@ -132,7 +132,7 @@ now."
 | I6 | The ghost commits to its answer before the user sees the quest. |
 | I7 | The fidelity score is computed only over held-out quests. |
 | I8 | Secret key material never appears in a domain type, log, error, or `Debug`. |
-| I9 | Nothing published to a relay contains plaintext identity data. |
+| I9 | No memory content, persona facet, entity name, or key material leaves the device in plaintext. A public event carries only keys, hashes, counts, scores, and strings the user wrote. |
 | I10 | Ghost-authored public content is always tagged as ghost-authored. |
 
 If a task seems to require violating one, stop and raise it. It means either the
